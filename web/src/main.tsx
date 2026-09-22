@@ -17,6 +17,9 @@ import {
   installBrowserConsoleErrorRedaction,
   installBrowserErrorEventRedaction,
 } from "./lib/errorReporting";
+import { captureManagedLoginProof } from "./lib/managedLogin";
+
+captureManagedLoginProof();
 
 const queryClient = new QueryClient({
   defaultOptions: {

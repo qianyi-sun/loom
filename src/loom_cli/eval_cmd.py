@@ -1009,6 +1009,8 @@ def _batch_delivery_bundle(args: argparse.Namespace) -> int:
             payload["mode"] = args.mode
         if args.supplemental_batch_id:
             payload["supplemental_batch_ids"] = list(args.supplemental_batch_id)
+        if getattr(args, "trial_id", None):
+            payload["selection"] = {"trial_ids": list(args.trial_id)}
         expected_sha = ""
         output: Path | None = None
         actual_hash = hashlib.sha256()
@@ -1911,6 +1913,16 @@ def dispatch(argv: list[str]) -> int:
             "Supplemental rerun batch UUID in selection priority order. "
             "Repeat for primary failed-case and targeted reruns. When omitted, "
             "the service uses linked rerun descendants by created_at/id order."
+        ),
+    )
+    p_bdel.add_argument(
+        "--trial-id",
+        action="append",
+        default=[],
+        help=(
+            "Export only this trial UUID from the authorized batch family. "
+            "Repeat to select multiple trials. When omitted, every main "
+            "task/sample/combination coordinate must resolve (default)."
         ),
     )
     p_bdel.add_argument(

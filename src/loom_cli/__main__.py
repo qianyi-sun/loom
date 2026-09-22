@@ -44,6 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run local evaluations and manage Loom datasets, providers, "
             "service-mode evaluations, workers, and deployments."
         ),
+        epilog="For isolated credentials: loom --context NAME COMMAND ... (put --context before the command).",
     )
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -347,6 +348,28 @@ def _serve_handler(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv_from_cwd()
     raw = list(sys.argv[1:] if argv is None else argv)
+    from loom_cli.contexts import selected_context
+
+    context = None
+    if raw and raw[0] == "--context":
+        if len(raw) < 2:
+            print("error: --context requires a name", file=sys.stderr)
+            return 2
+        context, raw = raw[1], raw[2:]
+    elif raw and raw[0].startswith("--context="):
+        context, raw = raw[0].partition("=")[2], raw[1:]
+    try:
+        with selected_context(context):
+            return _dispatch(raw)
+    except ValueError as exc:
+        # Context validation errors are safe and contain no config values.
+        if str(exc).startswith("context must"):
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        raise
+
+
+def _dispatch(raw: list[str]) -> int:
     if raw and raw[0] == "datasets":
         from loom_cli.datasets_cmd import dispatch as datasets_dispatch
         return datasets_dispatch(raw[1:])

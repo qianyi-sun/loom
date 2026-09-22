@@ -44,6 +44,20 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"Retaining data and namespace claims. Retry: loom dev destroy {identity} "
                       f"--expected-generation {generation} --idempotency-key {key}", file=sys.stderr)
                 print(client.destroy(identity, expected_generation=generation, idempotency_key=key).model_dump_json())
+            elif args.dev_command == "login":
+                from loom_cli.environment_login import login_environment, open_environment_browser
+
+                context = login_environment(client, UUID(args.environment_id))
+                print(f"Personal login saved separately. Use: loom --context {context} auth whoami")
+                if args.browser:
+                    try:
+                        opened = open_environment_browser(client, UUID(args.environment_id))
+                    except (ValueError, OSError, httpx.RequestError, HttpStatusError):
+                        opened = False
+                    if not opened:
+                        print("CLI login is saved, but browser login could not open. Retry --browser on a desktop.", file=sys.stderr)
+                        return 1
+                    print("Browser login opened; confirm sign-in there before the short-lived proof expires.")
             elif args.dev_command == "list":
                 print(json.dumps({"items": [row.model_dump(mode="json") for row in client.list()]}))
             elif args.dev_command == "status":
@@ -64,6 +78,8 @@ def _run(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
         print(f"Management request failed ({type(exc).__name__}); retry with the same Idempotency-Key.", file=sys.stderr)
+    except OSError:
+        print("Could not securely save personal credentials; management login is unchanged.", file=sys.stderr)
     except (ValueError, KeyError):
         print("Invalid management arguments or response; no local deployment was attempted.", file=sys.stderr)
     return 1
@@ -81,6 +97,9 @@ def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[
     destroy.add_argument("environment_id")
     destroy.add_argument("--expected-generation", type=int, help="Fence this exact generation; otherwise read current status")
     destroy.add_argument("--idempotency-key", help="Reuse with the printed generation after a lost response")
+    login = commands.add_parser("login", help="Sign into your child environment without replacing management credentials")
+    login.add_argument("environment_id")
+    login.add_argument("--browser", action="store_true", help="Also open a separate, short-lived browser sign-in")
     status = commands.add_parser("status", help="Read desired state and current provisioning operation")
     status.add_argument("environment_id")
     retry = commands.add_parser("retry", help="Explicitly retry a blocked operation without changing its identities or plan")

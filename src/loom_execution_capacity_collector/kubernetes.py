@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Callable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
@@ -20,6 +22,9 @@ from loom_execution_capacity_collector.contracts import (
     NodeTemplateSample,
     ResourceTotals,
 )
+
+if TYPE_CHECKING:
+    from loom_execution_capacity_collector.pool import PoolObservationScope, PoolPodClassifier
 
 _MIB = Decimal(1024 * 1024)
 _TARGET_ANNOTATION = "loom.openai.com/target-id"
@@ -88,8 +93,10 @@ def _container_request(container: Any) -> ResourceTotals:
 
 
 def _pod_request(pod: Any) -> ResourceTotals:
-    """Mirror scheduler accounting, including restartable init sidecars."""
+    """Conservative scheduler accounting, including native init sidecars."""
 
+    if getattr(pod.spec, "_loom_pool_resize_unqualified", False):
+        raise KubernetesObservationError("Kubernetes pool Pod resize accounting is unqualified")
     regular = _add(*[_container_request(row) for row in list(pod.spec.containers or [])])
     restartable = ResourceTotals(cpu_millis=0, memory_mib=0, storage_mib=0)
     init_peaks: list[ResourceTotals] = []
@@ -100,7 +107,84 @@ def _pod_request(pod: Any) -> ResourceTotals:
         else:
             init_peaks.append(_add(restartable, request))
     effective = _maximum(_add(regular, restartable), *init_peaks)
+    pod_resources = getattr(pod.spec, "resources", None)
+    if pod_resources is not None:
+        requests = (pod_resources.get("requests", {}) if isinstance(pod_resources, dict)
+                    else getattr(pod_resources, "requests", None) or {})
+        # Admission validates Pod requests against container requests. Taking
+        # the maximum also stays conservative for unfamiliar API combinations.
+        effective = _maximum(effective, _resources(requests))
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
+
+
+def _pool_resize_unqualified(raw: dict[str, Any]) -> bool:
+    """Do not admit against freed spec resources while kubelet still holds them.
+
+    Only used by pool capture. Immutable gateway Jobs do not resize; legitimate
+    foreign resizing remains a fail-closed inventory blocker until converged.
+    Retain both older and newer API fields before the pinned SDK drops them.
+    """
+    status = raw.get("status") or {}
+    if status.get("resize") or any(
+        condition.get("type") in {"PodResizePending", "PodResizeInProgress"}
+        and condition.get("status") == "True" for condition in status.get("conditions") or []
+    ):
+        return True
+
+    def exceeds(allocated: Any, desired: Any) -> bool:
+        if not isinstance(allocated, dict) or not isinstance(desired, dict):
+            raise ValueError("invalid resize resources")
+        actual, requested = _resources(allocated), _resources(desired)
+        return any(getattr(actual, key) > getattr(requested, key)
+                   for key in ("cpu_millis", "memory_mib", "storage_mib"))
+
+    spec = raw["spec"]
+    pod_requests = (spec.get("resources") or {}).get("requests") or {}
+    if (exceeds((status.get("resources") or {}).get("requests") or {}, pod_requests)
+            or exceeds(status.get("allocatedResources") or {}, pod_requests)):
+        return True
+    for containers_key, statuses_key in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
+        desired = {row["name"]: (row.get("resources") or {}).get("requests") or {}
+                   for row in spec.get(containers_key) or []}
+        for container in status.get(statuses_key) or []:
+            requested = desired.get(container.get("name"), {})
+            if (exceeds(container.get("allocatedResources") or {}, requested)
+                    or exceeds((container.get("resources") or {}).get("requests") or {}, requested)):
+                return True
+    return False
+
+
+def _decode_pool_pods(response: Any) -> Any:
+    """Preserve PodLevelResources omitted by the pinned Kubernetes SDK model."""
+    from kubernetes import client
+
+    try:
+        data = response.data
+        if not isinstance(data, bytes) or len(data) > 32 * 1024 * 1024:
+            raise ValueError("invalid Pod page")
+        document = json.loads(data)
+        if (not isinstance(document, dict) or document.get("kind") != "PodList"
+                or document.get("apiVersion") != "v1" or not isinstance(document.get("items"), list)):
+            raise ValueError("incomplete Pod page")
+        with client.ApiClient() as api:
+            result = api.deserialize(response, "V1PodList")
+        for raw, pod in zip(document["items"], result.items, strict=True):
+            pod.spec._loom_pool_resize_unqualified = _pool_resize_unqualified(raw)
+            resources = raw["spec"].get("resources")
+            if resources is not None:
+                if not isinstance(resources, dict) or not isinstance(resources.get("requests", {}), dict):
+                    raise ValueError("invalid Pod resource requests")
+                pod.spec.resources = resources
+        return result
+    except Exception:
+        # Neither the HTTP body nor deserializer diagnostics are evidence: Pod
+        # payloads may contain credentials, commands or private source URLs.
+        raise KubernetesObservationError("Kubernetes pool Pod page is invalid") from None
+    finally:
+        # _preload_content=False transfers ownership of the HTTP response.
+        release = getattr(response, "release_conn", None)
+        if release is not None:
+            release()
 
 
 def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
@@ -413,6 +497,7 @@ class InClusterKubernetesCapacityReader:
         *,
         maximum_items: int,
         page_size: int,
+        decode: Callable[[Any], Any] | None = None,
         **kwargs: object,
     ) -> tuple[list[Any], str]:
         items: list[Any] = []
@@ -426,6 +511,8 @@ class InClusterKubernetesCapacityReader:
                 _continue=token or None,
                 _request_timeout=(self._request_timeout, self._request_timeout),
             )
+            if decode is not None:
+                response = decode(response)
             metadata = getattr(response, "metadata", None)
             version = getattr(metadata, "resource_version", None)
             if not version or (resource_version is not None and str(version) != resource_version):
@@ -450,6 +537,7 @@ class InClusterKubernetesCapacityReader:
         namespace: str,
         target_id: str,
         node_label_selector: str,
+        pool: PoolPodClassifier | None = None,
     ) -> KubernetesCapacitySnapshot:
         try:
             nodes, node_version = self._list_all(
@@ -463,6 +551,8 @@ class InClusterKubernetesCapacityReader:
                 maximum_items=200_000,
                 page_size=1000,
                 watch=False,
+                decode=_decode_pool_pods if pool is not None else None,
+                **({"_preload_content": False} if pool is not None else {}),
             )
             daemons, daemon_version = self._list_all(
                 self._apps.list_daemon_set_for_all_namespaces,
@@ -474,6 +564,8 @@ class InClusterKubernetesCapacityReader:
             if isinstance(exc, KubernetesObservationError):
                 raise
             raise KubernetesObservationError("Kubernetes capacity list failed") from exc
+        if pool is not None:
+            pool.validate_inventory(nodes, pods)
         node_names = {
             str(node.metadata.name)
             for node in nodes
@@ -505,23 +597,36 @@ class InClusterKubernetesCapacityReader:
         reasons: dict[str, int] = {}
         by_node: dict[str, list[Any]] = {name: [] for name in node_names}
         pending_pods: list[ManagedPodPlacement] = []
+        managed_by_uid: dict[str, ManagedPodPlacement] = {}
+        observed_reservations: set[str] = set()
         for pod in pods:
             phase = getattr(pod.status, "phase", None)
             if phase in {"Succeeded", "Failed"}:
                 continue
-            node_name = getattr(pod.spec, "node_name", None)
-            target = _target_pod(pod, namespace=namespace, target_id=target_id)
+            node_name = getattr(pod.spec, "node_name", None) or None
+            target = (_target_pod(pod, namespace=namespace, target_id=target_id)
+                      if pool is None else pool.registered(pod))
+            include_pending = target if pool is None else pool.includes_pending(pod)
+            managed = (_managed_placement(pod) if target else None) if pool is None else pool.managed(pod)
+            if managed is not None:
+                if pool is not None and managed.lease_id in observed_reservations:
+                    raise KubernetesObservationError("multiple live Pods for one shared reservation")
+                observed_reservations.add(managed.lease_id)
+                managed_by_uid[managed.uid] = managed
             if target and node_name is not None and node_name not in node_names:
                 raise KubernetesObservationError(
                     "managed target Pod is scheduled outside the selected node group"
                 )
-            if node_name in node_names or (target and node_name is None and phase == "Pending"):
+            if node_name in node_names or (include_pending and node_name is None and phase == "Pending"):
                 requested_rows.append(_pod_request(pod))
             if node_name in node_names:
                 by_node[node_name].append(pod)
-            elif target and node_name is None and phase == "Pending":
-                pending_pods.append(_managed_placement(pod))
-            if not target:
+            elif include_pending and node_name is None and phase == "Pending":
+                pending_pods.append(managed if managed is not None else ManagedPodPlacement(
+                    uid=_identity(pod.metadata.uid, name="Pod UID"),
+                    lease_id="foreign-pod:" + pod.metadata.uid, generation=1, requests=_pod_request(pod),
+                ))
+            if not (target or (pool is not None and (node_name in node_names or include_pending))):
                 continue
             pending, unschedulable, image_pull, reason = _pending_state(pod)
             pending_jobs += int(pending)
@@ -547,9 +652,9 @@ class InClusterKubernetesCapacityReader:
                 pod_slots=_positive_int(node.status.allocatable.get("pods"), name="node Pod slots"),
                 used_pod_slots=len(assigned),
                 managed_pods=[
-                    _managed_placement(pod)
+                    managed_by_uid[pod.metadata.uid]
                     for pod in assigned
-                    if _target_pod(pod, namespace=namespace, target_id=target_id)
+                    if pod.metadata.uid in managed_by_uid
                 ],
             )
             placements.append(placement)
@@ -561,6 +666,7 @@ class InClusterKubernetesCapacityReader:
                 "nodes": str(node_version),
                 "pods": str(pod_version),
                 "daemonsets": str(daemon_version),
+                **({"pool_scope": pool.fingerprint} if pool is not None else {}),
             },
             active_nodes=len(nodes),
             ready_nodes=sum(_node_ready(node) for node in nodes),
@@ -615,6 +721,21 @@ class InClusterKubernetesCapacityReader:
             namespace=namespace,
             target_id=target_id,
             node_label_selector=node_label_selector,
+        )
+
+    async def capture_pool(self, *, scope: PoolObservationScope) -> KubernetesCapacitySnapshot:
+        """One physical inventory; never combine per-environment snapshots.
+
+        Only protected registry/Job-journal bindings may populate ``scope``.
+        The global admission writer must separately bind this selector to the
+        native node group and reject stale/incomplete provider observations.
+        """
+        from loom_execution_capacity_collector.pool import PoolPodClassifier
+
+        pool = PoolPodClassifier(scope)
+        return await asyncio.to_thread(
+            self._capture_sync, namespace="", target_id="",
+            node_label_selector=pool.node_selector, pool=pool,
         )
 
 

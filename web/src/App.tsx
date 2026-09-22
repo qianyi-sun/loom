@@ -17,6 +17,7 @@ import NewBatch from "./pages/NewBatch";
 import NotFound from "./pages/NotFound";
 import PasswordAction from "./pages/PasswordAction";
 import AuthLogin from "./pages/AuthLogin";
+import ManagedLogin from "./pages/ManagedLogin";
 import RateCardsAdmin from "./pages/RateCardsAdmin";
 import RunLibrary from "./pages/RunLibrary";
 import RunLibraryBatchDetail from "./pages/RunLibraryBatchDetail";
@@ -32,6 +33,8 @@ import UsageDashboard from "./pages/UsageDashboard";
 export default function App(): JSX.Element {
   return (
     <Routes>
+      {/* Keep proof consumption mounted while auth state changes the app shell. */}
+      <Route path="/auth/managed" element={<ManagedLogin />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="monitor" element={<Monitor />} />
