@@ -5,11 +5,12 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from loom.auth import AuthContext
 from loom_service.config import LoomServiceSettings
 from loom_service.session_auth import (
+    browser_origin_allowed,
     hash_secret,
     is_staging_admin_browser_session,
     session_cookie_options,
@@ -184,3 +185,39 @@ def test_host_prefixed_custom_cookie_never_loses_secure(monkeypatch):
         minio_access_key="x", minio_secret_key="y", auth_session_cookie_name="__Host-custom",
     )
     assert session_cookie_options(settings)["secure"] is True
+
+
+def test_legacy_canonical_https_origin_cannot_be_downgraded(monkeypatch):
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "true")
+    monkeypatch.setenv("LOOM_PUBLIC_BASE_URL", "https://alice.dev.example.com/prod")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y", public_base_url=None,
+    )
+    options = session_cookie_options(settings)
+    assert options["secure"] is True
+    assert options["key"] == "__Host-loom_session"
+
+
+@pytest.mark.parametrize("origin,allowed", [
+    ("https://alice.dev.example.com", True),
+    ("https://alice.dev.example.com:443", True),
+    ("https://alice.dev.example.com:0", False),
+    ("https://bob.dev.example.com", False),
+    ("http://alice.dev.example.com", False),
+    ("null", False),
+    ("https://alice.dev.example.com/", False),
+])
+def test_hosted_origin_matches_canonical_origin_not_proxy_headers(monkeypatch, origin, allowed):
+    monkeypatch.setenv("LOOM_SVC_AUTH_LOCAL_HTTP", "false")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://u:p@localhost/loom",
+        minio_access_key="x", minio_secret_key="y",
+        public_base_url="https://alice.dev.example.com",
+    )
+    request = Request({"type": "http", "method": "POST", "scheme": "http", "path": "/login",
+                       "server": ("internal-service", 8090), "headers": [
+                           (b"origin", origin.encode()),
+                           (b"x-forwarded-host", b"bob.dev.example.com"),
+                       ]})
+    assert browser_origin_allowed(request, settings) is allowed

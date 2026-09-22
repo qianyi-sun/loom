@@ -221,6 +221,23 @@ async def test_hosted_login_rejects_cross_origin_before_issuing_session(auth_set
         assert "set-cookie" not in response.headers
 
 
+@pytest.mark.parametrize("auth_setup", ["hosted"], indirect=True)
+async def test_hosted_login_uses_legacy_canonical_origin_behind_tls_proxy(auth_setup, monkeypatch):
+    app, *_ = auth_setup
+    app.state.settings.public_base_url = None
+    monkeypatch.setenv("LOOM_PUBLIC_BASE_URL", "https://alice.dev.example.com/dev")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://internal-service:8090") as ac:
+        accepted = await ac.post("/api/v1/auth/login/start", json={"email": "owner@example.com"},
+                                 headers={"Origin": "https://alice.dev.example.com"})
+        assert accepted.status_code == 200
+        denied = await ac.post("/api/v1/auth/login/start", json={"email": "owner@example.com"},
+                               headers={"Origin": "https://bob.dev.example.com",
+                                        "X-Forwarded-Host": "bob.dev.example.com",
+                                        "X-Forwarded-Proto": "https"})
+        assert denied.status_code == 403
+
+
 async def test_login_me_and_cookie_flags(
     auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],
 ) -> None:

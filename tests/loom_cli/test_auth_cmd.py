@@ -480,6 +480,37 @@ def test_cli_cookie_jar_cannot_override_verified_hosted_session():
     assert received == ["__Host-loom_session=verified"] * 2
 
 
+def test_cli_promotes_valid_explicit_session_refresh_before_next_request():
+    cfg = LoomConfig(server_url="https://alice.dev.example.com", auth_session_cookie="old",
+                     auth_session_cookie_name="__Host-loom_session", auth_csrf_token="csrf-old")
+
+    def handler(request):
+        if request.url.path == "/api/v1/auth/me":
+            return httpx.Response(200, json={"csrf_token": "csrf-old"})
+        if request.url.path == "/api/v1/auth/refresh":
+            return httpx.Response(200, json={"csrf_token": "csrf-new"}, headers={
+                "set-cookie": "__Host-loom_session=new; Path=/; HttpOnly; Secure",
+            })
+        if request.headers.get("cookie") == "__Host-loom_session=new":
+            return httpx.Response(200, json={})
+        return httpx.Response(401, json={})
+
+    with authed_client(cfg, transport=httpx.MockTransport(handler)) as client:
+        assert client.post("/api/v1/auth/refresh").status_code == 200
+        assert client.get("/api/v1/environments").status_code == 200
+    assert load_config().auth_session_cookie == "new"
+    assert load_config().auth_csrf_token == "csrf-new"
+
+
+def test_mutating_client_base_url_does_not_rebind_login_origin():
+    cfg = LoomConfig(server_url="https://alice.dev.example.com", auth_session_cookie="private",
+                     auth_session_cookie_name="__Host-loom_session")
+    with authed_client(cfg, transport=httpx.MockTransport(lambda _: httpx.Response(200))) as client:
+        client.base_url = "https://bob.dev.example.com"
+        with pytest.raises(ValueError, match="origin"):
+            client.get("/api/v1/auth/me")
+
+
 def test_setup_password_uses_secret_sources(
     monkeypatch: pytest.MonkeyPatch,
     mock_public_auth_server: MockAuthServer,
