@@ -2,11 +2,6 @@ name: images
 
 run-name: >-
   ${{ github.event_name == 'workflow_dispatch' &&
-      inputs.trusted_publish == true &&
-      format('gate=trusted-publish / head={0} / base={1} / updated=none / action=workflow_dispatch / label=none / labels=000000 / pull=none',
-             github.sha,
-             inputs.trusted_base_sha) ||
-      github.event_name == 'workflow_dispatch' &&
       format('gate=manual / head={0} / base={1} / updated={2} / action={3} / label={4} / labels={5} / pull={6}',
              github.sha,
              github.event.before || github.sha,
@@ -53,7 +48,7 @@ run-name: >-
                     contains(github.event.pull_request.labels.*.name, 'ci:coverage-summary') && '1' || '0'),
              github.event.pull_request.number || 'none') }}
 
-# Builds, scans, attests, verifies, and (on push to dev/main) publishes every release image declared
+# Builds, scans, attests, verifies, and (on push to main) publishes every release image declared
 # in config/component-ownership.toml. The manifest owns image identity,
 # Dockerfile, build context, and source-path selection; this workflow contains
 # no editable image allowlist.
@@ -77,17 +72,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      trusted_publish:
-        description: Reconcile an exact protected-branch image release
-        required: false
-        type: boolean
-        default: false
-      trusted_base_sha:
-        description: Nearest successful trusted release ancestor
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -116,7 +100,6 @@ jobs:
       native_builds: ${{ steps.plan.outputs.native_builds || steps.event.outputs.native_builds }}
       ordinary_builds: ${{ steps.build-matrices.outputs.ordinary_builds || '[]' }}
       image_set: ${{ steps.plan.outputs.image_set || 'nebius' }}
-      trusted_publish: ${{ steps.trust.outputs.trusted_publish || 'false' }}
     steps:
       - name: Classify filtered event before checkout
         id: event
@@ -147,59 +130,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate trusted release reconciliation
-        id: trust
-        if: steps.event.outputs.checkout_required == 'true'
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REQUESTED: ${{ inputs.trusted_publish || false }}
-          BASE_SHA: ${{ inputs.trusted_base_sha || '' }}
-          HEAD_SHA: ${{ github.sha }}
-          ACTOR: ${{ github.actor }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          trusted_publish=false
-          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$REQUESTED" == "true" ]]; then
-            [[ "$ACTOR" == "github-actions[bot]" ]] || {
-              echo "FAIL: trusted publication requires the default-branch controller" >&2
-              exit 1
-            }
-            [[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]] || {
-              echo "FAIL: trusted publication requires dev or main" >&2
-              exit 1
-            }
-            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
-              echo "FAIL: trusted publication requires exact lowercase commit SHAs" >&2
-              exit 1
-            }
-            [[ "$BASE_SHA" != "$HEAD_SHA" ]] || {
-              echo "FAIL: trusted publication range is empty" >&2
-              exit 1
-            }
-            test "$(git rev-parse HEAD)" = "$HEAD_SHA"
-            git cat-file -e "${BASE_SHA}^{commit}"
-            git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA" || {
-              echo "FAIL: trusted publication base is not an ancestor" >&2
-              exit 1
-            }
-            trusted_publish=true
-          elif [[ -n "$BASE_SHA" ]]; then
-            echo "FAIL: trusted base SHA is forbidden outside reconciliation" >&2
-            exit 1
-          fi
-          echo "trusted_publish=$trusted_publish" >> "$GITHUB_OUTPUT"
-
       - name: Plan required image validation
         id: required
         if: steps.event.outputs.checkout_required == 'true'
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ steps.trust.outputs.trusted_publish == 'true' && inputs.trusted_base_sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-          TRUSTED_PUBLISH: ${{ steps.trust.outputs.trusted_publish }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           PR_ACTION: ${{ github.event.action }}
           PR_ACTION_LABEL: ${{ github.event.label.name }}
@@ -226,13 +164,8 @@ jobs:
               fi
               ;;
             workflow_dispatch)
-              if [[ "$TRUSTED_PUBLISH" == "true" ]]; then
-                git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-                  > /tmp/loom-changed-files.txt
-              else
-                git show --pretty=format: --name-only "$HEAD_SHA" \
-                  > /tmp/loom-changed-files.txt
-              fi
+              git show --pretty=format: --name-only "$HEAD_SHA" \
+                > /tmp/loom-changed-files.txt
               PR_LABELS_JSON='["ci:images"]'
               ;;
             *)
@@ -262,7 +195,6 @@ jobs:
           UNOWNED_RUNTIME: ${{ steps.required.outputs.unowned_runtime }}
           BASE_BRANCH: ${{ github.event.pull_request.base.ref || github.event.merge_group.base_ref || github.ref_name }}
           EVENT_NAME: ${{ github.event_name }}
-          TRUSTED_PUBLISH: ${{ steps.trust.outputs.trusted_publish }}
           CHANGED_FILES: /tmp/loom-changed-files.txt
         run: |
           set -euo pipefail
@@ -273,7 +205,7 @@ jobs:
             }
           done
           image_set=nebius
-          if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" || "${BASE_BRANCH:-dev}" == "main" || "${BASE_BRANCH:-dev}" == "refs/heads/main" ]]; then
+          if [[ "$EVENT_NAME" == "push" || "${BASE_BRANCH:-dev}" == "main" || "${BASE_BRANCH:-dev}" == "refs/heads/main" ]]; then
             image_set=legacy
           fi
           echo "image_set=$image_set" >> "$GITHUB_OUTPUT"
@@ -283,7 +215,7 @@ jobs:
             --changed-files "$CHANGED_FILES"
             --github-output "$GITHUB_OUTPUT"
           )
-          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$TRUSTED_PUBLISH" != "true" || \
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || \
                 "$UNOWNED_RUNTIME" == "true" ]]; then
             args+=(--force-all)
           elif [[ "$REQUIRED" == "true" ]]; then
@@ -295,7 +227,7 @@ jobs:
         id: build-matrices
         if: steps.event.outputs.checkout_required == 'true'
         env:
-          PUBLISHING: ${{ github.event_name == 'push' || steps.trust.outputs.trusted_publish == 'true' }}
+          PUBLISHING: ${{ github.event_name == 'push' }}
           NATIVE_BUILDS: ${{ steps.plan.outputs.native_builds }}
         run: |
           set -euo pipefail
@@ -340,7 +272,7 @@ jobs:
 
       - name: Install and record pinned Trivy binary
         env:
-          PUBLISHING: ${{ github.event_name == 'push' || needs.plan.outputs.trusted_publish == 'true' }}
+          PUBLISHING: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -376,7 +308,6 @@ jobs:
     needs: [plan, trivy-binary]
     if: >-
       github.event_name != 'push' &&
-      needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.ordinary_builds != '[]'
@@ -580,7 +511,6 @@ jobs:
     needs: [plan, trivy-binary]
     if: >-
       github.event_name != 'push' &&
-      needs.plan.outputs.trusted_publish != 'true' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.harbor_required == 'true'
@@ -606,10 +536,8 @@ jobs:
       !cancelled() &&
       needs.plan.result == 'success' &&
       needs.trivy-binary.result == 'success' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' &&
-        needs.plan.outputs.trusted_publish == 'true')) &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]'
@@ -657,7 +585,6 @@ jobs:
           DOCKERFILE: ${{ matrix.dockerfile }}
           BUILD_CONTEXT: ${{ matrix.context }}
           EVENT_NAME: ${{ github.event_name }}
-          TRUSTED_PUBLISH: ${{ needs.plan.outputs.trusted_publish }}
           REF_NAME: ${{ github.ref_name }}
           HEAD_SHA: ${{ github.sha }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -666,26 +593,14 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          TRUSTED_PUBLISH=${TRUSTED_PUBLISH:-false}
 
           python3 scripts/component_ownership.py validate-image \
             --image "$IMAGE_NAME" \
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
             --build-context "$BUILD_CONTEXT"
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            [[ "$TRUSTED_PUBLISH" == "false" ]]
-          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            [[ "$TRUSTED_PUBLISH" == "true" ]] || {
-              echo "FAIL: manual dispatch has no publication authority" >&2
-              exit 1
-            }
-          else
-            echo "FAIL: publishing requires a push or trusted reconciliation" >&2
-            exit 1
-          fi
-          [[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]] || {
-            echo "FAIL: publishing requires dev or main" >&2
+          [[ "$EVENT_NAME" == "push" && "$REF_NAME" == "main" ]] || {
+            echo "FAIL: publishing requires a main push" >&2
             exit 1
           }
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -1058,10 +973,8 @@ jobs:
     if: >-
       !cancelled() &&
       needs.plan.result == 'success' &&
-      (github.event_name == 'push' ||
-       (github.event_name == 'workflow_dispatch' &&
-        needs.plan.outputs.trusted_publish == 'true')) &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true' &&
       needs.plan.outputs.images != '[]' &&
@@ -1101,7 +1014,7 @@ jobs:
             --image-name "$IMAGE_DIGEST_NAME" \
             --dockerfile "$DOCKERFILE" \
             --build-context "$BUILD_CONTEXT"
-          [[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]] || exit 1
+          [[ "$REF_NAME" == "main" ]] || exit 1
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "$REPOSITORY_OWNER" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || exit 1
           [[ ${#GHCR_ACTOR} -le 100 \
@@ -1402,10 +1315,7 @@ jobs:
 
   images-gate:
     name: >-
-      ${{ github.event_name == 'workflow_dispatch' &&
-          needs.plan.outputs.trusted_publish == 'true' &&
-          'images-gate-trusted-publish' ||
-          github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
+      ${{ github.event_name == 'workflow_dispatch' && 'images-gate-manual' ||
           github.event_name == 'push' && 'images-gate-push' ||
           needs.plan.outputs.gate_mode == 'full' && 'images-gate' ||
           'images-gate-filtered' }}
@@ -1416,7 +1326,6 @@ jobs:
       - name: Enforce selected image result
         env:
           EVENT_NAME: ${{ github.event_name }}
-          TRUSTED_PUBLISH: ${{ needs.plan.outputs.trusted_publish }}
           PLAN_RESULT: ${{ needs.plan.result }}
           GATE_MODE: ${{ needs.plan.outputs.gate_mode }}
           REQUIRED: ${{ needs.plan.outputs.required }}
@@ -1428,7 +1337,6 @@ jobs:
           STANDARD_IMAGES: ${{ needs.plan.outputs.images }}
         run: |
           set -euo pipefail
-          TRUSTED_PUBLISH=${TRUSTED_PUBLISH:-false}
           STANDARD_IMAGES=${STANDARD_IMAGES:-'[{}]'}
           [[ "$PLAN_RESULT" == "success" ]] || exit 1
           case "$GATE_MODE" in
@@ -1463,7 +1371,7 @@ jobs:
           print("true" if any(item["image"] != "harbor-runtime" for item in images) else "false")
           ' <<< "$STANDARD_IMAGES")
           if [[ "$REQUIRED" == "true" ]]; then
-            if [[ "$EVENT_NAME" == "push" || "$TRUSTED_PUBLISH" == "true" ]]; then
+            if [[ "$EVENT_NAME" == "push" ]]; then
               [[ "$BUILD_RESULT" == "skipped" ]] || exit 1
               [[ "$HARNESS_BUILD_RESULT" == "skipped" ]] || exit 1
               if [[ "$STANDARD_IMAGES" == "[]" ]]; then
@@ -1493,44 +1401,3 @@ jobs:
             [[ "$PUBLISH_RESULT" == "skipped" ]] || exit 1
             [[ "$MANIFEST_RESULT" == "skipped" ]] || exit 1
           fi
-
-      - name: Record successful trusted image publication
-        if: >-
-          needs.plan.outputs.required == 'true' &&
-          needs.publish.result == 'success' &&
-          needs.publish-manifest.result == 'success' &&
-          (github.event_name == 'push' ||
-           (github.event_name == 'workflow_dispatch' && needs.plan.outputs.trusted_publish == 'true')) &&
-          (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          SELECTED_IMAGES: ${{ needs.plan.outputs.images }}
-        run: |
-          python3 - <<'PYTHON'
-          import json, os
-          from pathlib import Path
-          Path('/tmp/trusted-image-release.json').write_text(json.dumps({
-              'schema_version': 1,
-              'repository': os.environ['GITHUB_REPOSITORY'],
-              'source_sha': os.environ['SOURCE_SHA'],
-              'run_id': os.environ['GITHUB_RUN_ID'],
-              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
-              'images': json.loads(os.environ['SELECTED_IMAGES']),
-              'publication': 'verified-architecture-and-manifest-attestations',
-          }, sort_keys=True) + '\n')
-          PYTHON
-
-      - name: Upload trusted image publication receipt
-        if: >-
-          needs.plan.outputs.required == 'true' &&
-          needs.publish.result == 'success' &&
-          needs.publish-manifest.result == 'success' &&
-          (github.event_name == 'push' ||
-           (github.event_name == 'workflow_dispatch' && needs.plan.outputs.trusted_publish == 'true')) &&
-          (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: trusted-image-release-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: /tmp/trusted-image-release.json
-          if-no-files-found: error
-          retention-days: 90

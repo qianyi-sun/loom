@@ -17,9 +17,6 @@ EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
     ".github/workflows/release-promotion-gate.yml": (
         "release-promotion-gate-${{ inputs.candidate_sha }}"
     ),
-    ".github/workflows/trusted-image-release-controller.yml": (
-        "trusted-image-release-controller-dev"
-    ),
 }
 
 

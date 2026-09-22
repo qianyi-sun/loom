@@ -40,8 +40,10 @@ def test_native_builds_use_the_complete_supported_matrix() -> None:
 
 
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "push", "workflow_dispatch"])
-def test_docs_plan_emits_empty_native_matrix(tmp_path: Path, event: str) -> None:
-    """Exercise the real checked-out image planner when it selects no image work."""
+def test_docs_plan_skips_builds_except_explicit_manual_validation(
+    tmp_path: Path, event: str
+) -> None:
+    """Manual validation selects builds even if the commit only changes docs."""
     steps = _jobs()["plan"]["steps"]
     select = next(step for step in steps if step.get("id") == "plan")
     changed = tmp_path / "changed"
@@ -52,7 +54,6 @@ def test_docs_plan_emits_empty_native_matrix(tmp_path: Path, event: str) -> None
         "EVENT_NAME": event,
         "REQUIRED": "false",
         "UNOWNED_RUNTIME": "false",
-        "TRUSTED_PUBLISH": "true" if event == "workflow_dispatch" else "false",
         "CHANGED_FILES": str(changed),
         "GITHUB_OUTPUT": str(output),
     }
@@ -67,8 +68,9 @@ def test_docs_plan_emits_empty_native_matrix(tmp_path: Path, event: str) -> None
     )
     assert planned.returncode == 0, planned.stderr
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert values["required"] == "false"
-    assert values["images"] == values["native_builds"] == "[]"
+    assert values["required"] == str(event == "workflow_dispatch").lower()
+    for matrix in ("images", "native_builds"):
+        assert bool(json.loads(values[matrix])) is (event == "workflow_dispatch")
 
 
 @pytest.mark.parametrize(
@@ -87,7 +89,6 @@ def test_gate_enforces_selected_build_and_publish_results(
     env = {
         **os.environ,
         "EVENT_NAME": event,
-        "TRUSTED_PUBLISH": "false",
         "PLAN_RESULT": "success",
         "GATE_MODE": "full",
         "REQUIRED": "true" if images else "false",
@@ -112,7 +113,6 @@ def test_parallel_builds_keep_native_scan_and_untrusted_permissions(job: str) ->
     assert build["permissions"] == {"contents": "read"}
     assert build["strategy"]["fail-fast"] is False
     assert "github.event_name != 'push'" in build["if"]
-    assert "needs.plan.outputs.trusted_publish != 'true'" in build["if"]
     assert build["steps"] == jobs["build"]["steps"]
     scripts = "\n".join(step.get("run", "") for step in build["steps"])
     assert "scripts/validate_trivy_release_report.py" in scripts
@@ -128,7 +128,6 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
     env = {
         **os.environ,
         "EVENT_NAME": "pull_request",
-        "TRUSTED_PUBLISH": "false",
         "PLAN_RESULT": "success",
         "GATE_MODE": "full",
         "REQUIRED": "true",
@@ -158,10 +157,9 @@ def test_trusted_publish_requires_successful_selected_dependencies(
     images = ["service"]
     values = {
         "github.event_name": "push",
-        "github.ref": "refs/heads/dev",
+        "github.ref": "refs/heads/main",
         "needs.plan.result": "success",
         "needs.trivy-binary.result": "success",
-        "needs.plan.outputs.trusted_publish": "false",
         "needs.plan.outputs.gate_mode": "full",
         "needs.plan.outputs.required": "true",
         "needs.plan.outputs.images": json.dumps(
@@ -183,24 +181,28 @@ def test_trusted_publish_requires_successful_selected_dependencies(
         ("github.event_name", "merge_group"),
         ("github.event_name", "workflow_dispatch"),
         ("github.ref", "refs/heads/feature"),
+        ("github.ref", "refs/heads/dev"),
         ("needs.plan.outputs.gate_mode", "filtered"),
         ("needs.plan.outputs.required", "false"),
         ("needs.plan.outputs.images", "[]"),
     ],
 )
-def test_publish_requires_trusted_event_branch_and_selection(key: str, value: str) -> None:
+@pytest.mark.parametrize("job", ["publish", "publish-manifest"])
+def test_publish_requires_trusted_event_branch_and_selection(
+    key: str, value: str, job: str
+) -> None:
     values = {
         "github.event_name": "push",
-        "github.ref": "refs/heads/dev",
+        "github.ref": "refs/heads/main",
         "needs.plan.result": "success",
         "needs.trivy-binary.result": "success",
-        "needs.plan.outputs.trusted_publish": "false",
+        "needs.publish.result": "success",
         "needs.plan.outputs.gate_mode": "full",
         "needs.plan.outputs.required": "true",
         "needs.plan.outputs.images": '[{"image":"service"}]',
         key: value,
     }
-    assert not _condition(_jobs()["publish"]["if"], values)
+    assert not _condition(_jobs()[job]["if"], values)
 
 
 @pytest.mark.parametrize("job", ["build"])
@@ -213,7 +215,6 @@ def test_untrusted_builds_do_not_run_after_required_dependency_failure(
     values.update(
         {
             "github.event_name": "pull_request",
-            "needs.plan.outputs.trusted_publish": "false",
             "needs.plan.outputs.gate_mode": "full",
             "needs.plan.outputs.required": "true",
             "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
@@ -231,11 +232,10 @@ def test_manifest_requires_publish_success(
     publish_result: str,
 ) -> None:
     values = {
-        "github.event_name": "workflow_dispatch",
+        "github.event_name": "push",
         "github.ref": "refs/heads/main",
         "needs.plan.result": "success",
         "needs.publish.result": publish_result,
-        "needs.plan.outputs.trusted_publish": "true",
         "needs.plan.outputs.gate_mode": "full",
         "needs.plan.outputs.required": "true",
         "needs.plan.outputs.images": '[{"image":"service"}]',

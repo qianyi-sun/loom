@@ -78,7 +78,6 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     assert build["permissions"] == {"contents": "read"}
     assert _normalized_expression(build["if"]) == (
         "github.event_name != 'push' && "
-        "needs.plan.outputs.trusted_publish != 'true' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         f"needs.plan.outputs.{matrix_output} != '[]'"
@@ -102,7 +101,7 @@ def test_images_untrusted_build_is_read_only_and_cannot_publish_or_write_cache(
     assert "${{" not in script
 
 
-def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None:
+def test_images_publish_authority_is_main_push_only() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     publish = workflow["jobs"]["publish"]
 
@@ -129,17 +128,12 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
         "id-token": "write",
         "packages": "write",
     }
-    trusted_event = (
-        "(github.event_name == 'push' || "
-        "(github.event_name == 'workflow_dispatch' && "
-        "needs.plan.outputs.trusted_publish == 'true')) && "
-    )
     assert _normalized_expression(publish["if"]) == (
         "!cancelled() && "
         "needs.plan.result == 'success' && "
         "needs.trivy-binary.result == 'success' && "
-        + trusted_event
-        + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "github.event_name == 'push' && "
+        "github.ref == 'refs/heads/main' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]'"
@@ -151,8 +145,8 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
     )
     assert _normalized_expression(manifest["if"]) == (
         "!cancelled() && needs.plan.result == 'success' && "
-        + trusted_event
-        + "(github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') && "
+        "github.event_name == 'push' && "
+        "github.ref == 'refs/heads/main' && "
         "needs.plan.outputs.gate_mode == 'full' && "
         "needs.plan.outputs.required == 'true' && "
         "needs.plan.outputs.images != '[]' && "
@@ -187,92 +181,24 @@ def test_images_publish_authority_is_protected_push_or_reconciler_only() -> None
     assert "LOOM_CI_IMAGE_RUNS_ON" not in str(manifest)
 
 
-@pytest.mark.parametrize("job_name", ["build"])
-def test_images_manual_dispatch_is_build_only(job_name: str) -> None:
+def test_images_manual_dispatch_is_build_only() -> None:
+    from tests.ops.test_ci_images_parallel_builds import _condition
+
     workflow = _workflow(".github/workflows/images.yml")
     on_config = _workflow_on(workflow)
-    build = workflow["jobs"][job_name]
-    publish = workflow["jobs"]["publish"]
-
     assert "workflow_dispatch" in on_config
-    assert _normalized_expression(build["if"]).startswith(
-        "github.event_name != 'push' && needs.plan.outputs.trusted_publish != 'true' &&"
-    )
-    assert "needs.plan.outputs.trusted_publish == 'true'" in _normalized_expression(publish["if"])
-
-
-def test_images_trusted_dispatch_is_validated_before_any_publish_job() -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    plan = workflow["jobs"]["plan"]
-    trust = _named_step(plan, "Validate trusted release reconciliation")
-    script = trust["run"]
-
-    assert trust["env"]["ACTOR"] == "${{ github.actor }}"
-    assert trust["env"]["BASE_SHA"] == "${{ inputs.trusted_base_sha || '' }}"
-    assert '[[ "$ACTOR" == "github-actions[bot]" ]]' in script
-    assert '[[ "$REF_NAME" == "dev" || "$REF_NAME" == "main" ]]' in script
-    assert 'git merge-base --is-ancestor "$BASE_SHA" "$HEAD_SHA"' in script
-    assert 'test "$(git rev-parse HEAD)" = "$HEAD_SHA"' in script
-    for job_name in ("publish", "publish-manifest"):
-        assert "needs.plan.outputs.trusted_publish == 'true'" in workflow["jobs"][job_name]["if"]
-
-
-def test_images_trusted_dispatch_accepts_only_bot_exact_ancestor_range(tmp_path: Path) -> None:
-    plan = _workflow(".github/workflows/images.yml")["jobs"]["plan"]
-    trust = _named_step(plan, "Validate trusted release reconciliation")
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    base = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    output = tmp_path / "github-output.txt"
-    common = {
-        "EVENT_NAME": "workflow_dispatch",
-        "REQUESTED": "true",
-        "BASE_SHA": base,
-        "HEAD_SHA": head,
-        "ACTOR": "github-actions[bot]",
-        "REF_NAME": "dev",
-        "GITHUB_OUTPUT": str(output),
-    }
-
-    accepted = subprocess.run(
-        ["bash"],
-        cwd=REPO_ROOT,
-        input=trust["run"],
-        text=True,
-        capture_output=True,
-        env={**os.environ, **common},
-        check=False,
-    )
-
-    assert accepted.returncode == 0, accepted.stderr
-    assert output.read_text(encoding="utf-8") == "trusted_publish=true\n"
-    for drift in (
-        {"ACTOR": "qianyi-sun"},
-        {"REF_NAME": "feature"},
-        {"BASE_SHA": head},
-        {"BASE_SHA": "0" * 40},
-    ):
-        rejected = subprocess.run(
-            ["bash"],
-            cwd=REPO_ROOT,
-            input=trust["run"],
-            text=True,
-            capture_output=True,
-            env={**os.environ, **common, **drift},
-            check=False,
-        )
-        assert rejected.returncode != 0
+    assert not (on_config["workflow_dispatch"] or {}).get("inputs")
+    for ref in ("refs/heads/main", "refs/heads/dev", "refs/heads/feature"):
+        values = {
+            "github.event_name": "workflow_dispatch",
+            "github.ref": ref,
+            "needs.plan.result": "success",
+            "needs.trivy-binary.result": "success",
+            "needs.plan.outputs.gate_mode": "full",
+            "needs.plan.outputs.required": "true",
+            "needs.plan.outputs.ordinary_builds": '[{"image":"service"}]',
+        }
+        assert _condition(workflow["jobs"]["build"]["if"], values)
 
 
 def test_images_permissions_are_an_exact_job_allowlist() -> None:
@@ -457,6 +383,8 @@ def test_untrusted_workflow_shell_receives_context_only_through_env(
         ),
         ("publish", "BUILD_CONTEXT", "../.", "component ownership validation failed:"),
         ("publish", "EVENT_NAME", "push$(id)", "FAIL:"),
+        ("publish", "EVENT_NAME", "workflow_dispatch", "FAIL: publishing requires a main push"),
+        ("publish", "REF_NAME", "dev", "FAIL: publishing requires a main push"),
         ("publish", "REF_NAME", "dev/../../main", "FAIL:"),
         ("publish", "REPOSITORY_OWNER", "owner`id`", "FAIL:"),
         ("publish", "GHCR_ACTOR", "--password-stdin", "FAIL:"),
@@ -478,7 +406,7 @@ def test_image_input_validation_rejects_shell_metacharacters_and_ambiguous_value
         "DOCKERFILE": "deploy/Dockerfile.service",
         "BUILD_CONTEXT": ".",
         "EVENT_NAME": "pull_request" if job_name == "build" else "push",
-        "REF_NAME": "feature-safe" if job_name == "build" else "dev",
+        "REF_NAME": "feature-safe" if job_name == "build" else "main",
         "PR_NUMBER": "42" if job_name == "build" else "",
         "HEAD_SHA": "a" * 40,
         "BASE_SHA": "b" * 40,
@@ -532,7 +460,6 @@ def test_image_input_validation_never_evaluates_command_substitution(
             "",
         ),
         ("build", "workflow_dispatch", "codex/ci-secret-isolation", ""),
-        ("publish", "push", "dev", ""),
         ("publish", "push", "main", ""),
     ],
 )

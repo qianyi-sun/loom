@@ -69,7 +69,6 @@ def _run_image_matrix_plan(
         env={
             **os.environ,
             "EVENT_NAME": "pull_request",
-            "TRUSTED_PUBLISH": "false",
             "BASE_BRANCH": "dev",
             "REQUIRED": required,
             "UNOWNED_RUNTIME": unowned_runtime,
@@ -195,17 +194,10 @@ def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
 
 def test_source_workflows_share_native_run_identity() -> None:
     workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
-    common_run_names = {
-        workflow["run-name"]
-        for path, workflow in workflows.items()
-        if path != ".github/workflows/images.yml"
-    }
+    common_run_names = {workflow["run-name"] for workflow in workflows.values()}
 
     assert len(common_run_names) == 1
-    image_run_name = workflows[".github/workflows/images.yml"]["run-name"]
-    assert "gate=trusted-publish / head={0} / base={1}" in image_run_name
-    assert "inputs.trusted_publish == true" in image_run_name
-    for run_name in (common_run_names.pop(), image_run_name):
+    for run_name in common_run_names:
         assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" not in run_name
         assert "' ' ||" not in run_name
         for mode in ("manual", "filtered", "full"):
@@ -314,13 +306,6 @@ def test_source_gate_names_are_native_and_stable() -> None:
         plan_ref = f"needs.{plan_job_id}.outputs"
         expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
         trusted_recovery = ""
-        if workflow_path == ".github/workflows/images.yml":
-            trusted_recovery = (
-                "github.event_name == 'workflow_dispatch' && "
-                "needs.plan.outputs.trusted_publish == 'true' && "
-                "'images-gate-trusted-publish' || "
-            )
-
         if workflow_path == ".github/workflows/ci.yml":
             trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
 
