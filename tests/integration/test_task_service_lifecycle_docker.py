@@ -93,7 +93,8 @@ async def test_service_survives_consistent_snapshot_and_private_verifier(service
     assert (await agent.exec("test ! -e /proc/$(cat /tmp/service.pid)")).return_code == 0
 
 
-async def test_real_sigterm_unwinds_verifier_and_stops_retained_service(service_sandboxes, tmp_path):
+@pytest.mark.parametrize("termination", ["signal", "deadline"])
+async def test_real_sigterm_unwinds_verifier_and_stops_retained_service(service_sandboxes, tmp_path, termination):
     import os
     import signal
     import sys
@@ -138,7 +139,7 @@ asyncio.run(module.run_verifier(root / 'workspace', TaskConfig.model_validate_js
     process = await asyncio.create_subprocess_exec(sys.executable, "-c", child, env={
         **os.environ, "LOOM_TEST_ROOT": str(tmp_path), "LOOM_TEST_TASK": json.dumps(raw),
         "LOOM_TEST_TRIAL": trial.model_dump_json(),
-        "LOOM_EXECUTION_PHASE_DEADLINE": str(time.time() + 60),
+        "LOOM_EXECUTION_PHASE_DEADLINE": str(time.time() + (60 if termination == "signal" else 1.5)),
         "LOOM_EXECUTION_TERMINATION_GRACE_SECONDS": "5",
     }, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
@@ -151,7 +152,8 @@ asyncio.run(module.run_verifier(root / 'workspace', TaskConfig.model_validate_js
                 stdout, stderr = await process.communicate()
                 raise AssertionError(f"verifier did not enter: {stdout!r} {stderr!r}")
             raise AssertionError("verifier did not enter")
-        process.send_signal(signal.SIGTERM)
+        if termination == "signal":
+            process.send_signal(signal.SIGTERM)
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
         assert process.returncode != 0, (stdout, stderr)
         checked = await agent.exec("test ! -e /proc/$(cat /tmp/retained.pid)")

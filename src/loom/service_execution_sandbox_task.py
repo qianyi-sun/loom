@@ -15,6 +15,7 @@ import shlex
 import signal
 import sys
 import tomllib
+from collections.abc import Callable
 from glob import escape
 from pathlib import Path, PurePosixPath
 from uuid import UUID
@@ -255,6 +256,37 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
 
 
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
+    deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
+    grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
+    if not math.isfinite(grace) or grace <= 0:
+        raise ServiceExecutionTaskError("termination grace must be finite and positive")
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    assert current is not None
+    finalizing = False
+
+    def begin_cleanup() -> None:
+        nonlocal finalizing
+        finalizing = True
+
+    def terminate() -> None:
+        if not finalizing:
+            current.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, terminate)
+    try:
+        async with asyncio.timeout(deadline.remaining() if deadline else None):
+            await _run_verifier(workspace, task, trial, deadline=deadline, grace=grace,
+                                begin_cleanup=begin_cleanup)
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
+async def _run_verifier(
+    workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
+    begin_cleanup: Callable[[], None],
+) -> None:
     driver = sandbox_driver("verifier-sandbox", task)
     driver_started = False
     failure: BaseException | None = None
@@ -321,27 +353,44 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
     except BaseException as exc:
         retain_failure("execution", exc)
     finally:
-        try:
-            if driver_started:
-                await driver.stop_processes()
-        except BaseException as exc:
-            retain_failure("stop_processes", exc)
-        try:
-            await driver.stop()
-        except BaseException as exc:
-            retain_failure("stop", exc)
-        if task.environment.service_lifecycle is not None:
-            service_driver = sandbox_driver("task-sandbox", task)
+        begin_cleanup()
+
+        async def cleanup_verifier() -> None:
             try:
-                await service_driver.start()
-                await service_driver.stop_processes()
-            except BaseException as exc:
-                retain_failure("service_cleanup", exc)
+                if driver_started:
+                    await driver.stop_processes()
+            except Exception as exc:
+                retain_failure("stop_processes", exc)
             finally:
                 try:
-                    await service_driver.stop()
-                except BaseException as exc:
-                    retain_failure("service_disconnect", exc)
+                    await driver.stop()
+                except Exception as exc:
+                    retain_failure("stop", exc)
+
+        async def cleanup_service() -> None:
+            if task.environment.service_lifecycle is not None:
+                service_driver = sandbox_driver("task-sandbox", task)
+                try:
+                    await service_driver.start()
+                    await service_driver.stop_processes()
+                except Exception as exc:
+                    retain_failure("service_cleanup", exc)
+                finally:
+                    try:
+                        await service_driver.stop()
+                    except Exception as exc:
+                        retain_failure("service_disconnect", exc)
+
+        remaining = min(grace, max(0, deadline.monotonic_deadline + grace - asyncio.get_running_loop().time())) if deadline else grace
+        try:
+            # A second Go SIGTERM at the same deadline cannot bypass cleanup.
+            # The supervisor still has its independent hard kill/Pod teardown.
+            async with asyncio.timeout(remaining):
+                async with asyncio.TaskGroup() as cleanup_tasks:
+                    cleanup_tasks.create_task(cleanup_verifier())
+                    cleanup_tasks.create_task(cleanup_service())
+        except BaseException as exc:
+            retain_failure("cleanup_deadline", exc)
     if failure is not None:
         raise failure
 
