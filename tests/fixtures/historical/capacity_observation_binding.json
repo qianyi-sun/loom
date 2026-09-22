@@ -1,0 +1,54 @@
+{
+  "schema_version": 2,
+  "execution": {
+    "schema_version": 2,
+    "authority_incarnation": "00000000-0000-0000-0000-000000000065",
+    "writer_epoch": 3,
+    "configuration_epoch": 5,
+    "execution_epoch": 7,
+    "execution_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "execution_state": "active",
+    "executable_new_capacity_ceiling": 1,
+    "executable_new_capacity_rate_per_minute": 1,
+    "trusted_fleet_release_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "executable": true,
+    "allocation_epoch": 11
+  },
+  "tranche_id": "00000000-0000-0000-0000-000000000066",
+  "intent_id": "00000000-0000-0000-0000-000000000067",
+  "shape_instance_id": "oldlab-shape-0001",
+  "subject_id": "00000000-0000-0000-0000-0000000000c9",
+  "subject_incarnation": "00000000-0000-0000-0000-0000000000ca",
+  "account_id": "owner-alice",
+  "tier_id": "development",
+  "candidate": {
+    "schema_version": 2,
+    "algorithm": "git-sha1",
+    "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "publication_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "candidate_generation": 7,
+  "deployment_generation": 7,
+  "pool_id": "oldlab",
+  "pool_generation": 13,
+  "executor_id": "oldlab-executor",
+  "executor_incarnation": "00000000-0000-0000-0000-000000000068",
+  "shape_id": "oldlab-cpu-small",
+  "profile_id": "oldlab-default",
+  "profile_generation": 17,
+  "profile_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "concurrency_slots": 1,
+  "resources": {
+    "schema_version": 1,
+    "slots": 1,
+    "cpu_millicores": 1000,
+    "memory_bytes": 1024,
+    "gpu_count": 0,
+    "generic": {}
+  },
+  "node_ids": [
+    "oldlab-node-01"
+  ],
+  "rollout_surge_slots": 0,
+  "old_shape_backing_id": null
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import httpx
@@ -31,10 +32,10 @@ from loom.db.schema import (
     User,
     UserSession,
     Worker,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from loom_service.routes import overview as overview_route
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "O" * 43
 
@@ -169,11 +170,11 @@ async def overview_setup(
         ))
         s.execute(insert(Worker).values(
             id=uuid4(),
-            hostname="trt-gb10-1",
+            hostname="trt-local-arm-1",
             version="test",
             capabilities=[{"backend": "docker", "cpu_arch": "arm64"}],
             max_concurrent=10,
-            pool_name="gb10",
+            pool_name="local-arm",
             registered_at=now,
             last_seen_at=now,
             status="active",
@@ -203,61 +204,6 @@ async def overview_setup(
             registered_at=now - timedelta(minutes=10),
             last_seen_at=now - timedelta(minutes=10),
             status="active",
-        ))
-        s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-            environment="production",
-            pool_name="gb10",
-            actuator="slurm",
-            enabled=True,
-            min_slots=0,
-            max_slots=150,
-            scale_up_threshold_slots=1,
-            scale_down_idle_seconds=600,
-            scale_up_cooldown_seconds=60,
-            scale_down_cooldown_seconds=300,
-            drain_timeout_seconds=600,
-            actuator_config={
-                "backend": "docker",
-                "cpu_arch": "arm64",
-                "partition": "gb10",
-                "allowed_nodes": ["trt-gb10-1"],
-                "env_file": "/secure/.env.gb10-worker",
-                "repo_dir": "/shared_work/qianyi/loom-remote-worker",
-                "requested_cpus": 20,
-                "requested_memory_mib": 115000,
-                "requested_concurrency": 10,
-            },
-            last_decision="noop",
-            last_decision_reason="at_target",
-            last_desired_slots=150,
-            last_actual_slots=10,
-            last_pending_slots=0,
-            last_draining_slots=0,
-            last_occupied_slots=0,
-            last_queued_slots=1,
-        ))
-        s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-            environment="production",
-            pool_name="staging-x86",
-            actuator="slurm",
-            enabled=True,
-            min_slots=0,
-            max_slots=12,
-            scale_up_threshold_slots=1,
-            scale_down_idle_seconds=600,
-            scale_up_cooldown_seconds=60,
-            scale_down_cooldown_seconds=300,
-            drain_timeout_seconds=600,
-            actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
-            last_decision="blocked",
-            last_decision_reason="queued_deficit",
-            last_desired_slots=6,
-            last_actual_slots=2,
-            last_pending_slots=6,
-            last_draining_slots=0,
-            last_occupied_slots=2,
-            last_queued_slots=1,
-            last_blocked_reason="pending_cap",
         ))
         s.execute(insert(Batch).values(
             id=old_batch_id,
@@ -337,7 +283,6 @@ async def overview_setup(
             s.execute(delete(ProviderConnection))
             s.execute(delete(Task))
             s.execute(delete(Benchmark))
-            s.execute(delete(WorkerPoolAutoscalerPolicy))
             s.execute(delete(Worker))
             s.execute(delete(UserSession))
             s.execute(delete(LoginChallenge))
@@ -380,7 +325,7 @@ async def test_overview_summarizes_signed_in_team_readiness(
     assert r.status_code == 200, r.text
     assert r.headers["cache-control"] == "no-store"
     body = r.json()
-    assert body["status"] == "ready"
+    assert body["status"] == "needs_setup"
     assert body["team_context"] == {
         "team_id": str(team_id),
         "team_name": "EAI",
@@ -444,7 +389,8 @@ async def test_overview_summarizes_signed_in_team_readiness(
         "expected_trial_count": 2,
     } == body["run_activity"]["latest_batch"]
     action_ids = {item["id"] for item in body["next_actions"]}
-    assert {"create_batch", "repair_provider"} <= action_ids
+    assert {"configure_execution", "repair_provider"} <= action_ids
+    assert "create_batch" not in action_ids
     assert "start_worker" not in action_ids
 
 
@@ -513,11 +459,7 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
         "status": "waiting",
     }
     assert body["resources"]["aggregate"] == {
-        "desired_slots": 156,
-        "pending_slots": 6,
         "current_active_slots": 12,
-        "max_slots": 162,
-        "ceiling_slots": 162,
         "active_workers": 2,
         "draining_workers": 0,
         "total_slots": 12,
@@ -532,19 +474,10 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
     }
     assert body["resources"]["pools"] == [
         {
-            "pool_name": "gb10",
+            "pool_name": "local-arm",
             "backend": "docker",
             "cpu_arch": "arm64",
-            "autoscaler_environment": "production",
-            "autoscaler_actuator": "slurm",
-            "autoscaler_enabled": True,
-            "autoscaler_idle_since_at": None,
-            "autoscaler_idle_seconds": None,
-            "desired_slots": 150,
-            "pending_slots": 0,
             "current_active_slots": 10,
-            "max_slots": 150,
-            "ceiling_slots": 150,
             "active_workers": 1,
             "draining_workers": 0,
             "total_slots": 10,
@@ -556,29 +489,12 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "pre_start_heartbeat_fresh_tasks": 0,
             "oldest_starting_task_age_sec": None,
             "queued_tasks": 1,
-            "last_autoscaler_decision": "noop",
-            "last_autoscaler_reason": "at_target",
-            "decision_reason": "at_target",
-            "last_autoscaler_blocked_reason": None,
-            "blocked_reason": None,
-            "last_autoscaler_blocked_details": None,
-            "blocked_details": None,
-            "last_autoscaler_error": None,
         },
         {
             "pool_name": "staging-x86",
             "backend": "docker",
             "cpu_arch": "x86_64",
-            "autoscaler_environment": "production",
-            "autoscaler_actuator": "slurm",
-            "autoscaler_enabled": True,
-            "autoscaler_idle_since_at": None,
-            "autoscaler_idle_seconds": None,
-            "desired_slots": 6,
-            "pending_slots": 6,
             "current_active_slots": 2,
-            "max_slots": 12,
-            "ceiling_slots": 12,
             "active_workers": 1,
             "draining_workers": 0,
             "total_slots": 2,
@@ -590,14 +506,6 @@ async def test_monitor_summary_scopes_state_counts_and_worker_capacity(
             "pre_start_heartbeat_fresh_tasks": 0,
             "oldest_starting_task_age_sec": None,
             "queued_tasks": 1,
-            "last_autoscaler_decision": "blocked",
-            "last_autoscaler_reason": "queued_deficit",
-            "decision_reason": "queued_deficit",
-            "last_autoscaler_blocked_reason": "pending_cap",
-            "blocked_reason": "pending_cap",
-            "last_autoscaler_blocked_details": None,
-            "blocked_details": None,
-            "last_autoscaler_error": None,
         },
     ]
     assert body["service_execution"] == {
@@ -768,5 +676,42 @@ async def test_overview_marks_operator_prerequisites_separately(
     ]
     assert {action["id"] for action in operator_actions} == {
         "publish_benchmarks",
-        "start_worker",
+        "configure_execution",
     }
+
+
+@pytest.mark.parametrize("fresh,nodes,blockers,expected", [
+    (True, 1, [], "observed"),
+    (True, 0, [], "observed"),
+    (False, 0, ["execution_capacity_observation_stale"], "unknown"),
+    (True, 0, ["execution_capacity_provider_quota_nodes_exceeded"], "needs_attention"),
+])
+async def test_overview_native_submission_does_not_require_legacy_workers(
+    overview_setup, monkeypatch, fresh: bool, nodes: int, blockers: list[str], expected: str,
+) -> None:
+    app, _team_id, _batch_id = overview_setup
+    monkeypatch.setattr(overview_route, "get_active_worker_count", AsyncMock(return_value=0))
+    monkeypatch.setattr(overview_route, "get_active_backends", AsyncMock(return_value=set()))
+    monkeypatch.setattr(overview_route, "fetch_execution_capacity_status", AsyncMock(return_value={
+        "targets": [{
+            "desired_state": "active", "policy": {"enabled": True},
+            "observation": {"is_fresh": fresh, "active_nodes": nodes},
+            "blockers": blockers,
+        }, {
+            "desired_state": "disabled", "policy": {"enabled": True},
+            "observation": None, "blockers": ["execution_capacity_target_not_active"],
+        }],
+    }), raising=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as ac:
+        await _login(ac)
+        response = await ac.get("/api/v1/overview")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["execution_health"] == {
+        "configured_targets": 1, "status": expected,
+    }
+    actions = {item["id"] for item in body["next_actions"]}
+    assert "create_batch" in actions
+    assert "start_worker" not in actions
+    assert ("inspect_execution" in actions) is (expected != "observed")

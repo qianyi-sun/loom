@@ -19,8 +19,8 @@ Nebius/common regression and coverage at 08:23 UTC.
 Historical tests are available through CI dispatch `legacy_compatibility=true`.
 
 Dev PR image builds select from the seven AMD64 Nebius platform images.
-Historical personal-dev publication is manual; main production publication
-retains its existing contract. macOS CLI
+Retired personal-development fleet images have no publication lane. Main
+production publication retains its protected contract. macOS CLI
 compatibility remains a separate developer-host check.
 
 This repository change does not stop existing runner services or cancel running
@@ -36,6 +36,6 @@ labels do not affect selection. Empty selected
 shards finish without invoking pytest; failures while selecting files still fail
 the job. Tests are assigned to shards before filtering so ownership stays stable.
 
-The Go/Python socket/publication flow has one owner, `go-checks`, and is not
-repeated in the ordinary integration shards. Ordinary coverage collection is
+Current Go execution and sandbox runtimes are validated in `go-checks`. The
+retired builder supervisor/publication handoff tests are deleted. Coverage collection is
 optional, but test failures and all four protected source checks remain required.

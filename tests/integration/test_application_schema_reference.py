@@ -1,6 +1,5 @@
 """Generate the bundled reference through actual isolated provisioning."""
 
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -77,11 +76,13 @@ def test_sealed_reference_is_distinct_from_legacy_reference() -> None:
 def test_bundled_reference_pins_image_and_existing_historical_revisions() -> None:
     root = Path(__file__).resolve().parents[2]
     expected = application_schema_reference()
-    external = json.loads((root / "deploy/dev-fleet/personal-dev-external-images.json").read_text())
-    assert expected.postgres_image == external["images"]["postgres"]["reference"]
+    assert expected.postgres_image == (
+        "docker.io/library/postgres@sha256:"
+        "60f4761b9035e0b8d5218f701a8c3382f641bf12b1604822574cf5be3baeb537"
+    )
     for directory, head in (
         ("migrations", expected.application_head),
-        ("capacity_guard_migrations", expected.guard_head),
+        ("database/capacity_guard_migrations", expected.guard_head),
     ):
         config = Config(str(root / directory / "alembic.ini"))
         config.set_main_option("script_location", str(root / directory))

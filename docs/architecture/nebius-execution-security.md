@@ -5,6 +5,10 @@ tasks as a high-assurance hostile multi-tenant sandbox and does not require a
 custom kernel-isolation runtime, escape corpus, or adversarial packet matrix
 before ordinary development execution.
 
+Hosted execution is Nebius-only. Explicit local development and disposable
+fixtures remain separate; source retirement preserves historical records and
+migrations and does not certify live infrastructure shutdown.
+
 ## Decision
 
 Nebius uses the managed Kubernetes default container runtime. A custom gVisor,
@@ -25,7 +29,8 @@ practice:
   credential;
 - model-provider credentials remain behind Loom Gateway;
 - cleanup uses durable lease state and Kubernetes UID preconditions;
-- the target can be disabled independently without changing OLDLAB or GB10.
+- disabling a target stops its hosted admission without enabling another provider
+  or retired worker pool.
 
 These controls protect against common configuration mistakes and accidental
 cross-workload access. They are not a claim that Loom contains intentionally

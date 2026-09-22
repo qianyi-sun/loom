@@ -232,14 +232,6 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
     sub.add_parser(
-        "inference",
-        help=(
-            "Prepare self-hosted OpenAI-compatible inference services "
-            "(Slurm/vLLM bundle generation)"
-        ),
-        add_help=False,
-    )
-    sub.add_parser(
         "eval",
         help="Submit, inspect, diagnose, and export service-mode evaluations",
         add_help=False,
@@ -252,11 +244,6 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "resources",
         help="Inspect concurrent task slots and resource-pool pressure",
-        add_help=False,
-    )
-    sub.add_parser(
-        "dev",
-        help="Use the candidate-less shared-fleet compatibility client",
         add_help=False,
     )
     sub.add_parser(
@@ -372,9 +359,6 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "tasksets":
         from loom_cli.tasksets_cmd import dispatch as tasksets_dispatch
         return tasksets_dispatch(raw[1:])
-    if raw and raw[0] == "inference":
-        from loom_cli.inference_cmd import dispatch as inference_dispatch
-        return inference_dispatch(raw[1:])
     if raw and raw[0] == "eval":
         from loom_cli.eval_cmd import dispatch as eval_dispatch
         return eval_dispatch(raw[1:])
@@ -384,9 +368,6 @@ def main(argv: list[str] | None = None) -> int:
     if raw and raw[0] == "resources":
         from loom_cli.resources_cmd import dispatch as resources_dispatch
         return resources_dispatch(raw[1:])
-    if raw and raw[0] == "dev":
-        from loom_cli.dev_cmd import dispatch as dev_dispatch
-        return dev_dispatch(raw[1:])
     if raw and raw[0] == "cluster":
         from loom_cli.cluster_cmd import dispatch as cluster_dispatch
         return cluster_dispatch(raw[1:])

@@ -123,9 +123,6 @@ def _candidate() -> ReadinessCandidate:
         parameters_json=graph.parameters,
         resolved_inputs_json=[],
         official_submission_kind=None,
-        authority_candidate_json=None,
-        gpu_backend_selection_json=None,
-        gpu_backend_selection_digest=None,
         ordinary_input_bindings_json=[
             {
                 "binding_name": "catalog",
@@ -229,9 +226,6 @@ def _generate_candidate() -> ReadinessCandidate:
         parameters_json=graph.parameters,
         resolved_inputs_json=[],
         official_submission_kind=None,
-        authority_candidate_json=None,
-        gpu_backend_selection_json=None,
-        gpu_backend_selection_digest=None,
         fanout_item_json=fanout_item,
         fanout_source_manifest_digest=PLATFORM_DIGEST,
         fanout_item_digest=canonical_digest(fanout_item),

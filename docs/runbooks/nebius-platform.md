@@ -17,6 +17,30 @@ publish or deploy new candidates from it. Use the successful `nebius-candidate`
 run for the exact merged `dev` commit, with its matching candidate and runtime
 profile. Candidate publication does not itself deploy the environment.
 
+Registry uploads default to a fifteen-minute total wall-clock budget per image.
+Set the positive integer GitHub Actions variable `NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS`
+to override it, or pass `build --upload-timeout-seconds SECONDS` to the publisher.
+This is an initial operational limit, not a measured upper bound for every image.
+The publisher streams redacted `skopeo copy` output and reports elapsed time and
+attempt count. Explicit connection reset/refused, network read
+or TLS/header timeout errors may retry **once**, after one second, within the
+same total budget. Authentication, permission, certificate and unknown errors
+fail immediately; total-budget exhaustion never restarts the upload. A quiet
+log alone is not treated as proof of stalled network transfer.
+
+On timeout the publisher kills and reaps the upload process. On final failure it
+preserves the last 16 KiB of redacted output, attempt count, exit code, elapsed
+time and timeout budget in `failed-command.json` through the existing candidate
+artifact upload. A failed publication cannot start automatic rollout. Inspect
+that evidence before a manual retry. The budget covers upload and its optional
+retry, not construction or scanning; the overall workflow timeout is unchanged.
+A failed upload may leave registry blobs, but no deployable candidate record is
+produced until all images have been published and verified.
+
+Published platform and task images have a separate
+[image-retention maintenance workflow](nebius-image-retention.md). Its initial
+daily mode is preview; rollout skip decisions do not delete registry images.
+
 For the batch-purpose release, the existing dev database advances from `0150`
 to `0151` through the normal migration Job after backup. Do not deploy the old
 integration branch's `0137_batch_purpose` migration against a dev-lineage database,
@@ -876,6 +900,13 @@ up front or force 16 builds to run: node capacity, provider quota and shared
 capacity admission still determine how many can start. On the shared execution
 pool, account for the 16 GiB storage request per build alongside Trial requests;
 builds can need several nodes even when their total CPU would fit on one.
+
+The renderer also supplies this same limit to the existing capacity collector.
+Monitor's shared-node panel displays the configured build concurrency from that
+target's capacity observation, including when no builds or execution nodes remain.
+Observation freshness still applies; historical observations without the field
+show unavailable. This is a configured ceiling, not a count of currently available
+build slots, and does not change admission or node scaling.
 Apply the operator configuration through the
 normal renderer/deployer; changing only the actuator environment or namespace
 quota leaves the two limits inconsistent. Builds still compete with executions
@@ -915,6 +946,17 @@ output volume read-only, checks the local OCI structure and publishes with
 Skopeo's native digest handling. Registry and storage credentials are absent from
 the Dockerfile container. Supported task and sidecar components use the same
 path, including declared build arguments and multi-stage targets.
+
+`environment.build_timeout_sec` starts when each BuildKit build command starts;
+it does not include node provisioning, input preparation, scratch cleanup or
+registry publication. `active_deadline_seconds` remains the separate bounded
+whole-Job allowance (1800 seconds by default), including those infrastructure
+phases. A build command that exhausts its task budget reports
+`build_deadline_exceeded`; OOM and storage failures retain their own reasons.
+Build output streams to the container log, with build/cleanup boundary markers.
+The actuator retains a bounded, redacted tail before timeout/cancellation
+cleanup; ordinary polling does not repeatedly fetch logs. A valid completed
+publication is still accepted if its first reconciliation is after the deadline.
 
 The dedicated build namespace permits the rootless user-namespace helper's
 SETUID/SETGID and unconfined seccomp/AppArmor profiles. This exception does not

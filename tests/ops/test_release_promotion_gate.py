@@ -19,15 +19,10 @@ def _candidate_sha() -> str:
 
 
 def _image_digests() -> dict[str, str]:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     return {
-        image_name: f"ghcr.io/qianyi-sun/{image_name}@sha256:{index:064x}"
+        image_name: f"cr.eu-north1.nebius.cloud/registry-fixture/{image_name}@sha256:{index:064x}"
         for index, image_name in enumerate(
-            (
-                component.release_digest
-                for component in manifest.components
-                if component.kind == "release-image" and component.release_digest is not None
-            ),
+            component_ownership.NEBIUS_PLATFORM_IMAGES.values(),
             start=1,
         )
     }
@@ -104,28 +99,22 @@ def _prod_staging_isolation_evidence() -> dict[str, Any]:
             "production": {
                 "environment": "production",
                 "api_url": "https://yylx.world/prod/api",
-                "image": "ghcr.io/qianyi-sun/loom-worker:release-0123456789ab",
-                "image_digest": _image_digests()["loom-worker"],
+                "image": _image_digests()["loom-execution-runtime"],
+                "image_digest": _image_digests()["loom-execution-runtime"],
                 "source_commit": _candidate_sha(),
                 "k8s_namespace": "loom-prod",
-                "k8s_deployment": "loom-prod-worker",
+                "job_uid": "production-execution-job",
             },
             "staging": {
                 "environment": "staging",
                 "api_url": "https://yylx.world/staging/api",
-                "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
-                "image_digest": "ghcr.io/qianyi-sun/loom-worker@sha256:" + "6" * 64,
+                "image": "cr.eu-north1.nebius.cloud/registry-fixture/loom-execution-runtime@sha256:"
+                + "6" * 64,
+                "image_digest": "cr.eu-north1.nebius.cloud/registry-fixture/loom-execution-runtime@sha256:"
+                + "6" * 64,
                 "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
                 "k8s_namespace": "loom-staging",
-                "k8s_deployment": "loom-staging-worker",
-            },
-        },
-        "staging_capacity": {
-            "lease_state": "none",
-            "staging_slots": 0,
-            "new_staging_claims_allowed": False,
-            "override": {
-                "approved": False,
+                "job_uid": "staging-execution-job",
             },
         },
     }
@@ -144,8 +133,8 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "cluster_render_audit": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1003",
-            "staging_config": "deploy/environments/staging.multinode.cluster.toml",
-            "production_config": "deploy/environments/production.cluster.toml",
+            "staging_config": "/tmp/release-evidence/staging.platform.json",
+            "production_config": "/tmp/release-evidence/production.platform.json",
         },
         "migration_dry_run": {
             "status": "pass",
@@ -174,7 +163,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         "provider_smoke": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1007",
-            "provider_path": "lux-openai-compatible",
+            "provider_path": "az-gateway-loom-testing",
         },
         "benchmark_reward_gate": {
             "status": "pass",
@@ -214,35 +203,23 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
             "direct_hf_egress_required": False,
             "secret_safe": True,
         },
-        "worker_capacity_smoke": {
+        "execution_capacity_smoke": {
             "status": "pass",
             "url": "https://github.com/qianyi-sun/loom/actions/runs/1009",
-            "batch_id": "batch-worker-capacity",
-            "k8s_workers": 3,
-            "oldlab_workers": 3,
+            "batch_id": "batch-native-capacity",
+            "provider": "nebius",
             "runtime_seconds": 120,
             "failures": 0,
-            "oldlab_worker_records": [
+            "execution_records": [
                 {
-                    "node_name": "TRT-EAI-OLDLAB-1",
-                    "slurm_job_id": "13441",
-                    "worker_id": "worker-oldlab-1",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-EAI-OLDLAB-2",
-                    "slurm_job_id": "13442",
-                    "worker_id": "worker-oldlab-2",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
-                },
-                {
-                    "node_name": "trt-eai-oldlab-3",
-                    "slurm_job_id": "13443",
-                    "worker_id": "worker-oldlab-3",
-                    "concurrency": 6,
-                    "trials_claimed": 4,
+                    "trial_id": "trial-native-1",
+                    "attempt_id": "attempt-native-1",
+                    "target_id": "staging-primary",
+                    "project_id": "project-fixture",
+                    "cluster_id": "cluster-fixture",
+                    "namespace": "loom-staging",
+                    "job_uid": "job-native-1",
+                    "node_name": "execution-node-1",
                 },
             ],
         },
@@ -256,7 +233,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
         },
         "rollback_plan": {
             "status": "pass",
-            "previous_production_image_digest": "ghcr.io/qianyi-sun/loom-service@sha256:"
+            "previous_production_image_digest": "cr.eu-north1.nebius.cloud/registry-fixture/loom-service@sha256:"
             + "a" * 64,
             "rendered_manifest": "s3://loom-release-evidence/prod-rendered-prev.yaml",
             "db_recovery_point": "postgres-backup-20260624T140000Z",
@@ -270,7 +247,7 @@ def _passing_evidence(overrides: dict[str, Any] | None = None) -> dict[str, Any]
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "candidate_sha": _candidate_sha(),
-        "image_tag": "release-0123456789ab",
+        "image_tag": "candidate-" + _candidate_sha(),
         "prod_tag": "v1.0.0",
         "staging_url": "https://yylx.world/staging",
         "image_digests": _image_digests(),
@@ -341,6 +318,15 @@ def _run_release_input_preflight(
 
 
 def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: Path) -> None:
+    assert set(_image_digests()) == {
+        "loom-service",
+        "loom-control-plane",
+        "loom-web",
+        "loom-llm-gateway",
+        "loom-execution-runtime",
+        "loom-execution-actuator",
+        "loom-harbor-runtime",
+    }
     json_out = tmp_path / "release-gate-evidence.json"
     markdown_out = tmp_path / "release-gate-evidence.md"
     result = _run_release_gate(
@@ -350,7 +336,7 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
         "--output-json",
         str(json_out),
         "--output-markdown",
@@ -374,16 +360,17 @@ def test_release_gate_accepts_complete_manifest_and_writes_artifacts(tmp_path: P
     assert "score_positive_canary" in markdown
     assert "benchmark_score_alignment" in markdown
     assert "hf_mirror_token_boundary" in markdown
-    assert "worker_capacity_smoke" in markdown
+    assert "execution_capacity_smoke" in markdown
     assert "frontend_route_evidence" in markdown
     assert "prod_staging_isolation" in markdown
     assert "raw_delivery_export_status" in markdown
     assert all(image_name in markdown for image_name in _image_digests())
 
 
-def test_release_gate_requires_every_manifest_release_digest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image_name", tuple(component_ownership.NEBIUS_PLATFORM_IMAGES.values()))
+def test_release_gate_requires_every_nebius_release_digest(tmp_path: Path, image_name: str) -> None:
     manifest = _passing_evidence()
-    manifest["image_digests"].pop("loom-agent-sandbox")
+    manifest["image_digests"].pop(image_name)
 
     result = _run_release_gate(
         tmp_path,
@@ -392,17 +379,17 @@ def test_release_gate_requires_every_manifest_release_digest(tmp_path: Path) -> 
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode != 0
-    assert "image_digests.loom-agent-sandbox must end with @sha256:<64 hex>" in result.stderr
+    assert f"image_digests.{image_name} must end with @sha256:<64 hex>" in result.stderr
 
 
 def test_release_gate_rejects_digest_without_manifest_owner(tmp_path: Path) -> None:
     manifest = _passing_evidence()
     manifest["image_digests"]["loom-unowned-extra"] = (
-        "ghcr.io/qianyi-sun/loom-unowned-extra@sha256:" + "a" * 64
+        "cr.eu-north1.nebius.cloud/registry-fixture/loom-unowned-extra@sha256:" + "a" * 64
     )
 
     result = _run_release_gate(
@@ -412,7 +399,7 @@ def test_release_gate_rejects_digest_without_manifest_owner(tmp_path: Path) -> N
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode != 0
@@ -433,7 +420,7 @@ def test_release_gate_official_json_round_trips_through_production_verifier(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
         "--output-json",
         str(json_out),
     )
@@ -453,7 +440,7 @@ def test_release_gate_official_json_round_trips_through_production_verifier(
             "--candidate-sha",
             _candidate_sha(),
             "--image-tag",
-            "release-0123456789ab",
+            "candidate-" + _candidate_sha(),
         ],
         cwd=REPO_ROOT,
         text=True,
@@ -475,7 +462,7 @@ def test_release_gate_requires_hf_mirror_token_boundary_check(tmp_path: Path) ->
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -501,7 +488,7 @@ def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -532,10 +519,37 @@ def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
             lambda check: check["workers"]["production"].update(
                 {
                     "source_commit": "abcdef0123456789abcdef0123456789abcdef01",
-                    "image": "ghcr.io/qianyi-sun/loom-worker:staging-abc1234",
                 },
             ),
             "prod_staging_isolation.workers.production.source_commit",
+        ),
+        (
+            "runtime_image",
+            lambda check: check["workers"]["production"].update(
+                {"image": _image_digests()["loom-service"]},
+            ),
+            "prod_staging_isolation.workers.production.image must match",
+        ),
+        (
+            "runtime_digest",
+            lambda check: check["workers"]["production"].update(
+                {"image_digest": _image_digests()["loom-service"]},
+            ),
+            "prod_staging_isolation.workers.production.image_digest must match",
+        ),
+        (
+            "production_namespace",
+            lambda check: check["workers"]["production"].update(
+                {"k8s_namespace": "loom-staging"},
+            ),
+            "prod_staging_isolation.workers.production.k8s_namespace",
+        ),
+        (
+            "staging_namespace",
+            lambda check: check["workers"]["staging"].update(
+                {"k8s_namespace": "loom-prod"},
+            ),
+            "prod_staging_isolation.workers.staging.k8s_namespace",
         ),
         (
             "db_target",
@@ -562,17 +576,6 @@ def test_release_gate_rejects_hf_boundary_worker_token_or_direct_egress(
             ),
             "prod_staging_isolation.state_profiles.production.secret_refs.service_api_token_ref",
         ),
-        (
-            "active_staging_lease",
-            lambda check: check["staging_capacity"].update(
-                {
-                    "lease_state": "active",
-                    "staging_slots": 2,
-                    "new_staging_claims_allowed": True,
-                },
-            ),
-            "prod_staging_isolation.staging_capacity requires staging_slots=0",
-        ),
     ],
 )
 def test_release_gate_rejects_seeded_prod_staging_crossings(
@@ -592,28 +595,30 @@ def test_release_gate_rejects_seeded_prod_staging_crossings(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1, seed_name
     assert expected_error in result.stderr
 
 
-def test_release_gate_allows_documented_staging_lease_override(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "runtime_ref",
+    [
+        "sha256:" + "a" * 64,
+        "cr.eu-north1.nebius.cloud/registry-fixture/loom-execution-runtime:latest",
+    ],
+)
+def test_release_gate_requires_full_immutable_runtime_identity(
+    tmp_path: Path,
+    runtime_ref: str,
+) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["prod_staging_isolation"]["staging_capacity"].update(
-        {
-            "lease_state": "active",
-            "staging_slots": 1,
-            "new_staging_claims_allowed": True,
-            "override": {
-                "approved": True,
-                "reason": "Qianyi approved one running staging drain slot before prod promote",
-                "url": "https://github.com/qianyi-sun/loom/issues/490#issuecomment-override",
-            },
-        },
+    manifest["image_digests"]["loom-execution-runtime"] = runtime_ref
+    manifest["checks"]["prod_staging_isolation"]["workers"]["production"].update(
+        image=runtime_ref,
+        image_digest=runtime_ref,
     )
-
     result = _run_release_gate(
         tmp_path,
         manifest,
@@ -621,10 +626,10 @@ def test_release_gate_allows_documented_staging_lease_override(tmp_path: Path) -
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
-
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1
+    assert "loom-execution-runtime must be an immutable image reference" in result.stderr
 
 
 def test_release_gate_allows_shared_object_bucket_with_documented_prefix_policy(
@@ -652,7 +657,7 @@ def test_release_gate_allows_shared_object_bucket_with_documented_prefix_policy(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 0, result.stderr
@@ -672,7 +677,7 @@ def test_release_gate_rejects_raw_secret_values_without_echoing_them(tmp_path: P
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -701,7 +706,7 @@ def test_release_gate_rejects_missing_required_checks_and_secret_leaks(tmp_path:
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -729,7 +734,7 @@ def test_release_gate_rejects_all_full_reward_canary(tmp_path: Path) -> None:
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -750,7 +755,7 @@ def test_release_gate_rejects_frontend_route_api_mismatches(tmp_path: Path) -> N
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -761,7 +766,7 @@ def test_release_gate_rejects_frontend_route_api_mismatches(tmp_path: Path) -> N
 def test_release_gate_requires_immutable_semver_prod_tag(
     tmp_path: Path,
 ) -> None:
-    manifest = _passing_evidence({"prod_tag": "release-0123456789ab"})
+    manifest = _passing_evidence({"prod_tag": "candidate-" + _candidate_sha()})
 
     result = _run_release_gate(
         tmp_path,
@@ -770,18 +775,18 @@ def test_release_gate_requires_immutable_semver_prod_tag(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
     assert "prod_tag must be an immutable SemVer tag like v1.0.0" in result.stderr
 
 
-def test_release_gate_requires_oldlab_worker_records_when_enabled(
+def test_release_gate_requires_native_execution_records(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"].pop("oldlab_worker_records")
+    manifest["checks"]["execution_capacity_smoke"].pop("execution_records")
 
     result = _run_release_gate(
         tmp_path,
@@ -790,26 +795,18 @@ def test_release_gate_requires_oldlab_worker_records_when_enabled(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
-    assert "worker_capacity_smoke.oldlab_worker_records" in result.stderr
+    assert "execution_capacity_smoke.execution_records" in result.stderr
 
 
-def test_release_gate_rejects_incomplete_oldlab_worker_record(
+def test_release_gate_rejects_incomplete_native_execution_record(
     tmp_path: Path,
 ) -> None:
     manifest = _passing_evidence()
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_workers"] = 1
-    manifest["checks"]["worker_capacity_smoke"]["oldlab_worker_records"] = [
-        {
-            "node_name": "trt-eai-oldlab-4",
-            "slurm_job_id": "14004",
-            "concurrency": 6,
-            "trials_claimed": 2,
-        },
-    ]
+    manifest["checks"]["execution_capacity_smoke"]["execution_records"][0].pop("job_uid")
 
     result = _run_release_gate(
         tmp_path,
@@ -818,11 +815,59 @@ def test_release_gate_rejects_incomplete_oldlab_worker_record(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
-    assert "oldlab_worker_records[0].worker_id" in result.stderr
+    assert "execution_records[0].job_uid" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("provider", "other", "provider must be 'nebius'"),
+        ("execution_records", [], "must contain native execution evidence"),
+        ("failures", 1, "failures must be zero"),
+        ("failures", False, "failures must be zero"),
+        ("runtime_seconds", float("nan"), "finite non-negative number"),
+    ],
+)
+def test_release_capacity_evidence_rejects_invalid_observations(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    manifest = _passing_evidence()
+    manifest["checks"]["execution_capacity_smoke"][field] = value
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "candidate-" + _candidate_sha(),
+    )
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
+def test_release_capacity_evidence_rejects_duplicate_attempts(tmp_path: Path) -> None:
+    manifest = _passing_evidence()
+    records = manifest["checks"]["execution_capacity_smoke"]["execution_records"]
+    records.append(dict(records[0]))
+    result = _run_release_gate(
+        tmp_path,
+        manifest,
+        "validate",
+        "--candidate-sha",
+        _candidate_sha(),
+        "--image-tag",
+        "candidate-" + _candidate_sha(),
+    )
+    assert result.returncode == 1
+    assert "repeats an execution attempt" in result.stderr
 
 
 def test_release_gate_verify_production_rejects_candidate_or_image_mismatch(
@@ -865,7 +910,7 @@ def test_release_gate_verify_production_rejects_invalid_schema_version_type(
         "--candidate-sha",
         _candidate_sha(),
         "--image-tag",
-        "release-0123456789ab",
+        "candidate-" + _candidate_sha(),
     )
 
     assert result.returncode == 1
@@ -874,7 +919,7 @@ def test_release_gate_verify_production_rejects_invalid_schema_version_type(
 
 @pytest.mark.parametrize(
     "image_selector",
-    ["release-0123456789ab", "sha256:" + "a" * 64],
+    ["candidate-" + _candidate_sha(), "sha256:" + "a" * 64],
     ids=["tag", "digest"],
 )
 def test_release_promotion_preflight_accepts_safe_inputs(image_selector: str) -> None:
@@ -890,7 +935,7 @@ def test_release_promotion_preflight_rejects_dispatch_candidate_mismatch() -> No
     result = _run_release_input_preflight(
         candidate_sha=_candidate_sha(),
         dispatch_sha="f" * 40,
-        image_selector="release-0123456789ab",
+        image_selector="candidate-" + _candidate_sha(),
     )
 
     assert result.returncode != 0
@@ -910,7 +955,7 @@ def test_release_promotion_preflight_rejects_dispatch_candidate_mismatch() -> No
 def test_release_promotion_preflight_rejects_unsafe_candidate(candidate_sha: str) -> None:
     result = _run_release_input_preflight(
         candidate_sha=candidate_sha,
-        image_selector="release-0123456789ab",
+        image_selector="candidate-" + _candidate_sha(),
     )
 
     assert result.returncode != 0
@@ -1010,40 +1055,10 @@ def test_release_promotion_workflow_uploads_candidate_evidence() -> None:
         index for index, step in enumerate(job["steps"]) if "actions/upload-artifact" in str(step)
     )
     assert validate_step < verify_step < upload_step
-    assert "scripts/validate_environment_isolation.py" in str(job)
-    assert "deploy/environments/staging.multinode.cluster.toml" in str(job)
-    assert "deploy/environments/production.cluster.toml" in str(job)
+    assert "tests/unit/test_nebius_platform_render.py" in str(job)
+    assert "tests/ops/test_deploy_nebius_platform.py" in str(job)
     assert "actions/upload-artifact" in str(job)
     assert "release-gate-evidence" in str(job)
-
-
-def test_production_deploy_requires_successful_release_gate() -> None:
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/deploy-environment.yml").read_text())
-    dispatch_inputs = _workflow_on(workflow)["workflow_dispatch"]["inputs"]
-    assert dispatch_inputs["candidate_sha"]["required"] is False
-    assert dispatch_inputs["release_gate_run_id"]["required"] is False
-    assert workflow["permissions"]["actions"] == "read"
-
-    prod_job = workflow["jobs"]["deploy-production"]
-    assert prod_job["environment"]["name"] == "production"
-    assert prod_job["env"]["LOOM_CANDIDATE_SHA"] == "${{ inputs.candidate_sha }}"
-    assert prod_job["env"]["LOOM_RELEASE_GATE_RUN_ID"] == "${{ inputs.release_gate_run_id }}"
-    step_names = [step.get("name", "") for step in prod_job["steps"]]
-    assert step_names.index("Verify release gate evidence") < step_names.index("Deploy production")
-    assert "scripts/ops/verify_production_release_gate.sh" in str(prod_job)
-    assert "refs/heads/main" in prod_job["if"]
-    assert "refs/tags/" not in prod_job["if"]
-
-    steps = prod_job["steps"]
-    verify_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("name") == "Verify release gate evidence"
-    )
-    setup_uv_index = next(
-        index for index, step in enumerate(steps) if "astral-sh/setup-uv" in str(step)
-    )
-    assert verify_index < setup_uv_index
 
 
 def test_release_pr_template_requires_exact_promotion_evidence() -> None:

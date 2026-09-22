@@ -16,6 +16,7 @@ from loom_execution_capacity_collector.contracts import (
     CapacityObservationReceipt,
     CapacityPolicyBinding,
     KubernetesCapacitySnapshot,
+    NodeGroupPlacement,
     ProviderCapacitySnapshot,
     ResourceTotals,
 )
@@ -137,6 +138,37 @@ class _Kubernetes:
             image_pull_backoff_jobs=0,
             pending_reasons={"Pending": 1},
         )
+
+
+@pytest.mark.asyncio
+async def test_idle_collector_publishes_build_configuration_without_pods(tmp_path: Path) -> None:
+    class Provider(_Provider):
+        async def capture(self, policy: CapacityPolicyBinding) -> ProviderCapacitySnapshot:
+            snapshot = await super().capture(policy)
+            return snapshot.model_copy(update={
+                "node_count": 0, "target_node_count": 0, "ready_node_count": 0,
+                "node_group": NodeGroupPlacement(
+                    id="nodegroup-test", max_nodes=10, node_count=0, template={},
+                    raw_node=ResourceTotals(cpu_millis=4000, memory_mib=8192, storage_mib=102400),
+                ),
+            })
+
+    class Kubernetes(_Kubernetes):
+        async def capture(self, **kwargs: Any) -> KubernetesCapacitySnapshot:
+            snapshot = await super().capture(**kwargs)
+            return snapshot.model_copy(update={
+                "active_nodes": 0, "ready_nodes": 0, "pending_jobs": 0,
+                "nodes": [], "pending_pods": [],
+            })
+
+    control_plane = _ControlPlane()
+    settings = _settings(tmp_path).model_copy(update={"build_concurrency_limit": 7})
+    await collect_capacity_observation(
+        settings, control_plane=control_plane, provider=Provider(), kubernetes=Kubernetes(),
+    )
+    placement = control_plane.observations[0].placement
+    assert placement is not None and placement.nodes == [] and placement.pending_pods == []
+    assert getattr(placement, "build_concurrency_limit", None) == 7
 
 
 @pytest.mark.asyncio

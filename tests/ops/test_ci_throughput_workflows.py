@@ -69,7 +69,6 @@ def _run_image_matrix_plan(
         env={
             **os.environ,
             "EVENT_NAME": "pull_request",
-            "TRUSTED_PUBLISH": "false",
             "BASE_BRANCH": "dev",
             "REQUIRED": required,
             "UNOWNED_RUNTIME": unowned_runtime,
@@ -121,7 +120,6 @@ def _normalized_expression(value: str) -> str:
     return " ".join(value.split())
 
 
-
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
         "workflow-plan",
@@ -161,70 +159,7 @@ def test_planners_gates_publish_and_aggregation_stay_github_hosted() -> None:
             assert jobs[job_id]["runs-on"] == "ubuntu-latest"
 
 
-def test_native_image_publish_jobs_stay_on_architecture_matched_github_hosts() -> None:
-    jobs = _workflow(".github/workflows/images.yml")["jobs"]
-
-    build_runs_on = jobs["build"]["runs-on"]
-    assert "ubuntu-24.04" in build_runs_on
-    publish_runs_on = jobs["publish"]["runs-on"]
-    assert "matrix.architecture == 'arm64'" in publish_runs_on
-    assert "ubuntu-24.04-arm" in publish_runs_on
-    assert "ubuntu-24.04" in publish_runs_on
-    assert "vars." not in publish_runs_on
-    assert jobs["publish-manifest"]["runs-on"] == "ubuntu-24.04"
-
-
-def test_ci_checks_nebius_go_packages_and_keeps_manual_supervisor() -> None:
-    steps = {
-        step.get("name"): str(step.get("run", ""))
-        for step in _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    }
-
-    assert "gofmt -l ./cmd/" in steps["gofmt"]
-    assert 'go vet "${packages[@]}"' in steps["go vet"]
-    assert 'go test -race "${packages[@]}"' in steps["go test"]
-    assert not any(name.endswith(" supervisor") for name in steps if name)
-
-
-def test_go_checks_executes_required_python_go_v2_handoff() -> None:
-    steps = _workflow(".github/workflows/ci.yml")["jobs"]["go-checks"]["steps"]
-    step_by_name = {step.get("name"): step for step in steps}
-
-    setup_uv = step_by_name["Install uv"]
-    assert setup_uv["uses"] == ("astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39")
-    assert setup_uv["with"] == {
-        "version": "0.11.26",
-        "checksum": "6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0",
-        "enable-cache": True,
-        "save-cache": (
-            "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
-        ),
-        "cache-dependency-glob": "uv.lock",
-    }
-    assert step_by_name["Set up Python 3.11"]["run"] == "uv python install 3.11"
-    assert step_by_name["Sync locked workspace"]["run"] == (
-        "uv sync --locked --all-packages --extra dev --python 3.11"
-    )
-    assert step_by_name["Build Go V2 handoff test binary"]["run"] == (
-        'go test -race -c -o "${RUNNER_TEMP}/loom-task-image-builder-supervisor.test" '
-        "./cmd/loom-task-image-builder-supervisor"
-    )
-    for name in ("Install uv", "Set up Python 3.11", "Sync locked workspace",
-                 "Build Go V2 handoff test binary", "Python-Go V2 handoff"):
-        assert step_by_name[name]["if"] == "env.CI_TEST_SCOPE == 'all'"
-    handoff = step_by_name["Python-Go V2 handoff"]
-    assert handoff["env"] == {
-        "LOOM_GO_V2_TEST_BINARY": ("${{ runner.temp }}/loom-task-image-builder-supervisor.test"),
-        "LOOM_GO_V2_TEST_REQUIRED": "1",
-    }
-    assert handoff["run"] == (
-        'uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" '
-        "tests/integration/test_task_image_builder_guard_local_flow.py "
-        "tests/integration/test_task_image_publication_full_flow.py"
-    )
-
-
-def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
+def test_coverage_artifacts_map_hosted_checkout_roots() -> None:
     config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     paths = config["tool"]["coverage"]["paths"]
 
@@ -232,23 +167,15 @@ def test_coverage_artifacts_map_hosted_and_oldlab_checkout_roots() -> None:
         assert paths[path_group] == [
             source_root,
             f"/home/runner/work/*/*/{source_root}",
-            f"/opt/actions-runner/_work/*/*/{source_root}",
         ]
 
 
 def test_source_workflows_share_native_run_identity() -> None:
     workflows = {path: _workflow(path) for path in GATE_CONTRACTS}
-    common_run_names = {
-        workflow["run-name"]
-        for path, workflow in workflows.items()
-        if path != ".github/workflows/images.yml"
-    }
+    common_run_names = {workflow["run-name"] for workflow in workflows.values()}
 
     assert len(common_run_names) == 1
-    image_run_name = workflows[".github/workflows/images.yml"]["run-name"]
-    assert "gate=trusted-publish / head={0} / base={1}" in image_run_name
-    assert "inputs.trusted_publish == true" in image_run_name
-    for run_name in (common_run_names.pop(), image_run_name):
+    for run_name in common_run_names:
         assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" not in run_name
         assert "' ' ||" not in run_name
         for mode in ("manual", "filtered", "full"):
@@ -357,21 +284,18 @@ def test_source_gate_names_are_native_and_stable() -> None:
         plan_ref = f"needs.{plan_job_id}.outputs"
         expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
         trusted_recovery = ""
-        if workflow_path == ".github/workflows/images.yml":
-            trusted_recovery = (
-                "github.event_name == 'workflow_dispatch' && "
-                "needs.plan.outputs.trusted_publish == 'true' && "
-                "'images-gate-trusted-publish' || "
-            )
-
         if workflow_path == ".github/workflows/ci.yml":
             trusted_recovery = "github.event_name == 'schedule' && 'repository-checks-scheduled' || "
 
+        push_name = (
+            f"github.event_name == 'push' && '{protected_name}-push' || "
+            if workflow_path != ".github/workflows/images.yml" else ""
+        )
         assert expression == _normalized_expression(
             "${{ "
             f"{trusted_recovery}"
             f"github.event_name == 'workflow_dispatch' && '{protected_name}-manual' || "
-            f"github.event_name == 'push' && '{protected_name}-push' || "
+            f"{push_name}"
             f"{plan_ref}.gate_mode == 'full' && '{protected_name}' || "
             f"'{protected_name}-filtered' "
             "}}"
@@ -382,8 +306,10 @@ def test_source_gate_names_are_native_and_stable() -> None:
 
 def test_push_aggregates_cannot_duplicate_protected_names_on_promotion_heads() -> None:
     for workflow_path, (gate_id, protected_name) in GATE_CONTRACTS.items():
-        expression = _normalized_expression(_workflow(workflow_path)["jobs"][gate_id]["name"])
-
+        workflow = _workflow(workflow_path)
+        if "push" not in _workflow_on(workflow):
+            continue
+        expression = _normalized_expression(workflow["jobs"][gate_id]["name"])
         assert f"github.event_name == 'push' && '{protected_name}-push'" in expression
 
 
@@ -432,12 +358,12 @@ def test_images_builds_use_planner_selection() -> None:
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
-def test_images_multi_arch_jobs_have_bounded_build_budgets() -> None:
+def test_images_jobs_have_bounded_build_budgets() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
 
     assert jobs["build"]["timeout-minutes"] == 45
-    assert jobs["publish"]["timeout-minutes"] == 45
+    assert jobs["nebius-harness-build"]["timeout-minutes"] == 45
 
 
 @pytest.mark.parametrize(
@@ -476,26 +402,19 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert any(line.strip().startswith("uv run --no-sync pytest ")
                and '"${test_paths[@]}"' in line for line in scripts.splitlines())
     assert "CI_PYTEST_MARKERS" in scripts
-    assert "scripts/validate_environment_isolation.py" in scripts
-    normalized_scripts = " ".join(scripts.replace("\\\n", " ").split())
-    for config in (
-        "deploy/environments/staging.multinode.cluster.toml",
-        "deploy/environments/production.cluster.toml",
-    ):
-        assert config in normalized_scripts
-    assert 'loom cluster render --config "${config}"' in normalized_scripts
-    assert 'loom cluster audit --config "${config}"' in normalized_scripts
+    assert "validate_environment_isolation.py" not in scripts
+    assert "loom cluster render" not in scripts
     assert contract["timeout-minutes"] <= 15
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
-    push_trigger = _workflow_on(workflow)["push"]
+    assert "push" not in _workflow_on(workflow)
 
     assert "plan" in jobs
     assert "images" in jobs["plan"]["outputs"]
-    assert "native_builds" in jobs["plan"]["outputs"]
+    assert "ordinary_builds" in jobs["plan"]["outputs"]
     assert "stage1_images" not in jobs["plan"]["outputs"]
     build = jobs["build"]
     assert set(build["needs"]) == {
@@ -508,7 +427,6 @@ def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     plan_script = "\n".join(step.get("run", "") for step in jobs["plan"]["steps"] if "run" in step)
     assert "scripts/component_ownership.py" in plan_script
     assert "plan-images" in plan_script
-    assert push_trigger == {"branches": ["main"]}
 
 
 def test_ci_push_safety_net_excludes_already_admitted_dev_merges() -> None:
@@ -670,7 +588,6 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
         if step.get("name") == "Build without registry or cache write authority"
     )
     build_script = build_step["run"]
-    publish = workflow["jobs"]["publish"]
 
     assert "docker login" not in build_script
     assert "--push" not in build_script
@@ -680,8 +597,6 @@ def test_images_merge_groups_do_not_publish_or_write_cache() -> None:
     assert ".docker.tar" in build_script
     assert "type=oci" not in build_script
     assert "type=registry" not in build_script
-    assert "github.event_name == 'push'" in publish["if"]
-    assert any(step.get("name") == "Log in to GHCR" for step in publish["steps"])
 
 
 def test_untrusted_image_archives_are_scanned_job_local_and_never_uploaded() -> None:
@@ -707,35 +622,10 @@ def test_untrusted_image_archives_are_scanned_job_local_and_never_uploaded() -> 
     assert all("upload-artifact" not in step.get("uses", "") for step in steps)
 
 
-def test_trusted_publisher_rebuilds_without_candidate_resolution() -> None:
-    jobs = _workflow(".github/workflows/images.yml")["jobs"]
-    publish = jobs["publish"]
-    scripts = "\n".join(str(step.get("run", "")) for step in publish["steps"] if "run" in step)
-    names = [step.get("name") for step in publish["steps"]]
-
-    assert "resolve-candidate" not in jobs
-    assert publish["needs"] == [
-        "plan",
-        "trivy-binary",
-        "personal-dev-scanner-cache-assets",
-    ]
-    assert publish["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
-    )
-    assert "Build trusted image archive" in names
-    assert "Download exact PR candidate archive" not in names
-    assert "gh run download" not in scripts
-    assert "candidate_artifact" not in str(publish)
-    assert "verified-pr-candidate" not in str(publish)
-    assert "needs.resolve-candidate" not in str(publish)
-
-
-def test_release_images_are_scanned_attested_and_verified_before_manifest_join() -> None:
+def test_candidate_images_use_verified_trivy_binaries_and_complete_scans() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     trivy_binary = workflow["jobs"]["trivy-binary"]
     build = workflow["jobs"]["build"]
-    publish = workflow["jobs"]["publish"]
-    manifest = workflow["jobs"]["publish-manifest"]
 
     assert trivy_binary["needs"] == ["plan"]
     assert trivy_binary["permissions"] == {"contents": "read"}
@@ -751,21 +641,15 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         for step in trivy_binary["steps"]
         if step.get("name") == "Upload exact verified Trivy binary"
     )
-    assert "architectures=(amd64)" in install["run"]
-    assert 'if [[ "$PUBLISHING" == "true" ]]; then architectures+=(arm64); fi' in install["run"]
+    assert "--architecture amd64" in install["run"]
+    assert "arm64" not in install["run"]
     assert "python3 scripts/install_trivy.py" in install["run"]
-    assert '--architecture "$architecture"' in install["run"]
     assert "sha256sum --check trivy.sha256" in install["run"]
     assert upload["with"]["name"] == "trivy-binaries-run-${{ github.run_id }}"
     assert upload["with"]["overwrite"] is True
     assert build["needs"] == [
         "plan",
         "trivy-binary",
-    ]
-    assert publish["needs"] == [
-        "plan",
-        "trivy-binary",
-        "personal-dev-scanner-cache-assets",
     ]
 
     build_step_names = [step.get("name") for step in build["steps"]]
@@ -819,325 +703,12 @@ def test_release_images_are_scanned_attested_and_verified_before_manifest_join()
         build_step_names.index("Scan native image archive")
     )
 
-    publish_names = [step.get("name") for step in publish["steps"]]
-    trusted_scan = next(
-        step for step in publish["steps"] if step.get("name") == "Scan trusted image archive"
-    )
-    architecture_publish = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Publish scanned architecture image"
-    )
-    architecture_attestation = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Attest published architecture digest"
-    )
-    assert "uses" not in trusted_scan
-    assert trusted_scan["shell"] == "bash"
-    assert trusted_scan["env"] == {
-        "ARCHIVE": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.docker.tar"),
-        "REPORT": ("/tmp/${{ matrix.image }}-${{ matrix.architecture }}.release.trivy.json"),
-        "IMAGE_NAME": "${{ matrix.image }}",
-        "ARCHITECTURE": "${{ matrix.architecture }}",
-    }
-    assert trusted_scan["run"] == build_scan["run"]
-    assert architecture_publish["id"] == "architecture-publish"
-    push_command = 'push_output=$(scripts/ops/docker_push_with_retry.sh "$target")'
-    assert push_command in architecture_publish["run"]
-    assert "subject_name=$image" in architecture_publish["run"]
-    assert "subject_digest=$digest" in architecture_publish["run"]
-    push_tail = architecture_publish["run"].split(push_command, maxsplit=1)[1]
-    assert 'imagetools inspect --raw "${image}@${digest}"' in push_tail
-    assert 'imagetools inspect "$target"' not in push_tail
-    assert architecture_attestation["uses"].startswith("actions/attest-build-provenance@")
-    assert architecture_attestation["with"]["predicate-type"] == ("https://slsa.dev/provenance/v1")
-    assert architecture_attestation["with"]["push-to-registry"] is True
-    assert publish_names.index("Scan trusted image archive") < publish_names.index(
-        "Record trusted scan digest"
-    )
-    assert publish_names.index("Record trusted scan digest") < publish_names.index(
-        "Publish scanned architecture image"
-    )
-    assert publish_names.index("Publish scanned architecture image") < publish_names.index(
-        "Attest published architecture digest"
-    )
-    assert publish_names.index("Attest published architecture digest") < publish_names.index(
-        "Verify published architecture attestation"
-    )
 
-    manifest_names = [step.get("name") for step in manifest["steps"]]
-    resolve = next(
-        step["run"]
-        for step in manifest["steps"]
-        if step.get("name") == "Verify architecture attestations"
-    )
-    join = next(
-        step["run"]
-        for step in manifest["steps"]
-        if step.get("name") == "Join verified native image manifest"
-    )
-    final_attestation = next(
-        step for step in manifest["steps"] if step.get("name") == "Attest published manifest digest"
-    )
-    assert "gh attestation verify" in resolve
-    assert "--signer-workflow" in resolve
-    assert "--source-digest" in resolve
-    assert "--source-ref" in resolve
-    assert "--deny-self-hosted-runners" in resolve
-    assert '"${image}@${amd64_digest}"' in join
-    assert '"${image}@${arm64_digest}"' in join
-    assert final_attestation["uses"].startswith("actions/attest-build-provenance@")
-    assert final_attestation["with"]["push-to-registry"] is True
-    assert manifest_names.index("Verify architecture attestations") < manifest_names.index(
-        "Join verified native image manifest"
-    )
-    assert manifest_names.index("Attest published manifest digest") < manifest_names.index(
-        "Verify published manifest attestation"
-    )
-    assert manifest_names.index("Verify published manifest attestation") < (
-        manifest_names.index("Publish verified manifest tags")
-    )
-
-
-def test_release_architecture_records_are_exact_and_trusted_rebuild_only() -> None:
-    jobs = _workflow(".github/workflows/images.yml")["jobs"]
-    publish = jobs["publish"]
-    manifest = jobs["publish-manifest"]
-    publish_names = [step.get("name") for step in publish["steps"]]
-
-    predicate = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Prepare architecture release predicate"
-    )
-    verify = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Verify published architecture attestation"
-    )
-    record = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Record verified architecture evidence"
-    )
-    validate_record = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Validate verified architecture evidence"
-    )
-    upload = next(
-        step
-        for step in publish["steps"]
-        if step.get("name") == "Upload verified architecture evidence"
-    )
-    for step in (predicate, verify, record):
-        assert "--build-mode" in step["run"]
-        assert "trusted-rebuild" in step["run"]
-        assert "--candidate-" not in step["run"]
-        assert "verified-pr-candidate" not in step["run"]
-    assert publish_names.index("Verify published architecture attestation") < (
-        publish_names.index("Record verified architecture evidence")
-    )
-    assert publish_names.index("Record verified architecture evidence") < (
-        publish_names.index("Validate verified architecture evidence")
-    )
-    assert publish_names.index("Validate verified architecture evidence") < (
-        publish_names.index("Upload verified architecture evidence")
-    )
-    assert "validate-architecture-record" in validate_record["run"]
-    assert upload["uses"] == (
-        f"actions/upload-artifact@{_locked_action_sha('actions/upload-artifact')}"
-    )
-    assert upload["with"] == {
-        "name": (
-            "image-release-record-${{ matrix.image }}-${{ matrix.architecture }}-"
-            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-        ),
-        "path": (
-            "/tmp/loom-image-release-records/${{ matrix.image }}-${{ matrix.architecture }}.json"
-        ),
-        "if-no-files-found": "error",
-        "retention-days": 1,
-    }
-
-    downloads = [
-        step
-        for step in manifest["steps"]
-        if str(step.get("name", "")).startswith("Download exact ")
-        and str(step.get("name", "")).endswith(" architecture evidence")
-    ]
-    validate = next(
-        step
-        for step in manifest["steps"]
-        if step.get("name") == "Validate exact architecture evidence"
-    )
-    assert len(downloads) == 2
-    expected_downloads = {
-        "Download exact AMD64 architecture evidence": (
-            "image-release-record-${{ matrix.image }}-amd64-"
-            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-        ),
-        "Download exact ARM64 architecture evidence": (
-            "image-release-record-${{ matrix.image }}-arm64-"
-            "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-        ),
-    }
-    for download in downloads:
-        architecture = "amd64" if "AMD64" in download["name"] else "arm64"
-        assert download["uses"] == (
-            f"actions/download-artifact@{_locked_action_sha('actions/download-artifact')}"
-        )
-        assert download["with"] == {
-            "name": expected_downloads[download["name"]],
-            "path": f"/tmp/loom-image-release-artifacts/{architecture}",
-        }
-
-    concrete_names = {
-        template.replace("${{ matrix.image }}", image)
-        for template in expected_downloads.values()
-        for image in ("llm-gateway", "llm-gateway-sandbox")
-    }
-    assert len(concrete_names) == 4
-    assert "validate-architecture-records" in validate["run"]
-    assert "--records-dir /tmp/loom-image-release-artifacts" in validate["run"]
-    verify_records = next(
-        step for step in manifest["steps"] if step.get("name") == "Verify architecture attestations"
-    )
-    assert (
-        'record="/tmp/loom-image-release-artifacts/${architecture}/'
-        '${IMAGE_NAME}-${architecture}.json"' in verify_records["run"]
-    )
-    assert set(manifest["permissions"]) >= {"actions", "attestations", "contents"}
-
-
-def test_manifest_digest_is_captured_once_and_tags_follow_verification() -> None:
-    manifest = _workflow(".github/workflows/images.yml")["jobs"]["publish-manifest"]
-    names = [step.get("name") for step in manifest["steps"]]
-    join = next(
-        step
-        for step in manifest["steps"]
-        if step.get("name") == "Join verified native image manifest"
-    )
-    script = join["run"]
-
-    assert '--tag "${image}:manifest-${HEAD_SHA}"' in script
-    assert "docker buildx imagetools create" in script
-    assert "--progress plain" in script
-    assert "create_output=" not in script
-    assert "pushing manifest for" not in script
-    assert "imagetools inspect --raw" in script
-    assert '"${image}:manifest-${HEAD_SHA}" > "$tag_manifest"' in script
-    assert 'manifest_digest="sha256:$(sha256sum "$tag_manifest"' in script
-    assert 'imagetools inspect --raw "${image}@${manifest_digest}"' in script
-    assert 'cmp --silent "$tag_manifest" "$digest_manifest"' in script
-    assert "ci_image_release_evidence.py validate-manifest" in script
-    assert '--manifest "/tmp/loom-image-manifest.json"' in script
-    assert "python3 - <<'PY'" not in script
-    assert 'imagetools inspect "${image}:manifest-${HEAD_SHA}"' not in script
-    assert names.index("Verify published manifest attestation") < names.index(
-        "Publish verified manifest tags"
-    )
-    publish_tags = next(
-        step["run"]
-        for step in manifest["steps"]
-        if step.get("name") == "Publish verified manifest tags"
-    )
-    assert "scripts/ci_registry_readback.py digest" in publish_tags
-    assert "--attempts 6 --delay-seconds 2" in publish_tags
-
-
-def test_release_record_helper_rejects_incomplete_workflow_handoff(tmp_path: Path) -> None:
-    records = tmp_path / "records"
-    records.mkdir()
-    (records / "amd64").mkdir()
-    (records / "amd64" / "capacity-manager-amd64.json").write_text("{}\n", encoding="utf-8")
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts/ci_image_release_evidence.py"),
-            "validate-architecture-records",
-            "--repository",
-            "qianyi-sun/loom",
-            "--ref-name",
-            "dev",
-            "--head-sha",
-            "a" * 40,
-            "--tree-sha",
-            "b" * 40,
-            "--run-id",
-            "123",
-            "--run-attempt",
-            "2",
-            "--event-name",
-            "push",
-            "--repository-id",
-            "123456789",
-            "--repository-owner-id",
-            "987654321",
-            "--runner-environment",
-            "github-hosted",
-            "--image",
-            "capacity-manager",
-            "--image-name",
-            "loom-capacity-manager",
-            "--dockerfile",
-            "deploy/Dockerfile.capacity-manager",
-            "--build-context",
-            ".",
-            "--records-dir",
-            str(records),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "exactly the expected architecture files" in result.stderr
-
-
-def test_pr_image_archive_stays_job_local_and_is_not_release_input() -> None:
-    jobs = _workflow(".github/workflows/images.yml")["jobs"]
-    build = jobs["build"]
-    publish = jobs["publish"]
-    build_scan = next(
-        step["run"] for step in build["steps"] if step.get("name") == "Scan native image archive"
-    )
-    publish_script = next(
-        step["run"]
-        for step in publish["steps"]
-        if step.get("name") == "Publish scanned architecture image"
-    )
-
-    assert "resolve-candidate" not in jobs
-    assert '--input "$ARCHIVE"' in build_scan
-    assert all("upload-artifact" not in step.get("uses", "") for step in build["steps"])
-    assert publish["strategy"]["matrix"]["include"] == (
-        "${{ fromJSON(needs.plan.outputs.native_builds) }}"
-    )
-    assert 'docker tag "$local_image" "$target"' in publish_script
-    assert 'scripts/ops/docker_push_with_retry.sh "$target"' in publish_script
-    assert ".release.docker.tar" in publish_script
-    assert 'docker load --input "$archive"' in publish_script
-
-
-def test_all_release_child_pushes_use_the_bounded_observable_retry_helper() -> None:
-    jobs = _workflow(".github/workflows/images.yml")["jobs"]
-    architecture_push = next(
-        step["run"]
-        for step in jobs["publish"]["steps"]
-        if step.get("name") == "Publish scanned architecture image"
-    )
-    expected = 'push_output=$(scripts/ops/docker_push_with_retry.sh "$target")'
-    assert expected in architecture_push
-
-
-def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
+def test_image_builds_pass_exact_full_head_sha() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     expected_steps = {
         "build": "Build without registry or cache write authority",
-        "publish": "Build trusted image archive",
+        "nebius-harness-build": "Build without registry or cache write authority",
     }
 
     for job_name, step_name in expected_steps.items():
@@ -1145,18 +716,11 @@ def test_manifest_image_build_and_publish_pass_exact_full_head_sha() -> None:
             step for step in workflow["jobs"][job_name]["steps"] if step.get("name") == step_name
         )
         script = step["run"]
-        if job_name == "build":
-            assert "github.event.pull_request.head.sha" in step["env"]["HEAD_SHA"]
-        else:
-            assert step["env"]["HEAD_SHA"] == "${{ github.sha }}"
+        assert "github.event.pull_request.head.sha" in step["env"]["HEAD_SHA"]
         assert step["env"]["BUILD_CONTEXT"] == "${{ matrix.context }}"
         assert '--build-arg "LOOM_BUILD_SHA=${HEAD_SHA}"' in script
-        if job_name == "build":
-            assert 'build_args+=("$BUILD_CONTEXT")' in script
-            context_marker = 'build_args+=("$BUILD_CONTEXT")'
-        else:
-            assert '"$BUILD_CONTEXT"' in script
-            context_marker = '"$BUILD_CONTEXT"'
+        context_marker = 'build_args+=("$BUILD_CONTEXT")'
+        assert context_marker in script
         assert script.index("LOOM_BUILD_SHA=${HEAD_SHA}") < script.rindex(context_marker)
         assert 'if [[ "$IMAGE_NAME" == "service" ]]' not in script
         assert "build_args+=(.)" not in script
@@ -1218,9 +782,8 @@ def test_manual_and_filtered_contexts_have_distinct_event_specific_names() -> No
                 "EVENT_NAME": "pull_request",
                 "BUILD_RESULT": "skipped",
                 "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped",
-                "SCANNER_BUILD_RESULT": "skipped",
-                "PUBLISH_RESULT": "skipped",
+            "HARNESS_BUILD_RESULT": "skipped",
+                "STANDARD_IMAGES": '[{"image":"service"}]',
             },
         ),
         (
@@ -1303,123 +866,18 @@ def test_optional_gate_scripts_preserve_result_semantics(
 
 
 @pytest.mark.parametrize(
-    (
-        "event_name",
-        "required",
-        "build_result",
-        "publish_result",
-        "manifest_result",
-    ),
+    ("event_name", "required", "build_result"),
     [
-        ("pull_request", "true", "success", "skipped", "skipped"),
-        ("merge_group", "true", "success", "skipped", "skipped"),
-        ("workflow_dispatch", "true", "success", "skipped", "skipped"),
-        ("push", "true", "skipped", "success", "success"),
-        ("pull_request", "false", "skipped", "skipped", "skipped"),
+        ("workflow_dispatch", "true", "skipped"),
+        ("push", "true", "success"),
+        ("pull_request", "false", "success"),
+        ("invalid", "true", "success"),
     ],
 )
-def test_images_gate_separates_untrusted_build_from_trusted_publish(
+def test_images_gate_rejects_missing_builds_or_invalid_events(
     event_name: str,
     required: str,
     build_result: str,
-    publish_result: str,
-    manifest_result: str,
-) -> None:
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/images.yml", "images-gate"),
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "EVENT_NAME": event_name,
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "REQUIRED": required,
-            "BUILD_RESULT": build_result,
-            "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
-            "PUBLISH_RESULT": publish_result,
-            "MANIFEST_RESULT": manifest_result,
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-@pytest.mark.parametrize(
-    ("event_name", "required", "release_result", "expected_returncode"),
-    [
-        ("push", "true", "success", 0),
-        ("push", "true", "skipped", 1),
-        ("push", "false", "skipped", 0),
-        ("pull_request", "true", "skipped", 0),
-    ],
-)
-def test_images_gate_requires_personal_release_only_for_protected_selected_publish(
-    event_name: str,
-    required: str,
-    release_result: str,
-    expected_returncode: int,
-) -> None:
-    selected = json.dumps(
-        [
-            {"image": "service"},
-            {"image": "web"},
-            {"image": "personal-dev-builder"},
-            {"image": "personal-dev-activation-agent"},
-            {"image": "personal-dev-native-builder-agent"},
-            {"image": "personal-dev-scanner-cache"},
-        ],
-        separators=(",", ":"),
-    )
-    protected_publish = event_name == "push" and required == "true"
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/images.yml", "images-gate"),
-        text=True,
-        capture_output=True,
-        env={
-            "PATH": os.environ["PATH"],
-            "EVENT_NAME": event_name,
-            "TRUSTED_PUBLISH": "false",
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "REQUIRED": required,
-            "BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": "skipped" if protected_publish or required == "false" else "success",
-            "SCANNER_BUILD_RESULT": "skipped"
-            if protected_publish or required == "false"
-            else "success",
-            "PUBLISH_RESULT": "success" if protected_publish else "skipped",
-            "MANIFEST_RESULT": "success" if protected_publish else "skipped",
-            "PERSONAL_DEV_RELEASE_RESULT": release_result,
-            "STANDARD_IMAGES": selected,
-        },
-        check=False,
-    )
-
-    assert result.returncode == expected_returncode, result.stderr
-
-
-@pytest.mark.parametrize(
-    ("event_name", "required", "build_result", "publish_result"),
-    [
-        ("pull_request", "true", "success", "success"),
-        ("workflow_dispatch", "true", "skipped", "success"),
-        ("push", "true", "success", "skipped"),
-        ("pull_request", "false", "success", "skipped"),
-        ("invalid", "true", "success", "skipped"),
-    ],
-)
-def test_images_gate_rejects_cross_lane_or_ambiguous_results(
-    event_name: str,
-    required: str,
-    build_result: str,
-    publish_result: str,
 ) -> None:
     result = subprocess.run(
         ["bash"],
@@ -1433,9 +891,8 @@ def test_images_gate_rejects_cross_lane_or_ambiguous_results(
             "REQUIRED": required,
             "BUILD_RESULT": build_result,
             "HARBOR_REQUIRED": "true",
-        "HARNESS_BUILD_RESULT": build_result,
-            "SCANNER_BUILD_RESULT": "skipped",
-            "PUBLISH_RESULT": publish_result,
+            "HARNESS_BUILD_RESULT": build_result,
+            "STANDARD_IMAGES": '[{"image":"service"}]',
         },
         check=False,
     )
@@ -1630,10 +1087,6 @@ def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
             {
                 "build": "BUILD_RESULT",
                 "nebius-harness-build": "HARNESS_BUILD_RESULT",
-                "scanner-cache-build": "SCANNER_BUILD_RESULT",
-                "publish": "PUBLISH_RESULT",
-                "publish-manifest": "MANIFEST_RESULT",
-                "personal-dev-trusted-release": "PERSONAL_DEV_RELEASE_RESULT",
             },
         ),
         ".github/workflows/cluster-smoke.yml": (
@@ -1975,7 +1428,7 @@ def test_protected_workflows_share_one_per_pr_admission_slot() -> None:
         assert "background" not in group
 
 
-def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None:
+def test_generic_rendered_images_are_covered_by_manifest_matrix() -> None:
     result = subprocess.run(
         [
             sys.executable,
@@ -1984,7 +1437,7 @@ def test_staging_active_rendered_images_are_covered_by_manifest_matrix() -> None
             "cluster",
             "render",
             "--config",
-            "deploy/environments/staging.multinode.cluster.toml",
+            "tests/fixtures/cluster-render/staging.multinode.cluster.toml",
         ],
         cwd=REPO_ROOT,
         text=True,

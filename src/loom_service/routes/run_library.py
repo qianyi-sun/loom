@@ -29,6 +29,7 @@ from loom.db.schema import (
     Trial,
 )
 from loom.security.redaction import redact_mapping, redact_text
+from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -38,6 +39,7 @@ from loom_service.auth_guards import (
 from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.delivery_export import (
+    CanonicalTrialBundleFile,
     DeliveryExportError,
     canonical_bundle_from_artifact,
 )
@@ -49,10 +51,15 @@ from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
+from loom_service.routes.batches import (
+    _freeze_task_resource_requests,
+    _reject_if_backend_cannot_execute_or_cold_start,
+)
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.usage_accounting import empty_usage_projection, usage_by_batch_ids
 
 router = APIRouter()
 
@@ -159,6 +166,26 @@ def _trial_is_org_visible(
         and trial.state in _ORG_VISIBLE_TRIAL_STATES
     )
     return trial_shared
+
+
+def _require_nebius_source_backend(backend: str | None, *, action: str) -> None:
+    """Refuse to derive a new submission from a batch on a retired backend.
+
+    Nebius is the only supported hosted backend. Historical batches keep their
+    original backend for display, but a new batch cannot inherit it, and it
+    cannot be silently relabelled as Nebius: that would skip the Nebius
+    admission and runtime-profile freeze that ordinary submission performs.
+    Disposable local execution (LOOM_LOCAL_EXECUTION=1) keeps worker backends.
+    """
+    if backend != NEBIUS_BACKEND and not local_execution_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"source batch used backend {backend!r}, which is no longer "
+                f"supported; Loom hosted execution is Nebius-only. Submit a "
+                f"new batch instead of {action}."
+            ),
+        )
 
 
 def _can_read_batch(ctx: Any, batch: Batch) -> bool:
@@ -309,6 +336,43 @@ def _artifact_content_allowed(
         and artifact.redaction_state in _DOWNLOAD_REDACTION_STATES
         and _artifact_parent_visible(artifact, batch=batch, trial=trial)
     )
+
+
+def _artifact_reuse_allowed(
+    ctx: Any,
+    artifact: Artifact,
+    *,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+) -> bool:
+    # Internal verification permits reuse within the producing team; it does
+    # not certify the content for cross-team sharing or bypass blocked content.
+    if artifact.blocked_reason:
+        return False
+    if (
+        ctx.team_id == artifact.team_id
+        and artifact.safety_state in {"safe", "verified_internal"}
+        and artifact.share_status in {"pending_scan", "shared"}
+        and artifact.redaction_state in {"pending", "not_required", "redacted"}
+    ):
+        return True
+    return _artifact_content_allowed(artifact, batch=batch, trial=trial)
+
+
+def _canonical_artifact_files(
+    artifact: Artifact, trial: Trial | None,
+) -> tuple[CanonicalTrialBundleFile, ...]:
+    if trial is None:
+        return ()
+    try:
+        bundle = canonical_bundle_from_artifact(artifact, trial=trial)
+    except DeliveryExportError:
+        return ()
+    # Raw source evidence remains available through the canonical bundle
+    # download; only canonical output files are offered as reusable inputs.
+    if bundle is None:
+        return ()
+    return tuple(item for item in bundle.files if item.relative_path.startswith("files/"))
 
 
 def _artifact_metadata_visible(
@@ -488,8 +552,9 @@ def _serialize_typed_artifact(
     batch: Batch | None = None,
     trial: Trial | None = None,
     parents: list[dict[str, Any]] | None = None,
+    bundle_file: CanonicalTrialBundleFile | None = None,
 ) -> dict[str, Any] | None:
-    key = _artifact_storage_key(artifact)
+    key = bundle_file.ref.key if bundle_file else _artifact_storage_key(artifact)
     if key is None:
         return None
     role = _artifact_group_for_type(artifact.artifact_type)
@@ -500,6 +565,9 @@ def _serialize_typed_artifact(
         trial=trial,
     )
     full_metadata = owner_or_admin or content_allowed
+    reuse_allowed = _artifact_reuse_allowed(
+        ctx, artifact, batch=batch, trial=trial,
+    )
     can_download = (
         artifact.trial_id is not None
         and request is not None
@@ -509,7 +577,10 @@ def _serialize_typed_artifact(
         "id": str(artifact.id),
         "trial_id": str(artifact.trial_id) if artifact.trial_id else None,
         "key": key if full_metadata else f"redacted-artifact:{artifact.id}",
-        "size": _artifact_storage_size(artifact) if full_metadata else 0,
+        "size": (
+            (bundle_file.size_bytes if bundle_file else _artifact_storage_size(artifact))
+            if full_metadata else 0
+        ),
         "role": role,
         "artifact_type": artifact.artifact_type,
         "artifact_type_label": _artifact_type_label(artifact.artifact_type),
@@ -519,19 +590,25 @@ def _serialize_typed_artifact(
         "share_status": artifact.share_status,
         "safety_state": artifact.safety_state,
         "redaction_state": artifact.redaction_state,
-        "blocked_reason": (
-            _safe_artifact_blocked_reason(artifact)
-            if artifact.safety_state != "safe"
-            or artifact.redaction_state not in _DOWNLOAD_REDACTION_STATES
-            or artifact.share_status != "shared"
-            else None
-        ),
+        "can_reuse": artifact.trial_id is not None and reuse_allowed,
+        "blocked_reason": None if reuse_allowed else _safe_artifact_blocked_reason(artifact),
         "content_hash": artifact.content_hash if full_metadata else None,
         "storage": artifact.storage if full_metadata else None,
         "provenance": artifact.provenance if full_metadata else {},
         "metadata": artifact.artifact_metadata if full_metadata else {},
         "parents": (parents or []) if full_metadata else [],
     }
+    if bundle_file is not None and full_metadata:
+        entry.update({
+            "relative_path": bundle_file.relative_path,
+            "content_hash": bundle_file.sha256,
+            "storage": {
+                "bucket": bundle_file.ref.bucket,
+                "key": bundle_file.ref.key,
+                "media_type": bundle_file.media_type,
+                "size_bytes": bundle_file.size_bytes,
+            },
+        })
     if can_download and request is not None:
         entry["download_url"] = str(
             public_url_for(
@@ -543,6 +620,33 @@ def _serialize_typed_artifact(
     else:
         entry["download_url"] = None
     return entry
+
+
+def _serialize_typed_artifacts(
+    request: Request | None,
+    artifact: Artifact,
+    owner_team: Team,
+    *,
+    ctx: Any,
+    batch: Batch | None,
+    trial: Trial | None,
+    parents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _artifact_metadata_visible(ctx, artifact, batch=batch, trial=trial):
+        return []
+    files: Sequence[CanonicalTrialBundleFile | None] = (
+        _canonical_artifact_files(artifact, trial)
+        if _artifact_storage_key(artifact) is None else (None,)
+    )
+    entries = []
+    for item in files:
+        entry = _serialize_typed_artifact(
+            request, artifact, owner_team, ctx=ctx, batch=batch, trial=trial,
+            parents=parents, bundle_file=item,
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
 
 
 def _legacy_artifact_type(item: dict[str, Any]) -> str:
@@ -796,7 +900,7 @@ def _artifact_inventory(
         typed = typed_by_trial.get(trial.id) or []
         if typed:
             for artifact in typed:
-                entry = _serialize_typed_artifact(
+                entries = _serialize_typed_artifacts(
                     request,
                     artifact,
                     owner_team,
@@ -805,13 +909,13 @@ def _artifact_inventory(
                     trial=trial,
                     parents=parents_by_artifact.get(artifact.id, []),
                 )
-                if entry is not None:
+                for entry in entries:
                     grouped[entry["role"]].append(entry)
             continue
         for item in _artifact_items(getattr(trial, "trajectory_index", None)):
-            entry = _serialize_legacy_artifact(request, trial, owner_team, item)
-            if entry is not None:
-                grouped[entry["role"]].append(entry)
+            legacy_entry = _serialize_legacy_artifact(request, trial, owner_team, item)
+            if legacy_entry is not None:
+                grouped[legacy_entry["role"]].append(legacy_entry)
     return grouped
 
 
@@ -1390,6 +1494,8 @@ async def _serialize_batch(
         "artifact_summary": artifact_summary,
         "artifact_summary_truncated": artifact_summary_truncated,
     }
+    usage = await usage_by_batch_ids(session, [batch.id])
+    out.update(usage.get(batch.id, empty_usage_projection()))
     if include_debug:
         llm_calls = await _llm_calls_for_trials(session, trials)
         debug_evidence = build_batch_debug_evidence(
@@ -1600,16 +1706,16 @@ async def _load_trial_with_batch(
 
 async def _typed_artifact_for_trial_key(
     session: Any,
-    trial_id: UUID,
+    trial: Trial,
     key: str,
-) -> Artifact | None:
+) -> tuple[Artifact, CanonicalTrialBundleFile | None] | None:
     rows = cast(
         list[Artifact],
         list(
             (
                 await session.execute(
                     select(Artifact)
-                    .where(Artifact.trial_id == trial_id)
+                    .where(Artifact.trial_id == trial.id)
                     .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
                 )
             )
@@ -1619,7 +1725,10 @@ async def _typed_artifact_for_trial_key(
     )
     for artifact in rows:
         if _artifact_storage_key(artifact) == key:
-            return artifact
+            return artifact, None
+        for item in _canonical_artifact_files(artifact, trial):
+            if item.ref.key == key:
+                return artifact, item
     return None
 
 
@@ -1744,6 +1853,7 @@ async def list_run_library_batches(
     serialized: list[dict[str, Any]] = []
     batch_ids = [batch.id for batch, _team in page_rows]
     trial_rollups = await _batch_list_trial_rollups(session, batch_ids)
+    usage = await usage_by_batch_ids(session, batch_ids)
     artifact_summaries, truncated_artifact_summaries = await _batch_list_artifact_summaries(
         session, ctx, batch_ids
     )
@@ -1758,6 +1868,7 @@ async def list_run_library_batches(
             artifact_summaries.get(batch.id, _empty_artifact_summary()),
             batch.id in truncated_artifact_summaries,
         )
+        item.update(usage.get(batch.id, empty_usage_projection()))
         serialized.append(item)
 
     next_cursor: str | None = None
@@ -1876,7 +1987,7 @@ async def _artifact_rows_for_library(
             )
         }
     for artifact, owner_team, batch, trial in selected:
-        item = _serialize_typed_artifact(
+        items = _serialize_typed_artifacts(
             request,
             artifact,
             owner_team,
@@ -1885,7 +1996,7 @@ async def _artifact_rows_for_library(
             trial=trial,
             parents=parents_by_artifact.get(artifact.id, []),
         )
-        if item is not None:
+        for item in items:
             pipeline_run = pipeline_runs.get(artifact.pipeline_run_id)
             if artifact_filters.get("producer_kind") == "pipeline" and pipeline_run is not None:
                 item["pipeline"] = {
@@ -2113,6 +2224,37 @@ async def _resolve_new_batch_snapshot(
     return list(result.task_ids), list(result.benchmark_selection_provenance)
 
 
+async def _freeze_derived_runtime_profile(
+    request: Request,
+    session: AsyncSession,
+    *,
+    team_id: UUID,
+    backend: str,
+    task_ids: list[str],
+    trial_config: dict[str, Any],
+    combinations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """A derived batch is a new submission under current deployment policy.
+
+    Resolve current harness releases and resource defaults through the ordinary
+    admission path; never copy a historical runtime snapshot into a new batch.
+    """
+    await validate_submission_agent_task_compatibility(
+        session, team_id=team_id, task_ids=task_ids,
+        combinations=combinations, trial_config=trial_config,
+    )
+    profile = await _reject_if_backend_cannot_execute_or_cold_start(
+        session, backend=backend, task_ids=task_ids,
+        trial_config=trial_config, combinations=combinations,
+        runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
+    )
+    profile = await _freeze_task_resource_requests(
+        session, backend=backend, task_ids=task_ids,
+        trial_config=trial_config, combinations=combinations, profile=profile, overrides={},
+    )
+    return profile.model_dump(mode="json") if profile is not None else None
+
+
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201)
 async def clone_run_library_batch_config(
     request: Request,
@@ -2128,6 +2270,7 @@ async def clone_run_library_batch_config(
     source, _team = await _load_batch_with_team(session, batch_id)
     if not _can_read_batch(ctx, source):
         raise HTTPException(status_code=403, detail="batch is not shared")
+    _require_nebius_source_backend(source.backend, action="cloning its config")
     if source.provider_connection_id is not None and payload.provider_connection_id is None:
         raise HTTPException(
             status_code=400,
@@ -2158,12 +2301,10 @@ async def clone_run_library_batch_config(
         team_id=ctx.team_id,
     )
     combinations = list(source.combinations or [])
-    await validate_submission_agent_task_compatibility(
-        session,
-        team_id=ctx.team_id,
-        task_ids=resolved_task_ids,
-        combinations=combinations,
-        trial_config=source.trial_config,
+    trial_config = apply_plan_mode(dict(source.trial_config), mode=payload.model_switch_plan_mode)
+    runtime_profile = await _freeze_derived_runtime_profile(
+        request, session, team_id=ctx.team_id, backend=source.backend,
+        task_ids=resolved_task_ids, combinations=combinations, trial_config=trial_config,
     )
     # #1109: user clone must not re-inject operator pool-coverage trials.
     required_worker_pools: list[str] = []
@@ -2199,10 +2340,8 @@ async def clone_run_library_batch_config(
         description=payload.description or (f"Cloned config from shared batch {source.id}."),
         task_filter=task_filter,
         resolved_task_ids=resolved_task_ids,
-        trial_config=apply_plan_mode(
-            dict(source.trial_config),
-            mode=payload.model_switch_plan_mode,
-        ),
+        trial_config=trial_config,
+        service_execution_runtime_profile=runtime_profile,
         state="submitted",
         created_by_token_prefix=token_prefix,
         submitted_by_user_id=ctx.user_id,
@@ -2253,8 +2392,9 @@ async def download_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
-    typed_artifact = await _typed_artifact_for_trial_key(session, trial.id, key)
-    if typed_artifact is not None:
+    match = await _typed_artifact_for_trial_key(session, trial, key)
+    if match is not None:
+        typed_artifact, bundle_file = match
         if not (
             _is_owner_or_admin(ctx, typed_artifact.team_id)
             or _artifact_content_allowed(
@@ -2269,10 +2409,9 @@ async def download_run_library_artifact(
             )
         return stream_object_response(
             client=request.app.state.minio_client,
-            bucket=_artifact_storage_bucket(
-                typed_artifact,
-                settings.artifacts_bucket,
-            ),
+            bucket=(bundle_file.ref.bucket if bundle_file else _artifact_storage_bucket(
+                typed_artifact, settings.artifacts_bucket,
+            )),
             key=key,
             filename=_artifact_filename(key),
             artifact_kind="artifact",
@@ -2293,6 +2432,7 @@ async def download_run_library_artifact(
 
 @router.post("/run-library/trials/{trial_id}/artifacts/reuse", status_code=201)
 async def reuse_run_library_artifact(
+    request: Request,
     sc: SessionAndCtx,
     trial_id: UUID,
     payload: _ReuseArtifactRequest,
@@ -2305,16 +2445,17 @@ async def reuse_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
-    typed_artifact = await _typed_artifact_for_trial_key(
-        session,
-        trial.id,
-        payload.key,
+    _require_nebius_source_backend(
+        batch.backend if batch is not None else None,
+        action="reusing its artifact",
     )
+    match = await _typed_artifact_for_trial_key(session, trial, payload.key)
+    typed_artifact, bundle_file = match if match else (None, None)
     artifact = _find_artifact(trial.trajectory_index, payload.key)
     if typed_artifact is None and artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
-    if typed_artifact is not None and not _artifact_content_allowed(
-        typed_artifact,
+    if typed_artifact is not None and not _artifact_reuse_allowed(
+        ctx, typed_artifact,
         batch=batch,
         trial=trial,
     ):
@@ -2360,6 +2501,11 @@ async def reuse_run_library_artifact(
                 "source_redaction_state": typed_artifact.redaction_state,
             }
         )
+    if bundle_file is not None:
+        provenance_item.update({
+            "source_artifact_relative_path": bundle_file.relative_path,
+            "source_file_sha256": bundle_file.sha256,
+        })
     provenance = [provenance_item]
     task_filter = (
         dict(batch.task_filter)
@@ -2373,6 +2519,11 @@ async def reuse_run_library_artifact(
         team_id=ctx.team_id,
     )
     combinations = list(batch.combinations or []) if batch else []
+    backend = batch.backend if batch else "docker"
+    runtime_profile = await _freeze_derived_runtime_profile(
+        request, session, team_id=ctx.team_id, backend=backend,
+        task_ids=resolved_task_ids, combinations=combinations, trial_config=trial_config,
+    )
     # #1109: user artifact reuse must not re-inject operator pool-coverage.
     required_worker_pools: list[str] = []
     n_per_task = batch.n_per_task if batch else 1
@@ -2407,7 +2558,8 @@ async def reuse_run_library_artifact(
         usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
         expected_trial_count=expected,
         n_per_task=n_per_task,
-        backend=batch.backend if batch else "docker",
+        backend=backend,
+        service_execution_runtime_profile=runtime_profile,
         combinations=combinations,
         required_worker_pools=required_worker_pools,
         provider_connection_id=payload.provider_connection_id,

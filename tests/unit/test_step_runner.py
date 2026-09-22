@@ -101,15 +101,14 @@ async def context(tmp_path: Path) -> TrialContext:
     )
 
 
-@pytest.mark.legacy_pool
-def test_isolated_verifier_inherits_slurm_cgroup_parent(
+def test_isolated_verifier_inherits_local_cgroup_parent(
     context: TrialContext,
 ) -> None:
-    context.container_cgroup_parent = "/system.slice/slurmstepd.scope/job_123"
+    context.container_cgroup_parent = "/local-test.slice/worker.scope"
 
     options = _isolated_verifier_start_options(context)
 
-    assert options.cgroup_parent == "/system.slice/slurmstepd.scope/job_123"
+    assert options.cgroup_parent == "/local-test.slice/worker.scope"
 
 
 async def test_run_step_happy_path(context: TrialContext, tmp_path: Path):

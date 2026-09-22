@@ -285,16 +285,28 @@ bootstrap. Build-time installation may run as root; task execution remains
 non-root with gateway-only networking.
 
 The generated `verifier/harbor-offline.sh` removes only recognized online
-bootstrap and replaces its `uvx` invocation with the preinstalled verifier.
+bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
+bootstraps retain the base Python interpreter and its task dependencies through
+a verifier venv with system-site-packages; uv bootstraps retain their declared
+Python version, exact dependency pins and package-index selection. Recognized
+fixed-commit Git dependencies and explicit verifier asset downloads are prepared
+at image build time. Assets are copied into the verifier workspace at the
+original script location; test assertions and reward branches are unchanged.
 Task-specific setup, pytest arguments, reward logic and the complete private
 `tests/` tree are preserved. Unsupported bootstrap forms, custom verifier
 adapters or image shapes fail with an adaptation error; configuration admission
 alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
 before a model batch. This adapter supports Debian/Ubuntu final images and the
-Harbor uv 0.9.5 `uvx -p ... -w package==version ... pytest` bootstrap. Prebuilt
-images, custom Dockerfile `SHELL`, selected build targets and other installer
-forms need explicit adaptation. The publisher then dry-runs
+Harbor uv 0.9.5/preinstalled `uvx -p ... -w package==version ... pytest`,
+exact-pinned pip plus pytest/python-module invocations, and explicit uv
+venv/activation/pip/run forms. Combined apt update/install commands are handled
+only when their package list is explicit. Official Debian-based Python full
+and slim images are supported; Alpine images are not. Prebuilt images, custom
+Dockerfile `SHELL`, selected build targets, floating Git dependencies and
+unrecognized shell/installer forms need explicit adaptation. An upstream asset
+URL can still change on a future rebuild; a prepared image fixes the bytes used
+for its own executions, without making an upstream reproducibility claim. The publisher then dry-runs
 `automatic_service_execution_rejections` before upsert. Bucket creation stays
 opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
 [#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed

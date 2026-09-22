@@ -369,6 +369,10 @@ _REASON_META: dict[str, _ReasonMeta] = {
 }
 
 _ACTION_LABELS: dict[str, dict[str, str]] = {
+    "follow_progress": {
+        "label": "Follow task progress and live trajectory events.",
+        "kind": "manual",
+    },
     "inspect_fanout": {
         "label": "Inspect batch fan-out errors",
         "kind": "manual",
@@ -504,7 +508,7 @@ def _evidence_bullets(
     affected: int,
     total: int,
 ) -> list[str]:
-    bullets = [f"{affected}/{total} affected trial(s) matched {reason_code}"]
+    bullets = [f"{affected}/{total} affected trial(s) matched {reason_code}"] if affected else []
     lifecycle = _mapping(evidence.get("lifecycle"))
     state = lifecycle.get("state")
     if isinstance(state, str) and state:
@@ -540,6 +544,21 @@ def build_trial_diagnosis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             else None
         ),
     )
+    active = failure.get("platform_outcome") == "active"
+    if active:
+        meta = _ReasonMeta(
+            label="In progress",
+            category="active",
+            attribution="pending",
+            trial_summary=(
+                f"The trial is still active ({_mapping(evidence.get('lifecycle')).get('state')}); "
+                "follow task progress for the current stage."
+            ),
+            batch_summary="The batch is still active.",
+            impact="Outcome and reward are pending until execution and output archival complete.",
+            actions=("follow_progress",),
+        )
+    affected = 0 if active else 1
     actions = [_action(action_id, evidence=evidence) for action_id in meta.actions]
     report = {
         "schema_version": "1",
@@ -554,24 +573,24 @@ def build_trial_diagnosis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             "category": meta.category,
             "attribution": meta.attribution,
             "confidence": "high",
-            "affected_trials": 1,
-            "affected_ratio": 1.0,
+            "affected_trials": affected,
+            "affected_ratio": float(affected),
         },
         "impact": meta.impact,
         "evidence": _evidence_bullets(
             evidence,
             reason_code=reason_code,
-            affected=1,
+            affected=affected,
             total=1,
         ),
         "next_actions": _dedupe_actions(actions),
-        "reason_clusters": [
+        "reason_clusters": [] if active else [
             {
                 "reason_code": reason_code,
                 "category": meta.category,
                 "attribution": meta.attribution,
                 "count": 1,
-                "affected_ratio": 1.0,
+                "affected_ratio": float(affected),
                 "representative_trial_id": str(entity.get("id") or ""),
                 "representative_task_id": _mapping(evidence.get("task")).get(
                     "task_id",

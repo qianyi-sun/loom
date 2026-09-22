@@ -60,7 +60,7 @@ HEARTBEAT_FAILURES_TOTAL = Counter(
 PIPELINE_GPU_ALLOCATED_IDLE_SECONDS = Gauge(
     "loom_pipeline_gpu_allocated_idle_seconds",
     "Maximum age of a leased local GPU Attempt without its expected process group",
-    labelnames=("slurm_cluster", "reason"),
+    labelnames=("reason",),
 )
 
 PIPELINE_LIVE_PREVIEW_EVENTS_TOTAL = Counter(

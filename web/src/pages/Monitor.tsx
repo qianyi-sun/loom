@@ -1,3 +1,6 @@
+import type { components } from "../api/schema";
+import { ProgressSummary, TrialProgressPill } from "../components/TrialProgress";
+import { NebiusPlacement } from "../components/NebiusPlacement";
 /**
  * Monitor — single route with a segmented toggle between Batches and
  * Trials. Shares a filter bar (search + state) across both views and
@@ -39,13 +42,14 @@ import {
   type SubmittedByUser,
 } from "../lib/ownership";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
-import { batchStateVariant, trialStateVariant } from "../lib/statusVariant";
+import { batchStateVariant } from "../lib/statusVariant";
 import { formatTokenUsage } from "../lib/tokenUsage";
 
 type View = "batches" | "trials";
 
 const BATCH_STATE_OPTIONS = ["submitted", "running", "finished", "cancelled"];
 const TRIAL_STATE_OPTIONS = [
+  "stage:image_preparation", "stage:execution_wait", "stage:starting", "stage:running", "stage:archiving",
   "queued",
   "protected-pending",
   "claimed",
@@ -59,12 +63,17 @@ const TERMINAL_BATCH_STATES = new Set(["finished", "cancelled"]);
 const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
 const STATE_OPTION_LABELS: Record<string, string> = {
+  "stage:image_preparation": "Preparing image",
+  "stage:execution_wait": "Waiting for execution",
+  "stage:starting": "Starting environment",
+  "stage:running": "Running (native stage)",
+  "stage:archiving": "Archiving output",
   cancelled: "Cancelled - stopped",
   claimed: "Claimed - worker reserved it",
   failed: "Failed - needs diagnosis",
   finished: "Finished - all trials terminal",
   "protected-pending": "Protected pending - waiting for runtime admission",
-  queued: "Queued - waiting for worker",
+  queued: "Queued - awaiting prerequisites or scheduling",
   running: "Running - in progress",
   materializing: "Materializing - securing complete output",
   submitted: "Submitted - waiting for scheduling",
@@ -159,6 +168,7 @@ interface BatchRow {
   cost_estimate_source?: string | null;
 }
 interface TrialRow {
+  progress?: components["schemas"]["TrialProgress"];
   id: string;
   team_id?: string;
   team_name?: string | null;
@@ -216,6 +226,10 @@ function queueStatusVariant(status: string): StatusVariant {
 }
 
 function queueStatusText(summary: MonitorSummary): string {
+  if (summary.progress && summary.service_execution?.targets.length) {
+    const stages = summary.progress.stages;
+    return `${stages.image_preparation ?? 0} preparing images · ${stages.execution_wait ?? 0} waiting for execution · ${stages.starting ?? 0} starting · ${stages.running ?? 0} running.`;
+  }
   const { active_workers, running, status, waiting } = summary.queue;
   const resources = summary.resources?.aggregate;
   if (status === "blocked") {
@@ -265,20 +279,12 @@ function ResourcePoolBreakdown({
               "Pool",
               "Backend",
               "Arch",
-              "Autoscaler",
               "Used / active slots",
-              "Pending",
-              "Desired",
-              "Max",
               "Draining",
-              "Idle",
               "Running",
               "Starting",
               "Queued",
               "Workers",
-              "Decision",
-              "Reason",
-              "Blocked",
             ].map((h) => (
               <th
                 key={h}
@@ -292,14 +298,6 @@ function ResourcePoolBreakdown({
         <tbody className="divide-y divide-slate-100">
           {resources.pools.map((pool) => {
             const activeSlots = pool.current_active_slots ?? pool.total_slots;
-            const maxSlots = pool.max_slots ?? pool.ceiling_slots ?? pool.total_slots;
-            const reason = pool.decision_reason ?? pool.last_autoscaler_reason ?? "-";
-            const blocked =
-              pool.blocked_reason ??
-              pool.last_autoscaler_blocked_reason ??
-              (pool.last_autoscaler_error
-                ? `error: ${pool.last_autoscaler_error}`
-                : "-");
             return (
               <tr
                 key={`${pool.pool_name}:${pool.backend}:${pool.cpu_arch}`}
@@ -310,26 +308,11 @@ function ResourcePoolBreakdown({
                 </td>
                 <td className="px-3 py-2 text-slate-700">{pool.backend}</td>
                 <td className="px-3 py-2 text-slate-700">{pool.cpu_arch}</td>
-                <td className="px-3 py-2 text-slate-700">
-                  {pool.autoscaler_actuator ?? "-"}
-                </td>
                 <td className="px-3 py-2 font-mono text-xs text-slate-900">
                   {pool.occupied_slots}/{activeSlots}
                 </td>
                 <td className="px-3 py-2 text-slate-700">
-                  {pool.pending_slots}
-                </td>
-                <td className="px-3 py-2 text-slate-700">
-                  {pool.desired_slots}
-                </td>
-                <td className="px-3 py-2 text-slate-700">{maxSlots}</td>
-                <td className="px-3 py-2 text-slate-700">
                   {pool.draining_slots}
-                </td>
-                <td className="px-3 py-2 text-slate-700">
-                  {pool.autoscaler_idle_seconds == null
-                    ? "-"
-                    : `${pool.autoscaler_idle_seconds}s`}
                 </td>
                 <td className="px-3 py-2 text-slate-700">
                   {pool.running_tasks}
@@ -342,15 +325,6 @@ function ResourcePoolBreakdown({
                 </td>
                 <td className="px-3 py-2 text-slate-700">
                   {pool.active_workers}
-                </td>
-                <td className="px-3 py-2 text-slate-700">
-                  {pool.last_autoscaler_decision ?? "-"}
-                </td>
-                <td className="max-w-52 px-3 py-2 text-slate-700" title={reason}>
-                  {reason}
-                </td>
-                <td className="max-w-52 px-3 py-2 text-slate-700" title={blocked}>
-                  {blocked}
                 </td>
               </tr>
             );
@@ -375,29 +349,30 @@ function NebiusExecutionBreakdown({
       <div>
         <h3 className="text-sm font-semibold text-slate-900">Nebius service execution</h3>
         <p className="mt-1 text-xs text-slate-600">
-          Provider capacity is separate from Docker worker slots. Configured headroom is not executable capacity until a fresh observation confirms it.
+          Image builds and executions share node capacity. Scale headroom becomes executable capacity only after nodes are ready.
         </p>
       </div>
-      {serviceExecution.targets.map((target) => {
+      {serviceExecution.targets.filter((target) => !["disabled", "retired"].includes(target.desired_state)).map((target) => {
         const observation = target.observation;
         const profile = target.resource_profile;
+        const draining = target.desired_state === "draining";
         const healthy = target.health_status === "healthy" && observation?.is_fresh === true;
         return (
-          <div key={`${target.pool_id}:${target.environment}`} className="rounded-lg border border-sky-200 bg-white p-3">
+          <div key={target.target_id} className="rounded-lg border border-sky-200 bg-white p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p className="font-semibold text-slate-900">
                 {target.pool_id} · {target.environment} · {target.region}
               </p>
-              <StatusPill variant={healthy ? "success" : "failed"}>
-                {healthy ? "fresh" : "blocked/stale"}
+              <StatusPill variant={draining ? "neutral" : healthy ? "success" : "failed"}>
+                {draining ? "Draining" : healthy ? "fresh" : "blocked/stale"}
               </StatusPill>
             </div>
             <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-5">
-              <CountBox label="Executable now" value={`${profile?.immediate_executable_slots ?? 0} slots`} />
-              <CountBox label="Scale headroom" value={`${profile?.configured_scale_headroom_slots ?? 0} slots`} />
-              <CountBox label="Configured total" value={`${profile?.configured_total_fit_slots ?? 0} slots`} />
+              <CountBox label="Executable now" value={profile?.immediate_executable_slots == null ? "Unknown" : `${profile.immediate_executable_slots} slots`} />
+              <CountBox label="Scale headroom" value={profile?.configured_scale_headroom_slots == null ? "Unknown" : `${profile.configured_scale_headroom_slots} slots`} />
+              <CountBox label="Configured total" value={profile?.configured_total_fit_slots == null ? "Unknown" : `${profile.configured_total_fit_slots} slots`} />
               <CountBox label="Capacity-accounted nodes" value={`${observation?.active_nodes ?? "unknown"}`} />
-              <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? 0}`} />
+              <CountBox label="Pending jobs" value={`${observation?.pending_jobs ?? "Unknown"}`} />
             </div>
             {observation?.node_states ? (
               <p className="mt-2 text-xs text-slate-600">
@@ -412,9 +387,10 @@ function NebiusExecutionBreakdown({
               <span>fresh until: {observation?.fresh_until ? formatLocalDateTime(observation.fresh_until) : "unavailable"}</span>
               <span>autoscaler: {observation?.autoscaler_state ?? "unknown"}</span>
               <span>provider: {observation?.provider_capacity_state ?? "unknown"}</span>
-              <span>quota: {Math.round((observation?.provider_used_vcpu_millis ?? 0) / 1000)} / {Math.round((observation?.provider_quota_vcpu_millis ?? 0) / 1000)} vCPU</span>
+              <span>quota: {observation?.provider_used_vcpu_millis == null ? "unknown" : Math.round(observation.provider_used_vcpu_millis / 1000)} / {observation?.provider_quota_vcpu_millis == null ? "unknown" : Math.round(observation.provider_quota_vcpu_millis / 1000)} vCPU</span>
               <span>commands waiting: {target.command_backlog}</span>
             </div>
+            <NebiusPlacement targetId={target.target_id} />
             {[...target.blockers, ...(profile?.blockers ?? [])].length > 0 ? (
               <p className="mt-2 break-words text-xs text-amber-800">
                 Blockers: {[...new Set([...target.blockers, ...(profile?.blockers ?? [])])].join(", ")}
@@ -423,11 +399,22 @@ function NebiusExecutionBreakdown({
           </div>
         );
       })}
+      {serviceExecution.targets.some((target) => ["disabled", "retired"].includes(target.desired_state)) ? (
+        <details className="rounded-lg border border-slate-200 bg-white p-3">
+          <summary className="cursor-pointer text-sm font-medium">Inactive regions</summary>
+          {serviceExecution.targets.filter((target) => ["disabled", "retired"].includes(target.desired_state)).map((target) => (
+            <p key={target.target_id} className="mt-2 text-sm text-slate-600">
+              {target.pool_id} · {target.region} · {target.desired_state === "disabled" ? "Disabled" : target.desired_state}
+            </p>
+          ))}
+          <p className="mt-2 text-xs text-slate-600">Excluded from active capacity. Historical observations do not indicate a current service fault.</p>
+        </details>
+      ) : null}
       {activity ? (
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-            <CountBox label="Execution leases" value={`${activity.lease_count}`} />
-            <CountBox label="Materializing" value={`${activity.materialization.backlog}`} />
+            <CountBox label="Latest execution attempts" value={`${activity.lease_count}`} />
+            <CountBox label="Archiving output" value={`${activity.materialization.backlog}`} />
             <CountBox label="Oldest pending" value={activity.materialization.oldest_pending_age_seconds == null ? "—" : `${activity.materialization.oldest_pending_age_seconds}s`} />
             <CountBox label="Unavailable" value={`${activity.materialization.states.unavailable ?? 0}`} />
             <CountBox label="Transfer retries" value={`${activity.materialization.retry_attempts}`} />
@@ -567,6 +554,8 @@ function MonitorHealthSummary({
         }
       />
       <Card.Body className="space-y-4">
+        <ProgressSummary progress={data.progress} batchId={batchId} />
+        {!(data.progress && data.service_execution?.targets.length) ? <>
         <div className="grid gap-3 md:grid-cols-4">
           <CountBox
             label="Concurrent tasks"
@@ -608,17 +597,21 @@ function MonitorHealthSummary({
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-xs font-medium uppercase tracking-wider text-slate-600">
-              Backends
+            <p
+              className="text-xs font-medium uppercase tracking-wider text-slate-600"
+              title="Adapters advertised by live legacy workers. Submissions always run on Nebius."
+            >
+              Worker adapters
             </p>
             <p className="mt-1 text-slate-700">
               {data.queue.available_backends.length > 0
                 ? data.queue.available_backends.join(", ")
-                : "No active backend"}
+                : "No active worker adapter"}
             </p>
           </div>
         </div>
         <ResourcePoolBreakdown resources={data.resources} />
+        </> : null}
         <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>
@@ -1067,9 +1060,7 @@ function TrialsView({
                       {ownershipLabel(t)}
                     </td>
                     <td className="px-4 py-3">
-                      <StatusPill variant={trialStateVariant(t.state)}>
-                        {t.state}
-                      </StatusPill>
+                      <TrialProgressPill progress={t.progress} state={t.state} />
                     </td>
                     <td className="px-4 py-3 text-slate-700">
                       {t.agent_name ?? "—"}

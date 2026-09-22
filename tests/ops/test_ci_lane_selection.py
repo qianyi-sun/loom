@@ -36,20 +36,6 @@ def test_explicit_coverage_restores_python_lanes_for_frontend_change():
     assert outputs["tests_root"] == outputs["tests_packages"] == "true"
 
 
-def test_owned_go_flow_test_does_not_select_docker_or_generic_integration(tmp_path, monkeypatch):
-    import scripts.plan_ci_validations as planner
-
-    path = "tests/integration/test_task_image_builder_guard_local_flow.py"
-    module = tmp_path / path
-    module.parent.mkdir(parents=True)
-    module.write_text("def test_independent(): pass\n")
-    monkeypatch.setattr(planner, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(planner, "_tracked_paths", lambda _: (path, "README.md"))
-    outputs = plan(path).github_outputs()
-    assert outputs["go_checks"] == "true"
-    assert outputs["integration_docker"] == outputs["integration"] == "false"
-
-
 @pytest.mark.parametrize("selected,result,accepted", [
     ("false", "skipped", True), ("true", "success", True),
     ("true", "skipped", False), ("true", "failure", False),
@@ -207,7 +193,7 @@ def test_missing_plan_output_is_not_silently_treated_as_unselected(workflow_name
 def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
     from scripts.plan_ci_validations import BASELINE_CHECKS
 
-    p = plan_validations(changed_paths=("src/loom/pipeline/stage1_smoke.py", *extra),
+    p = plan_validations(changed_paths=("src/loom/integrations/behavior/stages/rollout.py", *extra),
                          labels=(), event_name="pull_request")
     assert not any(getattr(p, lane) for lane in BASELINE_CHECKS)
     assert not p.integration and not p.integration_docker
@@ -246,3 +232,48 @@ def test_mixed_frontend_backend_and_explicit_labels_keep_system_smoke():
     assert p.staging_smoke and p.integration and p.tests_root and p.web_checks
     assert plan("web/src/App.tsx", ["staging-smoke"]).staging_smoke
     assert plan("web/src/App.tsx", ["cluster-smoke"]).cluster_smoke
+
+
+def test_large_change_list_keeps_full_lanes_without_oversized_job_environment():
+    from dataclasses import replace
+    from pathlib import Path
+
+    from scripts.component_ownership import load_manifest, select_affected_test_suites
+
+    baseline = plan("unknown/runtime.bin")
+    changes = tuple(f"tests/unit/test_retired_{index}_{'x' * 96}.py" for index in range(2000))
+    assert len(json.dumps(changes).encode()) > 131072
+    outputs = replace(baseline, test_changes=changes).github_outputs()
+    assert outputs["test_changes"] == "[]"
+    for lane in ("tests_root", "tests_packages", "integration", "integration_docker"):
+        assert outputs[lane] == baseline.github_outputs()[lane] == "true"
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_manifest(root / "config/component-ownership.toml")
+    paths = ("tests/integration/test_application_schema_reference.py",
+             "tests/integration/test_application_runtime_login.py")
+    assert select_affected_test_suites(
+        manifest, paths, changed_paths=tuple(json.loads(outputs["test_changes"]))
+    ) == paths
+
+
+def test_installed_wheel_smoke_imports_only_retained_modules():
+    import ast
+    from importlib.util import find_spec
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    step = next(item for item in workflow["jobs"]["tests-root"]["steps"]
+                if item.get("name") == "Build and exercise non-editable runtime wheel")
+    source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    imports = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
+    for module in imports:
+        if module.startswith(("loom.", "loom_")):
+            assert find_spec(module) is not None, module

@@ -22,7 +22,7 @@ def test_dev_image_plan_matches_runtime_set(tmp_path, path, expected):
     changed.write_text(path + '\n')
     output = tmp_path / 'output'
     env = {**os.environ, 'EVENT_NAME': 'pull_request', 'BASE_BRANCH': 'dev',
-           'TRUSTED_PUBLISH': 'false', 'REQUIRED': 'true',
+           'REQUIRED': 'true',
            'UNOWNED_RUNTIME': str(path.startswith('unknown/')).lower(),
            'CHANGED_FILES': str(changed), 'GITHUB_OUTPUT': str(output)}
     run = subprocess.run(['bash', '-c', step['run']], cwd=ROOT, env=env, capture_output=True, text=True)
@@ -32,12 +32,9 @@ def test_dev_image_plan_matches_runtime_set(tmp_path, path, expected):
     assert (values['harbor_required'] == 'true') == ('harbor-runtime' in expected)
 
 
-def test_legacy_publication_is_not_automatic_on_dev():
+def test_candidate_validation_has_no_push_trigger():
     workflow = yaml.safe_load((ROOT / '.github/workflows/images.yml').read_text())
-    assert 'dev' not in workflow[True].get('push', {}).get('branches', [])
-    controller = yaml.safe_load((ROOT / '.github/workflows/trusted-image-release-controller.yml').read_text())
-    assert 'schedule' not in controller[True]
-    assert 'workflow_dispatch' in controller[True]
+    assert set(workflow[True]) == {'pull_request', 'merge_group', 'workflow_dispatch'}
 
 
 @pytest.mark.parametrize("image,required,build,harness,accepted", [
@@ -53,7 +50,7 @@ def test_scoped_image_gate_requires_selected_builds(image, required, build, harn
     workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
     step = workflow["jobs"]["images-gate"]["steps"][0]
     env = {**os.environ, **dict.fromkeys(step["env"], "skipped"),
-           "EVENT_NAME": "pull_request", "TRUSTED_PUBLISH": "false",
+           "EVENT_NAME": "pull_request",
            "PLAN_RESULT": "success", "GATE_MODE": "full", "REQUIRED": "true",
            "HARBOR_REQUIRED": required, "BUILD_RESULT": build, "HARNESS_BUILD_RESULT": harness,
            "STANDARD_IMAGES": json.dumps([{"image": image}])}

@@ -10,7 +10,7 @@ collection can legitimately take minutes to hours). Failure modes:
   budget on a cancelled run.
 * **#378 — stuck trials past agent timeout.** ``asyncio.wait_for``
   around ``agent.run`` is supposed to cancel the coroutine at the
-  configured timeout, but on GB10/opencode we saw four trials still
+  configured timeout, but an earlier incident left four trials still
   ``running`` 5+ hours past a 2400s timeout. Whatever swallowed the
   timeout cancellation, the worker needs a second-line backstop.
 * **#1491 — live-worker ownership revoke.** Heartbeat reclaim can set

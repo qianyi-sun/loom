@@ -150,6 +150,9 @@ def test_native_builds_share_the_actuator_but_have_an_isolated_namespace(
     )
     quota = next(doc for doc in build_docs if doc["kind"] == "ResourceQuota")
     assert settings["max_concurrent"] == concurrency
+    collector = next(doc for doc in docs if doc["kind"] == "ConfigMap"
+                     and "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID" in doc["data"])
+    assert collector["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] == str(concurrency)
     assert quota["spec"]["hard"]["pods"] == str(concurrency)
     assert quota["spec"]["hard"]["count/jobs.batch"] == str(concurrency)
     assert quota["spec"]["hard"]["requests.cpu"] == f"{1000 * concurrency}m"

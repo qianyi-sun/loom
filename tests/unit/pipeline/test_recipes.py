@@ -115,45 +115,6 @@ def test_registry_identity_listing_is_bytewise_name_then_version_order() -> None
     ]
 
 
-def test_acceptance_policy_is_reserved_to_fixed_preflight_recipe() -> None:
-    with pytest.raises(ValueError, match="only the fixed acceptance preflight"):
-        registration("another-recipe", "acceptance_authorization_only")
-    with pytest.raises(ValueError, match="must use"):
-        registration("behavior-recovery-acceptance-preflight", "ordinary")
-    with pytest.raises(ValueError, match="invalid Recipe submission policy"):
-        registration("another-recipe", "raw_graph")
-
-    acceptance = registration(
-        "behavior-recovery-acceptance-preflight", "acceptance_authorization_only"
-    )
-    ordinary = registration()
-    registry = OfficialRecipeRegistry((acceptance, ordinary))
-
-    with pytest.raises(PermissionError, match="not available to ordinary"):
-        registry.resolve_ordinary(acceptance.name, acceptance.version, {})
-    with pytest.raises(PermissionError, match="matrix authorization is required"):
-        registry.resolve_acceptance_preflight(
-            name=acceptance.name,
-            version=acceptance.version,
-            parameters={},
-            active_same_team_matrix_authorization=False,
-        )
-    graph = registry.resolve_acceptance_preflight(
-        name=acceptance.name,
-        version=acceptance.version,
-        parameters={"temperature": 0},
-        active_same_team_matrix_authorization=True,
-    )
-    assert graph.recipe == acceptance.identity
-    with pytest.raises(PermissionError, match="not the fixed acceptance preflight"):
-        registry.resolve_acceptance_preflight(
-            name=ordinary.name,
-            version=ordinary.version,
-            parameters={},
-            active_same_team_matrix_authorization=True,
-        )
-
-
 @pytest.mark.parametrize(
     "value",
     [
@@ -266,3 +227,8 @@ def test_registry_startup_and_resolution_rehash_renderer_locks(tmp_path: Path) -
     renderer.write_bytes(b"def render():\n    return {'drift': True}\n")
     with pytest.raises(ValueError, match="renderer lock file drift"):
         registry.resolve_ordinary("locked", 1, {})
+
+
+def test_retired_acceptance_recipe_cannot_be_registered() -> None:
+    with pytest.raises(ValueError, match="retired Recipe submission policy"):
+        registration("behavior-recovery-acceptance-preflight", "acceptance_authorization_only")

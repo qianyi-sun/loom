@@ -13,7 +13,6 @@ Subcommands:
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json] [--tb21-audit-json PATH]
 - activate terminal-bench-2 --profile terminal-bench-2@tb2.1-r6 --audit-json PATH --minio-*
-- hf-boundary-evidence <slug> --environment staging --output PATH
 - sync-mirror [--source-* ...] [--dest-* ...] [--prefix ...] [--dry-run]
 
 The command group is the supported operator surface for benchmark discovery,
@@ -328,50 +327,6 @@ def _add_activate_args(p: argparse.ArgumentParser) -> None:
         default=_target_db_url(),
         help="Postgres URL (defaults to env LOOM_DB_URL, then LOOM_SVC_DB_URL).",
     )
-    p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
-    p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
-    p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
-
-
-def _add_hf_boundary_evidence_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("benchmark")
-    p.add_argument("--environment", required=True, choices=("staging", "production"))
-    p.add_argument("--output", required=True, type=Path)
-    p.add_argument(
-        "--namespace",
-        default=None,
-        help=(
-            "Kubernetes namespace whose loom-service pod owns DB/MinIO env. "
-            "When supplied, catalog audit, source summary, and canary summary "
-            "are collected through kubectl exec without printing secrets."
-        ),
-    )
-    p.add_argument("--kube-service-deployment", default="loom-service")
-    p.add_argument("--kube-service-container", default="loom-service")
-    p.add_argument(
-        "--db-url",
-        default=_target_db_url(),
-        help=(
-            "Postgres URL for non-kubernetes evidence generation. Prefer env "
-            "LOOM_DB_URL or LOOM_SVC_DB_URL."
-        ),
-    )
-    p.add_argument("--audit-json", type=Path, default=None)
-    p.add_argument("--source-summary-json", type=Path, default=None)
-    p.add_argument("--canary-summary-json", type=Path, default=None)
-    p.add_argument("--worker-boundary-json", type=Path, default=None)
-    p.add_argument("--canary-batch-id", default=None)
-    p.add_argument("--worker-pool", default="gb10")
-    p.add_argument("--cluster-config", type=Path, default=None)
-    p.add_argument(
-        "--gb10-workers-status",
-        type=Path,
-        default=None,
-        help=(
-            "Release-gate GB10 status artifact path, kept with generated evidence for traceability."
-        ),
-    )
-    p.add_argument("--ssh-timeout-sec", type=float, default=60.0)
     p.add_argument("--minio-endpoint", default=_target_minio_env("ENDPOINT"))
     p.add_argument("--minio-access-key", default=_target_minio_env("ACCESS_KEY"))
     p.add_argument("--minio-secret-key", default=_target_minio_env("SECRET_KEY"))
@@ -719,12 +674,7 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Atomically activate a fully audited immutable benchmark profile.",
         )
     )
-    _add_hf_boundary_evidence_args(
-        sub.add_parser(
-            "hf-boundary-evidence",
-            help="Generate secret-safe HF mirror/token-boundary release evidence.",
-        )
-    )
+
     _add_provision_catalog_provision_args(
         sub.add_parser(
             "provision-catalog",
@@ -1830,12 +1780,6 @@ def _cmd_sync_config(args: argparse.Namespace) -> int:
         return 1
 
 
-def _cmd_hf_boundary_evidence(args: argparse.Namespace) -> int:
-    from loom_cli.hf_boundary_evidence import run_hf_boundary_evidence_command
-
-    return run_hf_boundary_evidence_command(args)
-
-
 _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "list": _cmd_list,
     "show": _cmd_show,
@@ -1847,7 +1791,6 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "verify": _cmd_verify,
     "audit": _cmd_audit,
     "activate": _cmd_activate,
-    "hf-boundary-evidence": _cmd_hf_boundary_evidence,
     "provision-catalog": _cmd_provision_catalog_provision,
     "validate-local": _cmd_validate_local,
     "validate": _cmd_validate_local,

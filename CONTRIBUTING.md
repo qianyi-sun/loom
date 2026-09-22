@@ -93,6 +93,26 @@ Before declaring work shipped:
 root are owner-local context files, gitignored. They are not part of
 the project artifact and must never be committed.
 
+## Documentation and repository layout
+
+Use the [repository map](docs/contributing/repository-layout.md) and
+[documentation index](docs/index.md) to place durable project material.
+Architecture pages describe implemented contracts; runbooks describe repeatable
+procedures; contributor pages describe development and validation. Update the
+owning index and all inbound references when moving or deleting a page.
+
+Implementation plans, execution checklists for individual changes, session
+notes and agent scratch work belong **outside the repository**, including its
+ignored directories. Do not commit them under `docs/`, package directories or
+an archive. `scripts/check_repository_paths.py` rejects known planning paths and
+implementation-plan filenames; reviewers also check content, since a filename
+cannot distinguish every plan from a durable contract.
+
+Use Git history for superseded source and docs. Keep only concise, clearly
+marked decision or data-lineage records under `docs/historical/`. Generated
+run reports belong in external evidence artifacts. Published migration chains,
+package layouts and vendored dependency boundaries are not cosmetic clutter.
+
 ## Branching
 
 - `feature/<short-name>` for product or platform features
@@ -105,7 +125,7 @@ Feature branches, including Nebius work, cut from `dev`. PRs target `dev`.
 `codex/nebius-main` records the earlier isolated integration series. `main` is reserved
 for release promotion PRs from `dev`.
 
-The [Nebius CI integration](docs/ops/nebius-ci.md) retains `dev`'s four protected
+The [Nebius CI integration](docs/contributing/ci.md) retains `dev`'s four protected
 checks and uses GitHub-hosted runners with amd64 PR image builds. Python tests
 normally run without coverage instrumentation. Use `ci:coverage-summary` or the
 CI dispatch input `coverage_summary` for coverage accounting within the selected
@@ -117,14 +137,19 @@ selection avoids unrelated backend jobs and schema-reference provisioning. A dai
 Nebius/common regression at 08:23 UTC retains complete selection within that scope
 and coverage reporting. Use CI dispatch `legacy_compatibility=true` to include
 historical platform tests and both integration tiers. Dev PRs
-use the seven-image Nebius set; historical personal-dev publication is manual.
+use the seven-image Nebius set. Retired personal-development fleet images are
+not built or published.
 
-Deployment environments are separated from branch workflow: `development`
-uses `https://yylx.world/dev`, `staging` uses
-`https://yylx.world/staging`, and `production` follows `main` or
-immutable `vX.Y.Z` production release tags at `https://yylx.world/prod`. Do
-not use environment-specific yylx frontend subdomains as entrypoints; they are
-not provisioned. Production deploys use the protected GitHub
+Deployment environments are separated from branch workflow. The retained
+`https://yylx.world/dev`, `https://yylx.world/staging`, and
+`https://yylx.world/prod` routes describe the earlier installation,
+not a three-environment ceiling or a mandate for newly provisioned Nebius hosts.
+The [managed environment contract](docs/architecture/nebius-primary-platform.md#managed-environment-identity-and-rendering)
+uses distinct hostnames behind shared HTTPS ingress; its renderer is currently
+execution-disabled and does not itself establish provisioned entrypoints.
+Use only the hostname verified for the selected deployment; do not invent
+environment-specific yylx subdomains. Production follows `main` or
+immutable `vX.Y.Z` production release tags and uses the protected GitHub
 Environment named `production`; normal development jobs must not use production
 kubeconfig, database, object-store, provider, SecretStore, or worker-token
 secrets.
@@ -169,17 +194,17 @@ secrets.
   validation. Draft events remain filtered and cannot authorize a merge.
 - Do not assume labels are the only way to select validation. For example,
   relevant image paths select `images-gate` automatically; `ci:images` adds
-  multi-arch image validation when the changed paths do not already require it.
+  Nebius AMD64 image validation when the changed paths do not already require it.
   In the checked-in workflow, pull requests, merge groups, and manual
   dispatches build with a read-only token, do not log in to GHCR, and do not
-  use a shared publication cache. Ordinary manual dispatch is build-only. The
-  `publish` jobs request `packages: write` only for a push to `dev`/`main`, or
-  for the exact protected-head reconciliation dispatched by the checked-in
-  `trusted-image-release-controller` as `github-actions[bot]`. The controller
-  closes GitHub's intentional suppression of workflows caused by an earlier
-  workflow `GITHUB_TOKEN`; it selects the range from the nearest successful
-  trusted release ancestor and deduplicates active, successful, and failed
-  heads. It cannot select PR code or an arbitrary commit. This is not a repository-wide sandbox for
+  use a shared publication cache. The `images` workflow has no publication
+  permissions or push trigger. `nebius-candidate` publishes the immutable Nebius
+  images from `dev`; production promotes those same digests through the existing
+  `dev` to `main` gates without rebuilding or republishing them to GHCR.
+  The old personal-dev controller and GHCR publisher have been removed.
+  See the [workflow inventory](docs/contributing/ci.md#workflow-inventory) for
+  the retained validation, publishing, and promotion entry points.
+  This is not a repository-wide sandbox for
   same-repository writers: branch workflow code still runs from the PR branch.
   Autonomous agents need a fork-only
   execution boundary or an external trusted workflow/App before this can be

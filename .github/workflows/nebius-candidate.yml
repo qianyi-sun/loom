@@ -1,7 +1,7 @@
 name: nebius-candidate
 
-# Independent publication authority. PR CI cannot invoke this workflow, and
-# the legacy dev/main release and deployment allowlists remain unchanged.
+# Protected publication from dev. PR CI cannot invoke this workflow;
+# production promotion reuses these immutable Nebius image references.
 on:
   workflow_dispatch:
     inputs:
@@ -45,7 +45,7 @@ jobs:
           version: "0.11.26"
           checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
           enable-cache: true
-          save-cache: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          save-cache: true
           cache-dependency-glob: uv.lock
       - name: Install locked candidate tooling
         shell: bash
@@ -89,6 +89,7 @@ jobs:
           NEBIUS_SIGNING_KEY: ${{ secrets.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY }}
           NEBIUS_SIGNING_KEY_ID: ${{ vars.NEBIUS_IMAGE_ADMISSION_SIGNING_KEY_ID }}
           NEBIUS_TRUSTED_KEYRING: ${{ vars.NEBIUS_IMAGE_ADMISSION_TRUSTED_KEYRING_JSON }}
+          NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS: ${{ vars.NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS || '900' }}
           PUBLICATION_MODE: ${{ inputs.mode || 'platform' }}
           AGENT_VERSION: ${{ inputs.agent_version }}
         shell: bash
@@ -127,6 +128,7 @@ jobs:
           uv run --no-sync python scripts/ops/nebius_candidate.py build \
             "${publication_args[@]}" \
             --registry-prefix "$NEBIUS_REGISTRY_PREFIX" \
+            --upload-timeout-seconds "$NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS" \
             --signing-key "$work/signing.pem" \
             --signing-key-id "$NEBIUS_SIGNING_KEY_ID" \
             --trusted-keyring "$work/keyring.json" \

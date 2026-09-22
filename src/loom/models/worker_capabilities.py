@@ -1,4 +1,4 @@
-"""Closed worker GPU capability and Slurm allocation contracts for Pipeline v1."""
+"""Worker capability snapshots and retained historical allocation evidence."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from pydantic import StringConstraints, field_validator, model_validator
 from loom.pipeline.keys import canonical_digest
 from loom.pipeline.spec import NonNegativeSafeInt, PipelineModel, PositiveSafeInt
 
-_ALLOCATION_RE = re.compile(r"^(oldlab|gb10):([1-9][0-9]*)$")
 _DRIVER_RE = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
 
 CapabilityText = Annotated[str, StringConstraints(min_length=1, max_length=128)]
@@ -29,24 +28,17 @@ def _bytewise_unique(values: list[str], label: str) -> list[str]:
 
 
 class GpuDeviceCapabilityV1(PipelineModel):
-    """One NVIDIA device proven to belong to the worker's Slurm allocation."""
+    """One NVIDIA device advertised by a local worker."""
 
     allocation_id: CapabilityText
     device_uuid: DeviceUuid
     vendor: Literal["nvidia"]
-    model: Literal["NVIDIA GeForce RTX 5080", "NVIDIA GB10"]
+    model: CapabilityText
     memory_kind: Literal["dedicated", "unified"]
     memory_mb: NonNegativeSafeInt | None
     unified_memory_mb: NonNegativeSafeInt | None
     nvidia_driver_version: CapabilityText
     mig_mode: Literal["disabled", "not_supported"]
-
-    @field_validator("allocation_id")
-    @classmethod
-    def allocation_is_cluster_qualified(cls, value: str) -> str:
-        if _ALLOCATION_RE.fullmatch(value) is None:
-            raise ValueError("allocation_id must be <oldlab|gb10>:<jobid>")
-        return value
 
     @field_validator("nvidia_driver_version")
     @classmethod
@@ -57,26 +49,11 @@ class GpuDeviceCapabilityV1(PipelineModel):
 
     @model_validator(mode="after")
     def device_shape_is_exact(self) -> GpuDeviceCapabilityV1:
-        cluster = self.allocation_id.split(":", 1)[0]
-        if self.model == "NVIDIA GeForce RTX 5080":
-            if (
-                cluster != "oldlab"
-                or self.memory_kind != "dedicated"
-                or self.memory_mb is None
-                or self.memory_mb < 16_000
-                or self.unified_memory_mb is not None
-                or self.mig_mode != "disabled"
-            ):
-                raise ValueError("RTX 5080 capability does not match the OLDLAB contract")
-        elif (
-            cluster != "gb10"
-            or self.memory_kind != "unified"
-            or self.memory_mb is not None
-            or self.unified_memory_mb is None
-            or self.unified_memory_mb < 120_000
-            or self.mig_mode != "not_supported"
-        ):
-            raise ValueError("GB10 capability does not match the unified-memory contract")
+        if self.memory_kind == "dedicated":
+            if not self.memory_mb or self.unified_memory_mb is not None:
+                raise ValueError("dedicated GPU memory must be positive and exclusive")
+        elif not self.unified_memory_mb or self.memory_mb is not None:
+            raise ValueError("unified GPU memory must be positive and exclusive")
         return self
 
 
@@ -123,9 +100,6 @@ class WorkerCapabilitySnapshotV1(PipelineModel):
         uuids = [item.device_uuid for item in values]
         if len(uuids) != len(set(uuids)):
             raise ValueError("GPU UUIDs must be unique")
-        allocation_ids = {item.allocation_id for item in values}
-        if len(allocation_ids) > 1:
-            raise ValueError("one worker may advertise only its one active Slurm allocation")
         return values
 
     @model_validator(mode="after")
@@ -135,78 +109,6 @@ class WorkerCapabilitySnapshotV1(PipelineModel):
             and 0 <= self.input_cache_ready_bytes <= self.input_cache_capacity_bytes
         ):
             raise ValueError("input cache accounting exceeds capacity")
-        if self.gpu_devices:
-            cluster = self.gpu_devices[0].allocation_id.split(":", 1)[0]
-            expected_arch = "x86_64" if cluster == "oldlab" else "arm64"
-            if self.cpu_arch != expected_arch:
-                raise ValueError("GPU allocation cluster and CPU architecture drift")
-            if len(self.gpu_devices) != (2 if cluster == "oldlab" else 1):
-                raise ValueError("GPU device count does not match its Slurm cluster")
-            models = {device.model for device in self.gpu_devices}
-            if len(models) != 1:
-                raise ValueError("mixed GPU models are forbidden")
-        return self
-
-    @property
-    def digest(self) -> str:
-        return canonical_digest(self)
-
-
-class SlurmGpuAllocationEvidenceV1(PipelineModel):
-    """Immutable join between one Slurm job, its node, and visible devices."""
-
-    allocation_id: CapabilityText
-    slurm_cluster_id: Literal["oldlab", "gb10"]
-    job_id: Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]*$")]
-    node_name: CapabilityText
-    partition: Literal["all", "gb10"]
-    gpu_tres: Literal["gpu:rtx5080:2", "gpu:gb10:1"]
-    allocated_device_ids: list[NonNegativeSafeInt]
-    device_uuids: list[DeviceUuid]
-    variant_id: Literal["oldlab-rtx5080-2gpu", "gb10-shared-1gpu"]
-
-    @field_validator("allocated_device_ids")
-    @classmethod
-    def device_ids_are_canonical(cls, values: list[int]) -> list[int]:
-        if values != sorted(values) or len(values) != len(set(values)):
-            raise ValueError("allocated device IDs must be sorted and unique")
-        return values
-
-    @field_validator("device_uuids")
-    @classmethod
-    def device_uuids_are_canonical(cls, values: list[str]) -> list[str]:
-        return _bytewise_unique(values, "device UUIDs")
-
-    @model_validator(mode="after")
-    def allocation_join_is_exact(self) -> SlurmGpuAllocationEvidenceV1:
-        if self.allocation_id != f"{self.slurm_cluster_id}:{self.job_id}":
-            raise ValueError("allocation_id does not join the Slurm cluster and job")
-        expected = {
-            "oldlab": (
-                "all",
-                "gpu:rtx5080:2",
-                "oldlab-rtx5080-2gpu",
-                2,
-                re.compile(r"^(?:TRT-EAI-OLDLAB|trt-eai-oldlab)-[1-5]$"),
-            ),
-            "gb10": (
-                "gb10",
-                "gpu:gb10:1",
-                "gb10-shared-1gpu",
-                1,
-                re.compile(r"^trt-gb10-(?:[1-9]|1[0-5])$"),
-            ),
-        }[self.slurm_cluster_id]
-        partition, gpu_tres, variant, count, node_pattern = expected
-        if (
-            self.partition != partition
-            or self.gpu_tres != gpu_tres
-            or self.variant_id != variant
-            or len(self.allocated_device_ids) != count
-            or len(self.device_uuids) != count
-            or node_pattern.fullmatch(self.node_name) is None
-        ):
-            raise ValueError("Slurm GPU allocation evidence does not match its cluster")
         return self
 
     @property

@@ -35,6 +35,25 @@ export function formatUsageCost(item: UsageCostLike): string {
   return `${value.toFixed(4)} ${currency}`;
 }
 
+/** Old trajectory snapshots use zero placeholders; the frozen pricing marker
+ * distinguishes these from a priced call whose real amount is zero. */
+export function formatTrajectoryCost(event: Record<string, unknown>): string {
+  const marker = typeof event.rate_card_hash === "string" ? event.rate_card_hash : "";
+  if (marker.startsWith("facade:tokens-only")) {
+    return formatUsageCost({ estimated_cost_usd: null, cost_status: "not_applicable" });
+  }
+  if (marker === "failed-upstream") {
+    return formatUsageCost({ estimated_cost_usd: null, cost_status: "failed_upstream" });
+  }
+  const amount = event.cost_usd_snapshot;
+  if (!marker || marker.startsWith("facade:rate-card:missing")
+      || marker === "facade:operator-supplied:invalid"
+      || typeof amount !== "number" || !Number.isFinite(amount)) {
+    return formatUsageCost({ estimated_cost_usd: null, cost_status: "price_unknown" });
+  }
+  return formatUsageCost({ estimated_cost_usd: amount });
+}
+
 export function usageCostStatus(item: UsageCostLike): string {
   if (typeof item.cost_status === "string" && item.cost_status) {
     return item.cost_status;

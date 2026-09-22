@@ -495,6 +495,7 @@ def test_failed_teardown_redacts_diagnostics_before_down(
     monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("COMPOSE_PROJECT_NAME", "deploy")
     calls: list[tuple[str, ...]] = []
     timeouts: list[float] = []
     diagnostics = tmp_path / "system-smoke.log"

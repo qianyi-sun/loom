@@ -84,10 +84,8 @@ def test_clean_cluster_has_no_violations() -> None:
 
 
 def test_router_proxy_pods_are_not_classified_as_a_service() -> None:
-    # `loom-worker-router` / `loom-minio-router` socat pods share a name
-    # prefix with the `worker` / `minio` schema services but carry none of
-    # their env. Doctor must not flag every declared env var as missing on
-    # them (regression: staging smoke storage-lifecycle round-trip).
+    # The sandbox Gateway proxy carries no service settings; doctor must
+    # not treat it as an application service.
     schema = load_schema(Path("config/loom-schema.toml"))
     secret_keys = set()
     for name in schema.service_config:
@@ -102,9 +100,7 @@ def test_router_proxy_pods_are_not_classified_as_a_service() -> None:
             e.env_var_for(svc) for e in schema.service_config_for(svc)
         }
     # Bare socat proxy pods with no env whatsoever.
-    pod_envs["loom-worker-router-p2bnb"] = set()
     pod_envs["loom-gateway-router-abcde"] = set()
-    pod_envs["loom-minio-router-zzz12"] = set()
     core = _fake_clients(secret_keys, pod_envs)
     report = reconcile(schema, core, namespace="loom")
     missing_env_pods = {

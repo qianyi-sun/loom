@@ -966,6 +966,7 @@ def _classification_counts(
         for trial in trials
     )
     counts.pop("platform_success", None)
+    counts.pop("active", None)
     return dict(sorted(counts.items()))
 
 
@@ -984,6 +985,7 @@ def _rerun_recommendation_counts(
         for trial in trials
     )
     counts.pop("not_needed", None)
+    counts.pop("wait", None)
     return dict(sorted(counts.items()))
 
 

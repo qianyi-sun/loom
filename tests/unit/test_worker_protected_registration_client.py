@@ -44,7 +44,7 @@ async def test_protected_worker_credential_uses_dedicated_header_only() -> None:
                     "network_policies": ["public"],
                 }
             ],
-            pool_name="oldlab",
+            pool_name="local_cpu",
         )
 
     assert observed["header"] == "launcher-bound-credential"

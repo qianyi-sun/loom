@@ -76,6 +76,7 @@ function overview(overrides: Record<string, unknown> = {}) {
         },
       ],
     },
+    execution_health: {configured_targets: 1, status: "observed"},
     worker_health: {
       active: 1,
       available_backends: ["docker", "fake"],
@@ -152,13 +153,26 @@ describe("Home overview", () => {
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("1 ready")).toBeInTheDocument();
     expect(screen.getByText("1 runnable")).toBeInTheDocument();
-    expect(screen.getByText("1 active")).toBeInTheDocument();
+    expect(screen.getByText("Capacity observations current")).toBeInTheDocument();
+    expect(screen.queryByText("1 active")).not.toBeInTheDocument();
+    // Submissions always run on Nebius; legacy worker adapters are not shown.
+    expect(screen.queryByText("Backends")).not.toBeInTheDocument();
+    expect(screen.queryByText("docker, fake")).not.toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Create a batch" }),
     ).toHaveAttribute("href", "/batches/new");
     expect(
       screen.getByRole("link", { name: "Repair provider connection" }),
     ).toHaveAttribute("href", "/providers");
+  });
+
+  it("keeps unknown capacity distinct from missing setup", async () => {
+    mockHomeFetch(overview({execution_health: {configured_targets: 1, status: "unknown"}}));
+    renderWithProviders(<App />, {route: "/"});
+    expect(await screen.findByText("Capacity unknown")).toBeInTheDocument();
+    expect(screen.getByRole("link", {name: "Create a batch"})).toBeInTheDocument();
+    expect(screen.getByRole("link", {name: "View nodes and scheduling"})).toHaveAttribute("href", "/monitor");
+    expect(screen.queryByText("Start at least one worker")).not.toBeInTheDocument();
   });
 
   it("separates operator prerequisites from user actions", async () => {
@@ -171,6 +185,7 @@ describe("Home overview", () => {
         needs_attention: 2,
         blocked: [],
       },
+      execution_health: {configured_targets: 0, status: "not_configured"},
       worker_health: {
         active: 0,
         available_backends: [],
@@ -185,8 +200,8 @@ describe("Home overview", () => {
           priority: 40,
         },
         {
-          id: "start_worker",
-          label: "Start at least one worker",
+          id: "configure_execution",
+          label: "Configure Nebius execution",
           to: "/monitor",
           kind: "operator",
           priority: 50,
@@ -202,7 +217,7 @@ describe("Home overview", () => {
     expect(screen.getByText("Needs setup")).toBeInTheDocument();
     expect(screen.getByText("Operator actions")).toBeInTheDocument();
     expect(screen.getByText("Publish benchmark tasks")).toBeInTheDocument();
-    expect(screen.getByText("Start at least one worker")).toBeInTheDocument();
+    expect(screen.getByText("Configure Nebius execution")).toBeInTheDocument();
     expect(screen.queryByText("User actions")).not.toBeInTheDocument();
   });
 });

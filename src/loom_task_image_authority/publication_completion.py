@@ -1,11 +1,11 @@
-"""Fenced signed completion and immutable historical confirmation, never HTTP auth."""
+"""Read and verify immutable historical publication evidence; no build or signing writes."""
 
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Literal, cast
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,10 +15,8 @@ from loom.db.schema import (
     TaskImagePublicationEnvelope,
     TaskImagePublicationJob,
     TaskImagePublicationKey,
-    TaskImagePublicationState,
     TaskImageRegistryCredentialGeneration,
 )
-from loom.task_image_materialization import validate_task_image_registry_images
 from loom_task_image_authority.publication_contracts import (
     PublicationEnvelope,
     PublicationUnsignedInput,
@@ -26,7 +24,6 @@ from loom_task_image_authority.publication_contracts import (
 )
 from loom_task_image_authority.publication_jobs import (
     PublicationJob,
-    PublicationJobAuthorizationError,
     PublicationJobConflictError,
     PublicationSnapshot,
 )
@@ -35,26 +32,17 @@ from loom_task_image_authority.publication_receipts import (
     PublicationEnvelopeIdentity,
     PublicationReceipt,
     candidate_set_sha256,
-    canonical_receipt_bytes,
     decode_publication_receipt,
     publication_set_sha256,
 )
 from loom_task_image_authority.publication_signing import (
-    DistributedKeysetSnapshot,
     PublicationKeyRecord,
-    PublicationState,
     VerifiedPublication,
     verify_historical_publication,
 )
 from loom_task_image_authority.publication_store import (
-    Clock,
-    LockedPublicationInput,
-    _live_at,
-    _now,
-    _owner,
     _result,
     _uuid,
-    lock_publication_input,
 )
 from loom_task_image_authority.registry_credentials import parse_stored_publication_candidate_v2
 
@@ -75,38 +63,8 @@ def _key(row: TaskImagePublicationKey) -> PublicationKeyRecord:
     )
 
 
-async def _locked_keys(
-    session: AsyncSession, key_ids: tuple[str, ...]
-) -> tuple[PublicationState, dict[str, PublicationKeyRecord]]:
-    _clean(session)
-    state = await session.scalar(
-        select(TaskImagePublicationState)
-        .where(TaskImagePublicationState.singleton_id == 1)
-        .execution_options(populate_existing=True)
-        .with_for_update()
-    )
-    if state is None:
-        raise PublicationJobAuthorizationError("publication state unavailable")
-    keys = {}
-    for key_id in sorted(set(key_ids)):
-        row = await session.scalar(
-            select(TaskImagePublicationKey)
-            .where(TaskImagePublicationKey.key_id == key_id)
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        )
-        if row is None:
-            raise PublicationJobAuthorizationError("publication key unavailable")
-        keys[key_id] = _key(row)
-    return PublicationState(state.revocation_epoch, state.keyset_version), keys
 
 
-async def read_publication_signing_state(
-    session: AsyncSession, *, key_id: str
-) -> tuple[PublicationState, PublicationKeyRecord]:
-    """Short state-first transaction; caller commits before distribution/signer I/O."""
-    state, keys = await _locked_keys(session, (key_id,))
-    return state, keys[key_id]
 
 
 def _unsigned_binding(
@@ -191,167 +149,10 @@ def _receipt(
     )
 
 
-def _eligible(
-    state: PublicationState,
-    keys: dict[str, PublicationKeyRecord],
-    distribution: DistributedKeysetSnapshot,
-    publications: tuple[VerifiedPublication, ...],
-    now: datetime,
-) -> None:
-    # Reconstruct trusted adapter output to reject unchecked mutated instances.
-    distribution = DistributedKeysetSnapshot(
-        distribution.keyset_version,
-        distribution.revocation_epoch,
-        distribution.key_ids,
-        distribution.issued_at,
-        distribution.expires_at,
-    )
-    if (
-        not distribution.issued_at <= now < distribution.expires_at
-        or distribution.keyset_version != state.keyset_version
-        or distribution.revocation_epoch != state.revocation_epoch
-    ):
-        raise PublicationJobAuthorizationError("publication distribution is stale")
-    for result in publications:
-        key = keys[result.envelope.key_id]
-        issued = datetime.strptime(result.statement.issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=UTC
-        )
-        if (
-            key.status != "active"
-            or key.key_id not in distribution.key_ids
-            or now < key.activated_at
-            or result.statement.distributed_keyset_version != state.keyset_version
-            or result.statement.revocation_epoch != state.revocation_epoch
-            or not distribution.issued_at <= issued < distribution.expires_at
-            or issued > now + timedelta(seconds=5)
-        ):
-            raise PublicationJobAuthorizationError("publication signing authority changed")
 
 
-async def complete_publication_job(
-    session: AsyncSession,
-    *,
-    job: PublicationJob,
-    owner_id: UUID,
-    generation: int,
-    publications: tuple[VerifiedPublication, ...],
-    distribution: DistributedKeysetSnapshot,
-    clock: Clock,
-) -> PublicationReceipt:
-    """Caller-owned READ COMMITTED transaction; any exception requires rollback.
-
-    State -> sorted keys -> full live input locks -> job -> envelope inserts.
-    All graph/signing work must already have finished outside this transaction.
-    VerifiedPublication is re-parsed and cryptographically checked, not trusted.
-    """
-    if type(publications) is not tuple or not 1 <= len(publications) <= 128:
-        raise PublicationJobConflictError("publication envelope set is invalid")
-    state, keys = await _locked_keys(session, tuple(item.envelope.key_id for item in publications))
-    # Historical completion can win before this worker. No live-lease requirement
-    # is imposed on that already committed evidence; replay takes no new locks.
-    existing = await session.scalar(
-        select(TaskImagePublicationJob.state).where(
-            TaskImagePublicationJob.operation_id == UUID(job.operation_id)
-        )
-    )
-    if existing == "completed":
-        receipt = await replay_completed_publication(session, operation_id=job.operation_id)
-        if receipt.snapshot_sha256 != job.snapshot_sha256:
-            raise PublicationJobConflictError("publication completion operation changed")
-        return receipt
-    locked = await lock_publication_input(
-        session,
-        grant_id=UUID(job.snapshot.grant_id),
-        operation_id=UUID(job.operation_id),
-        materialization_id=UUID(job.snapshot.materialization_id),
-        attempt_id=UUID(job.snapshot.attempt_id),
-        lease_epoch=job.snapshot.lease_epoch,
-        registry_origin=job.snapshot.registry_origin,
-        clock=clock,
-    )
-    if locked.existing is None:
-        raise PublicationJobConflictError("publication job missing")
-    stored = locked.existing
-    current = _result(stored)
-    if current.snapshot_sha256 != job.snapshot_sha256 or current.snapshot != job.snapshot:
-        raise PublicationJobConflictError("publication job input changed")
-    checked = _verify(current.snapshot, publications, keys)
-    now = _now(clock)
-    _final_liveness(locked, owner_id, generation, state, keys, distribution, checked, now)
-    receipt = _receipt(current, checked, now)
-    for component, publication in zip(current.snapshot.components, checked, strict=True):
-        statement, envelope = publication.statement, publication.envelope
-        session.add(
-            TaskImagePublicationEnvelope(
-                envelope_id=uuid4(),
-                candidate_id=component.candidate.candidate_id,
-                materialization_attempt_id=UUID(current.snapshot.attempt_id),
-                component=component.candidate.component,
-                key_id=envelope.key_id,
-                canonical_statement=envelope.canonical_statement.encode(),
-                statement_sha256=envelope.statement_sha256,
-                algorithm=envelope.algorithm,
-                signature=envelope.signature,
-                issued_at=datetime.strptime(statement.issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=UTC
-                ),
-                recorded_at=now,
-                distributed_keyset_version=statement.distributed_keyset_version,
-                revocation_epoch=statement.revocation_epoch,
-            )
-        )
-    # Flush envelopes BEFORE clearing the lease so the post-wait authority check
-    # still uses its unchanged locked live rows. Later ready/job flush is checked too.
-    await session.flush()
-    _final_liveness(locked, owner_id, generation, state, keys, distribution, checked, _now(clock))
-    row = locked.materialization
-    materialization_lease_expires_at = row.lease_expires_at
-    assert materialization_lease_expires_at is not None
-    images = {
-        component.candidate.component: f"{current.snapshot.registry_origin.removeprefix('https://')}/{component.candidate.repository}@{publication.statement.manifest.digest}"
-        for component, publication in zip(current.snapshot.components, checked, strict=True)
-    }
-    row.registry_images = validate_task_image_registry_images(
-        images, expected_components=set(images), require_complete=True
-    )
-    row.ready_publication_operation_id = stored.operation_id
-    row.state, row.claimed_by, row.lease_expires_at = "ready", None, None
-    row.ready_at = row.finished_at = row.updated_at = now
-    stored.state, stored.worker_id, stored.worker_expires_at = "completed", None, None
-    stored.completed_at = now
-    stored.canonical_receipt = canonical_receipt_bytes(receipt)
-    stored.receipt_sha256 = hashlib.sha256(stored.canonical_receipt).hexdigest()
-    await session.flush()
-    # Lease expiry values were deliberately captured before clearing ORM fields.
-    final = _now(clock)
-    if final >= min(
-        current.deadline,
-        current.lease.expires_at if current.lease else current.deadline,
-        locked.authorization.grant_expires_at,
-        locked.authorization.session_expires_at,
-        locked.authorization.attestation_expires_at,
-        materialization_lease_expires_at,
-    ):
-        raise PublicationJobAuthorizationError("publication authority expired during commit")
-    _eligible(state, keys, distribution, checked, final)
-    return receipt
 
 
-def _final_liveness(
-    locked: LockedPublicationInput,
-    owner: UUID,
-    generation: int,
-    state: PublicationState,
-    keys: dict[str, PublicationKeyRecord],
-    distribution: DistributedKeysetSnapshot,
-    publications: tuple[VerifiedPublication, ...],
-    now: datetime,
-) -> None:
-    assert locked.existing is not None
-    _live_at(locked.authorization, locked.materialization, now)
-    _owner(locked.existing, owner, generation, now)
-    _eligible(state, keys, distribution, publications, now)
 
 
 async def replay_completed_publication(

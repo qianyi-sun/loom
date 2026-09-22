@@ -42,16 +42,11 @@ _POSTGRES_PERL_PACKAGES = (
 )
 _REMEDIATED_COMPONENTS = (
     "harbor-runtime",
-    "capacity-executor",
-    "capacity-manager",
     "control-plane",
     "egress-xds",
     "execution-actuator",
     "family-orchestrator",
     "llm-gateway",
-    "personal-dev-activation-agent",
-    "personal-dev-native-builder-agent",
-    "personal-dev-scanner-cache",
     "pipeline-orchestrator",
     "worker",
 )
@@ -59,7 +54,6 @@ _EMPTY_COMPONENTS = (
     "execution-runtime",
     "nebius-terminal-bench",
     "llm-gateway-sandbox",
-    "personal-dev-builder",
     "service",
     "staging-admin-browser-smoke",
     "web",

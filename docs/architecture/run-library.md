@@ -53,6 +53,24 @@ no parent batch uses its own visibility and share status. `pending_scan`,
 `unsafe`, and redaction-blocked artifacts remain owner-team diagnostics even if
 legacy artifact JSON still says `share_status = "shared"`.
 
+Native Nebius bundles (`loom.canonical-trial-bundle-storage.v1`) are read through
+the same manifest adapter as canonical bundle downloads. Each canonical output
+file is listed with its object key, archive-relative path, size and digest; no
+synthetic top-level key or duplicate artifact registry row is created. Source
+evidence stays in the full bundle download, outside the reusable file inventory.
+The artifact id identifies the original bundle; the selected key and relative
+path identify its file, and reuse provenance retains both bundle and file digests.
+
+Within the producing team, `safe` or `verified_internal` outputs may be reused
+while sharing/redaction scans are pending. Explicitly blocked, unsafe, unknown,
+or redaction-blocked content is not reusable. This does not change the stored
+sharing fields or permit another team (including an admin acting for that team)
+to reuse unshared content. The API's `can_reuse` capability controls the UI;
+cross-team reuse still requires the shared-content policy above. Reuse creates
+new work with source provenance and freezes the current Nebius runtime and task
+resources through normal admission; it does not modify the source run or inject
+arbitrary source files into a task's workspace.
+
 ## API Surface
 
 - `GET /api/v1/run-library/batches`: list library rows. `scope=my` shows the
@@ -101,7 +119,7 @@ legacy artifact JSON still says `share_status = "shared"`.
 - `GET /api/v1/run-library/artifacts/export`: export safe typed artifact
   metadata as JSONL or JSON. The export route does not read or include object
   bodies; it only emits redacted metadata for artifacts that pass the
-  download/reuse gate.
+  cross-team shared-content gate, even when the caller owns them.
 - `PATCH /api/v1/run-library/batches/{batch_id}/visibility`: owner/admin update
   for `visibility` and `share_status`.
 - `POST /api/v1/run-library/batches/{batch_id}/clone-config`: create a new
@@ -112,11 +130,22 @@ legacy artifact JSON still says `share_status = "shared"`.
   provider ids only as metadata so clients can decide whether to require that
   selector.
 - `GET /api/v1/run-library/trials/{trial_id}/artifacts/download`: stream a
-  safe shared artifact through the authenticated Loom service. It never exposes
-  raw object-store URLs.
+  selected artifact file through the authenticated Loom service. Owners/admins
+  can download their diagnostics; cross-team callers require safe shared
+  content. The bucket/key must resolve from the stored inventory, never a
+  caller-supplied bucket or raw object-store URL.
 - `POST /api/v1/run-library/trials/{trial_id}/artifacts/reuse`: create a new
   batch record in the caller's team that records the shared artifact as source
   provenance. Unsafe artifacts are denied before reuse.
+
+Both clone and reuse are new submissions: they validate the resolved tasks and
+harness selections against the **current deployment**, resolve current published
+harness runtimes, and freeze its runtime profile and resource policy before
+committing the batch. Explicit harness version selections still apply. Source
+runtime images and per-task resource overrides are not copied; the source batch,
+its history, and artifact provenance remain unchanged. Missing or incompatible
+runtime configuration rejects the request before a derived batch is created.
+Hosted submissions require Nebius, including clones and artifact reuse.
 
 ## SPA Behavior
 
@@ -151,8 +180,9 @@ only see teams returned by their session membership.
 The Run Library detail page groups preview artifacts into reports, trajectories,
 reusable outputs, logs/diagnostics, and raw/internal diagnostics. Each typed
 artifact row shows a human-readable artifact type, owner team, source, safety /
-redaction state, and content-hash prefix. Shared safe artifacts expose Download,
-Copy URL, and Reuse actions. Blocked artifacts show only a safe blocked reason
+redaction state, and content-hash prefix. Artifacts with `can_reuse=true`,
+including verified internal files for their own team, expose Download, Copy URL,
+and Reuse actions. Blocked artifacts show only a safe blocked reason
 and do not expose cross-team actions. The default detail payload is backed by a
 capped typed-artifact preview and does not materialize full legacy
 `trajectory_index` JSON or the complete typed-artifact inventory. The page can

@@ -23,7 +23,7 @@ from loom.task_bundle_source_storage import (
 from tests.integration.test_task_bundle_source_journal import NOW
 from tests.integration.test_task_bundle_source_journal import journal as journal
 from tests.integration.test_task_bundle_source_storage import _store
-from tests.integration.test_task_image_bundle_minio_signing import minio_tls as minio_tls
+from tests.support.minio_tls import minio_tls as minio_tls
 from tests.unit.test_task_bundle_registration import _bundle
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(120)]

@@ -33,18 +33,14 @@ def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) 
 
 
 @pytest.mark.parametrize("path", [
-    "src/loom_task_image_builder_guard/service.py",
-    "src/loom_task_image_authority/api.py",
-    "cmd/loom-task-image-builder-supervisor/orchestrator.go",
-    "src/loom_control_plane/task_image_build_environment.py",
+    "src/loom_task_image_authority/execution_store.py",
     "src/loom/task_image_materialization.py",
     "src/loom/db/schema.py",
     "src/loom/security/secret_store.py",
     "migrations/versions/new_task_image_schema.py",
-    "tests/support/guard_fixture.py",
     "tests/support/minio_images.py",
 ])
-def test_docker_guard_flow_and_fixture_dependencies_keep_heavy_coverage(path):
+def test_image_materialization_and_fixture_dependencies_keep_heavy_coverage(path):
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
     assert plan.integration_docker is True
 
@@ -199,7 +195,6 @@ def test_docs_only_selects_no_heavy_validation() -> None:
     [
         "deploy/Dockerfile.behavior-stage1-sim",
         "src/loom/integrations/behavior/contracts.py",
-        "src/loom/pipeline/stage1_smoke.py",
         "src/loom_service/behavior_pipeline_adapter.py",
         "tests/integrations/behavior/test_contracts.py",
         "third_party/behavior-stage1/omnigibson/omnigibson/__init__.py",
@@ -338,12 +333,10 @@ def test_nebius_iac_change_uses_owned_validation_route(path: str, independent_te
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/environments/staging.multinode.cluster.toml",
-        "scripts/ops/deploy_staging_k3s.sh",
         ".github/workflows/release-promotion-gate.yml",
     ],
 )
-def test_k3s_staging_contract_selects_cluster_and_staging(path: str) -> None:
+def test_release_contract_selects_cluster_and_staging(path: str) -> None:
     plan = plan_validations(
         changed_paths=[path],
         labels=set(),
@@ -545,79 +538,29 @@ def test_dependency_authority_changes_select_every_heavy_gate(path: str) -> None
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/environments/staging.cluster.toml",
-        "deploy/environment-state/staging.toml",
-        "deploy/staging-rollout/loom-staging-rollout.sudoers",
-        "deploy/worker-pools/gb10/known_hosts",
-        "deploy/worker-pools/gb10/loom-staging-rollout-platform-dev.exports",
-        "deploy/worker-pools/gb10/loom-staging-rollout-shared-work2-export-authority.sudoers",
-        "deploy/worker-pools/gb10/ssh_config",
-        "scripts/ops/staging_rollout_host.py",
-        "scripts/ops/staging_rollout_sealed_source.py",
-        "scripts/ops/staging_rollout_shared_repo.py",
-        "scripts/ops/staging_rollout_shared_work2.py",
-        "scripts/ops/staging_rollout_shared_work2_export.py",
-        "scripts/ops/staging_rollout_shared_work2_export_authority.py",
-        "scripts/ops/staging_rollout_shared_repo_consumer.py",
-        "scripts/ops/deploy_environment.sh",
         "scripts/ops/release_gate.py",
         "scripts/ops/release_identity.py",
         "scripts/ops/verify_production_release_gate.sh",
-        "scripts/ops/verify_staging_rollout_secret_boundary.py",
-        "scripts/validate_environment_isolation.py",
-        ".github/workflows/deploy-environment.yml",
         ".github/workflows/release-promotion-gate.yml",
-        "src/loom_cli/rollout/rehearsal_executor.py",
-        "src/loom_cli/rollout/operator/broker.py",
-        "src/loom_cli/rollout/steps/s04_gb10_prep.py",
-        "src/loom_cli/rollout/steps/s10_env_state.py",
-        "src/loom_cli/rollout_lock.py",
-        "src/loom_cli/rollout_lock_cli.py",
-        "tests/loom_cli/rollout/test_rehearsal_executor.py",
-        "tests/loom_cli/rollout/operator/test_broker.py",
-        "tests/loom_cli/rollout/steps/test_env_state_external_prereqs.py",
-        "tests/loom_cli/test_rollout_lock.py",
-        "tests/loom_cli/test_rollout_lock_cli.py",
-        "tests/ops/test_deploy_environment_release_manifest.py",
-        "tests/ops/test_environment_isolation.py",
+        "tests/loom_cli/test_cluster_target_boundary.py",
         "tests/ops/test_release_identity.py",
         "tests/ops/test_release_promotion_gate.py",
         "tests/loom_cli/test_cluster_render.py",
-        "tests/loom_cli/test_environment_state.py",
-        "tests/ops/test_staging_rollout_host.py",
-        "tests/ops/test_staging_rollout_sealed_source.py",
-        "tests/ops/test_staging_rollout_shared_repo.py",
-        "tests/ops/test_staging_rollout_shared_repo_consumer.py",
-        "tests/ops/test_staging_rollout_shared_work2.py",
-        "tests/ops/test_staging_rollout_shared_work2_export.py",
-        "tests/ops/test_staging_rollout_shared_work2_export_authority.py",
     ],
 )
-def test_protected_staging_rollout_paths_select_every_heavy_gate(path: str) -> None:
+def test_protected_deployment_paths_select_every_heavy_gate(path: str) -> None:
     plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
 
     assert plan.unowned_runtime is False
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
-
-
-def test_rollout_module_changes_are_protected_staging_authority() -> None:
-    plan = plan_validations(
-        changed_paths=["src/loom_cli/rollout/operator_notes.py"],
-        labels=set(),
-        event_name="pull_request",
-    )
-
-    assert plan.unowned_runtime is False
-    assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
-    assert all("protected-staging-rollout" in plan.reasons[check] for check in HEAVY_CHECKS)
+    assert all("protected-deployment" in plan.reasons[check] for check in HEAVY_CHECKS)
 
 
 @pytest.mark.parametrize(
     "path",
     [
-        "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/instruction.md",
-        "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/instruction.md",
+        "deploy/catalog/unowned-fixture/tasks/hello-world/instruction.md",
+        "deploy/catalog/unowned-fixture/tasks/oracle-hello-world/instruction.md",
         "unowned-runtime/new-input-two.bin",
         "unowned-runtime/new-input.bin",
     ],
@@ -672,7 +615,7 @@ def test_migration_change_selects_both_integration_tiers_images_and_staging() ->
 def test_capacity_guard_migration_change_selects_owned_integration_lane() -> None:
     plan = plan_validations(
         changed_paths=[
-            "capacity_guard_migrations/versions/guard_0002_example.py",
+            "database/capacity_guard_migrations/versions/guard_0002_example.py",
         ],
         labels=set(),
         event_name="pull_request",
@@ -682,9 +625,9 @@ def test_capacity_guard_migration_change_selects_owned_integration_lane() -> Non
     assert plan.unowned_runtime is False
 
 
-def test_capacity_guard_source_change_selects_integration_lane() -> None:
+def test_unknown_retired_source_path_selects_integration_lane() -> None:
     plan = plan_validations(
-        changed_paths=["src/loom_capacity_guard/store.py"],
+        changed_paths=["src/unowned_retired_backend/store.py"],
         labels=set(),
         event_name="pull_request",
     )

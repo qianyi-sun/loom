@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,19 +11,9 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from psycopg.errors import InsufficientPrivilege, ObjectNotInPrerequisiteState
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom_capacity_agent.contracts import AgentRegistrationV1
-from loom_capacity_agent.store import (
-    CapacityAgentStore,
-    capture_demand_observation,
-    capture_lifecycle_demand_observation,
-    read_agent_lifecycle_demand_observation,
-)
-from loom_capacity_guard.contracts import GuardFenceV1
-from loom_capacity_guard.store import CapacityGuardStore
+from tests.support.historical_capacity import seed_historical_agent
 
 
 def _value(database: dict[str, object], key: str) -> str:
@@ -36,8 +24,8 @@ def _value(database: dict[str, object], key: str) -> str:
 
 def _guard_config(database: dict[str, object]) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
@@ -47,49 +35,9 @@ def _guard_config(database: dict[str, object]) -> AlembicConfig:
     return cfg
 
 
-@asynccontextmanager
-async def _guard_owner_session(
-    database: dict[str, object],
-) -> AsyncIterator[tuple[CapacityAgentStore, CapacityGuardStore, AsyncSession]]:
-    engine = create_async_engine(
-        make_url(_value(database, "migrator_url")),
-        isolation_level="SERIALIZABLE",
-    )
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    owner_role = _value(database, "owner_role")
-    quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner_role)
-    try:
-        async with factory() as session, session.begin():
-            await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
-            yield (
-                CapacityAgentStore(
-                    session,
-                    expected_owner_role=owner_role,
-                    expected_agent_role=_value(database, "agent_role"),
-                ),
-                CapacityGuardStore(session, expected_owner_role=owner_role),
-                session,
-            )
-    finally:
-        await engine.dispose()
+def _distinct_candidate_fence() -> dict[str, object]:
+    return dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
 
-
-@asynccontextmanager
-async def _guard_agent_session(database: dict[str, object]) -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine(
-        make_url(_value(database, "agent_url")),
-        isolation_level="SERIALIZABLE",
-    )
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    try:
-        async with factory() as session, session.begin():
-            yield session
-    finally:
-        await engine.dispose()
-
-
-def _distinct_candidate_fence() -> GuardFenceV1:
-    return GuardFenceV1(
         environment_id="dev-candidate-provenance",
         subject_id=uuid4(),
         subject_incarnation=uuid4(),
@@ -101,80 +49,27 @@ def _distinct_candidate_fence() -> GuardFenceV1:
     )
 
 
-def _distinct_candidate_registration(fence: GuardFenceV1) -> AgentRegistrationV1:
-    return AgentRegistrationV1(
-        environment_id=fence.environment_id,
-        subject_id=fence.subject_id,
-        subject_incarnation=fence.subject_incarnation,
-        authority_incarnation=fence.authority_incarnation,
+def _distinct_candidate_registration(fence: dict[str, object]) -> dict[str, object]:
+    return dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+
+        environment_id=fence["environment_id"],
+        subject_id=fence["subject_id"],
+        subject_incarnation=fence["subject_incarnation"],
+        authority_incarnation=fence["authority_incarnation"],
         agent_incarnation=uuid4(),
-        reporter_incarnation=fence.reporter_incarnation,
-        candidate_digest=fence.candidate_digest,
+        reporter_incarnation=fence["reporter_incarnation"],
+        candidate_digest=fence["candidate_digest"],
         candidate_identity_algorithm="git-sha1",
         candidate_identity="b" * 40,
         candidate_publication_sha256="c" * 64,
-        deployment_generation=fence.deployment_generation,
-        configuration_generation=fence.configuration_generation,
+        deployment_generation=fence["deployment_generation"],
+        configuration_generation=fence["configuration_generation"],
     )
-
-
-@pytest.mark.asyncio
-async def test_capture_observations_emit_exact_candidate_provenance(
-    capacity_guard_database: dict[str, object],
-) -> None:
-    fence = _distinct_candidate_fence()
-    registration = _distinct_candidate_registration(fence)
-    assert len(
-        {
-            registration.candidate_digest,
-            registration.candidate_identity_algorithm,
-            registration.candidate_identity,
-            registration.candidate_publication_sha256,
-        }
-    ) == 4
-    async with _guard_owner_session(capacity_guard_database) as (
-        agent_store,
-        guard_store,
-        _,
-    ):
-        await guard_store.initialize_disabled_authority(fence)
-        await agent_store.register_agent(registration)
-
-    async with _guard_agent_session(capacity_guard_database) as session:
-        demand = await capture_demand_observation(
-            session,
-            registration=registration,
-            expected_high_water=0,
-            max_attempts=100,
-        )
-    async with _guard_agent_session(capacity_guard_database) as session:
-        lifecycle = await capture_lifecycle_demand_observation(
-            session,
-            registration=registration,
-            expected_high_water=1,
-            max_attempts=100,
-        )
-    async with _guard_agent_session(capacity_guard_database) as session:
-        recovered = await read_agent_lifecycle_demand_observation(
-            session,
-            registration=registration,
-            sequence=2,
-        )
-
-    assert demand.candidate_digest == registration.candidate_digest
-    assert demand.candidate_identity_algorithm == registration.candidate_identity_algorithm
-    assert demand.candidate_identity == registration.candidate_identity
-    assert demand.candidate_publication_sha256 == registration.candidate_publication_sha256
-    assert lifecycle.candidate_digest == registration.candidate_digest
-    assert lifecycle.candidate_identity_algorithm == registration.candidate_identity_algorithm
-    assert lifecycle.candidate_identity == registration.candidate_identity
-    assert lifecycle.candidate_publication_sha256 == registration.candidate_publication_sha256
-    assert recovered == lifecycle
 
 
 def _capture_candidate_payloads(
     database: dict[str, object],
-    registration: AgentRegistrationV1,
+    registration: dict[str, object],
     *,
     expected_high_water: int,
 ) -> tuple[dict[str, object], dict[str, object]]:
@@ -190,7 +85,7 @@ def _capture_candidate_payloads(
                     ":agent_incarnation, :expected_high_water, :max_attempts)"
                 ),
                 {
-                    "agent_incarnation": registration.agent_incarnation,
+                    "agent_incarnation": registration["agent_incarnation"],
                     "expected_high_water": expected_high_water,
                     "max_attempts": 100,
                 },
@@ -202,7 +97,7 @@ def _capture_candidate_payloads(
                     ":agent_incarnation, :expected_high_water, :max_attempts)"
                 ),
                 {
-                    "agent_incarnation": registration.agent_incarnation,
+                    "agent_incarnation": registration["agent_incarnation"],
                     "expected_high_water": expected_high_water + 1,
                     "max_attempts": 100,
                 },
@@ -216,18 +111,18 @@ def _capture_candidate_payloads(
 
 def _assert_candidate_provenance(
     payloads: tuple[dict[str, object], dict[str, object]],
-    registration: AgentRegistrationV1,
+    registration: dict[str, object],
 ) -> None:
     for payload in payloads:
-        assert payload["candidate_digest"] == registration.candidate_digest
+        assert payload["candidate_digest"] == registration["candidate_digest"]
         assert (
             payload["candidate_identity_algorithm"]
-            == registration.candidate_identity_algorithm
+            == registration["candidate_identity_algorithm"]
         )
-        assert payload["candidate_identity"] == registration.candidate_identity
+        assert payload["candidate_identity"] == registration["candidate_identity"]
         assert (
             payload["candidate_publication_sha256"]
-            == registration.candidate_publication_sha256
+            == registration["candidate_publication_sha256"]
         )
 
 
@@ -239,13 +134,7 @@ async def test_guard_0021_capture_provenance_downgrades_and_reupgrades(
     fence = _distinct_candidate_fence()
     registration = _distinct_candidate_registration(fence)
 
-    async with _guard_owner_session(capacity_guard_database) as (
-        agent_store,
-        guard_store,
-        _,
-    ):
-        await guard_store.initialize_disabled_authority(fence)
-        await agent_store.register_agent(registration)
+    seed_historical_agent(capacity_guard_database, fence, registration)
     try:
         _assert_candidate_provenance(
             _capture_candidate_payloads(

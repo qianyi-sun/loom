@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import ast
-import json
-import os
 import shutil
 import subprocess
-import sysconfig
-import venv
+import sys
 import zipfile
 from pathlib import Path
-from uuid import UUID
 
 import pytest
-import yaml  # type: ignore[import-untyped]
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_CAPACITY_MANAGER_DOCKERFILE = _REPO_ROOT / "deploy/Dockerfile.capacity-manager"
-_CAPACITY_MANAGER_SOURCES = _REPO_ROOT / "src/loom_capacity_manager"
 _MIGRATION_RESOURCES = {
     "capacity_migrations/__init__.py",
     "capacity_migrations/alembic.ini",
@@ -91,9 +83,6 @@ _GUARD_MIGRATION_RESOURCES = {
     "capacity_guard_migrations/versions/guard_0033_refundable_admission_compatibility.py",
     "capacity_guard_migrations/versions/guard_0034_current_bootstrap_observation.py",
 }
-_PROFILE = _REPO_ROOT / "deploy/dev-fleet/capacity-control-plane.toml"
-_MANAGER_IMAGE = "ghcr.io/qianyi-sun/loom-capacity-manager@sha256:" + "a" * 64
-_AUTHORITY = UUID("00000000-0000-4000-8000-000000000901")
 
 
 @pytest.fixture(scope="module")
@@ -157,201 +146,51 @@ def test_wheel_contains_complete_capacity_guard_migration_package(
     assert _GUARD_MIGRATION_RESOURCES <= members
 
 
-def test_capacity_manager_image_installs_the_packaged_migration_tree() -> None:
-    dockerfile = _CAPACITY_MANAGER_DOCKERFILE.read_text(encoding="utf-8")
-
-    copy = "COPY capacity_migrations ./capacity_migrations"
-    root_install = "pip install --no-cache-dir -e ."
-    install_commands = [
-        line.strip().removesuffix(" && \\")
-        for line in dockerfile.splitlines()
-        if line.strip().startswith("pip install ")
-    ]
-    assert dockerfile.count(copy) == 1
-    assert install_commands.count(root_install) == 1
-    assert dockerfile.index(copy) < dockerfile.index(root_install)
+def test_capacity_migration_sources_are_grouped_under_database() -> None:
+    for package in (
+        "capacity_migrations", "capacity_guard_migrations", "capacity_build_guard_migrations",
+    ):
+        assert not (_REPO_ROOT / package).exists()
+        assert (_REPO_ROOT / "database" / package / "alembic.ini").is_file()
 
 
-def test_capacity_manager_sources_do_not_import_unpackaged_loom_modules() -> None:
-    unpackaged: list[str] = []
-    for source in sorted(_CAPACITY_MANAGER_SOURCES.glob("*.py")):
-        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            modules: tuple[str, ...]
-            if isinstance(node, ast.Import):
-                modules = tuple(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                modules = (node.module,)
-            else:
-                continue
-            unpackaged.extend(
-                f"{source.relative_to(_REPO_ROOT)}:{module}"
-                for module in modules
-                if module == "loom"
-                or module.startswith("loom.")
-                or (module.startswith("loom_") and not module.startswith("loom_capacity_manager"))
-            )
-
-    assert unpackaged == []
-
-
-def test_installed_wheel_renders_capacity_manifests_outside_checkout(
+def test_wheel_preserves_all_historical_migration_resources(
     built_loom_wheel: Path,
-    tmp_path: Path,
 ) -> None:
-    environment = tmp_path / "wheel-environment"
-    venv.EnvBuilder(with_pip=False).create(environment)
-    python = environment / "bin/python"
-    purelib_result = subprocess.run(
-        [
-            str(python),
-            "-c",
-            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    installed_purelib = Path(purelib_result.stdout.strip())
-    dependency_site = tmp_path / "non-loom-dependencies"
-    dependency_site.mkdir()
-    for dependency in Path(sysconfig.get_paths()["purelib"]).iterdir():
-        if (
-            dependency.name.endswith(".pth")
-            or "loom" in dependency.name.casefold()
-            or dependency.name == "__pycache__"
+    with zipfile.ZipFile(built_loom_wheel) as wheel:
+        for package in (
+            "capacity_migrations", "capacity_guard_migrations", "capacity_build_guard_migrations",
         ):
-            continue
-        dependency_site.joinpath(dependency.name).symlink_to(
-            dependency,
-            target_is_directory=dependency.is_dir(),
-        )
-    installed_purelib.joinpath("loom-test-dependencies.pth").write_text(
-        str(dependency_site) + "\n",
-        encoding="utf-8",
-    )
-    install = subprocess.run(
-        [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(python),
-            "--no-deps",
-            str(built_loom_wheel),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert install.returncode == 0, install.stderr
+            source = _REPO_ROOT / "database" / package
+            for path in source.rglob("*"):
+                if path.is_file() and "__pycache__" not in path.parts:
+                    member = f"{package}/{path.relative_to(source).as_posix()}"
+                    assert wheel.read(member) == path.read_bytes(), member
 
-    outside_checkout = tmp_path / "outside-checkout"
-    outside_checkout.mkdir()
-    profile = outside_checkout / "capacity-control-plane.toml"
-    shutil.copyfile(_PROFILE, profile)
-    process_environment = os.environ.copy()
-    process_environment.pop("PYTHONPATH", None)
-    process_environment["PATH"] = f"{environment / 'bin'}:{process_environment['PATH']}"
-    process_environment["VIRTUAL_ENV"] = str(environment)
-    probe = subprocess.run(
-        [
-            str(python),
-            "-c",
-            (
-                "import json, capacity_guard_migrations, capacity_migrations, loom_cli; "
-                "import loom.application_schema_inventory as schema_inventory; "
-                "import loom.application_schema_reference as schema_reference; "
-                "import loom.application_runtime_grants as runtime_grants; "
-                "import loom.application_ownership_transfer as ownership_transfer; "
-                "import loom.application_database_connection as database_connection; "
-                "import loom.application_login_sealing as login_sealing; "
-                "import loom.application_runtime_login as runtime_login; "
-                "import loom.application_database_admission as database_admission; "
-                "import loom_cli.rollout.operator.protected_peer_database_connection as peer_connection; "
-                "import loom_cli.rollout.operator.protected_application_admission_recovery as admission_recovery; "
-                "import loom_cli.rollout.operator.protected_application_credential_recovery as credential_recovery; "
-                "from loom_capacity_guard.schema_startup import capacity_guard_schema_head; "
-                "from loom.trial_writer_trigger_authority import application_trigger_owner_handoff_ddl; "
-                "from loom_capacity_manager.migration_resources import "
-                "resolve_capacity_migration_resources; "
-                "print(json.dumps({"
-                "'capacity_package': capacity_migrations.__file__, "
-                "'guard_package': capacity_guard_migrations.__file__, "
-                "'schema_inventory_package': schema_inventory.__file__, "
-                "'schema_reference_package': schema_reference.__file__, "
-                "'runtime_grants_package': runtime_grants.__file__, "
-                "'ownership_transfer_package': ownership_transfer.__file__, "
-                "'database_connection_package': database_connection.__file__, "
-                "'login_sealing_package': login_sealing.__file__, "
-                "'runtime_login_package': runtime_login.__file__, "
-                "'database_admission_package': database_admission.__file__, "
-                "'peer_connection_package': peer_connection.__file__, "
-                "'admission_recovery_package': admission_recovery.__file__, "
-                "'credential_recovery_package': credential_recovery.__file__, "
-                "'guard_head': capacity_guard_schema_head()[0], "
-                "'handoff_rendered': bool(application_trigger_owner_handoff_ddl("
-                "previous_owner='loom_previous', application_owner='loom_application_owner', "
-                "guard_owner='loom_guard_owner').as_string()), "
-                "'loom_cli': loom_cli.__file__, "
-                "'migration_config': str("
-                "resolve_capacity_migration_resources().config)}))"
-            ),
-        ],
-        cwd=outside_checkout,
-        env=process_environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert probe.returncode == 0, probe.stderr
-    probe_result = json.loads(probe.stdout)
-    assert probe_result.pop("guard_head") == "guard_0035"
-    assert probe_result.pop("handoff_rendered") is True
-    loaded_paths = [Path(value).resolve() for value in probe_result.values()]
-    assert all(path.is_relative_to(installed_purelib) for path in loaded_paths)
-    assert not any(path.is_relative_to(_REPO_ROOT) for path in loaded_paths)
-    completed = subprocess.run(
-        [
-            str(environment / "bin/loom"),
-            "admin",
-            "capacity-control-plane",
-            "render",
-            "--file",
-            str(profile),
-            "--manager-image",
-            _MANAGER_IMAGE,
-            "--authority-incarnation",
-            str(_AUTHORITY),
-        ],
-        cwd=outside_checkout,
-        env=process_environment,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
-    assert completed.returncode == 0, completed.stderr
-    documents = [document for document in yaml.safe_load_all(completed.stdout) if document]
-    namespace = next(
-        document
-        for document in documents
-        if document["kind"] == "Namespace" and document["metadata"]["name"] == "loom-dev"
+def test_installed_wheel_loads_each_chain_outside_checkout(
+    built_loom_wheel: Path, tmp_path: Path,
+) -> None:
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(built_loom_wheel) as wheel:
+        wheel.extractall(installed)
+    script = '''
+import sys
+from importlib.resources import files
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+sys.path.insert(0, sys.argv[1])
+for package, head in (
+    ("capacity_migrations", "capacity_0023"),
+    ("capacity_guard_migrations", "guard_0035"),
+    ("capacity_build_guard_migrations", "build_guard_0032"),
+):
+    resources = files(package)
+    assert str(resources).startswith(sys.argv[1])
+    config = Config(str(resources / "alembic.ini"))
+    assert ScriptDirectory.from_config(config).get_heads() == [head]
+'''
+    subprocess.run(
+        [sys.executable, "-I", "-c", script, str(installed)],
+        cwd=tmp_path, check=True,
     )
-    postgres_service = next(
-        document
-        for document in documents
-        if document["kind"] == "Service"
-        and document["metadata"]["name"] == "loom-capacity-postgres"
-    )
-    postgres_statefulset = next(
-        document
-        for document in documents
-        if document["kind"] == "StatefulSet"
-        and document["metadata"]["name"] == "loom-capacity-postgres"
-    )
-    migration_jobs = [document for document in documents if document["kind"] == "Job"]
-    assert namespace["metadata"]["name"] == "loom-dev"
-    assert postgres_service["metadata"]["name"] == "loom-capacity-postgres"
-    assert postgres_statefulset["metadata"]["name"] == "loom-capacity-postgres"
-    assert len(migration_jobs) == 1
-    assert migration_jobs[0]["metadata"]["name"].startswith("loom-capacity-migrate-capacity-0023-")

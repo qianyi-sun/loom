@@ -38,6 +38,10 @@ from sqlalchemy.dialects.postgresql import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
+from loom.db.nebius_environment_schema import (
+    NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
+)
 
 
 def _personal_storage_binding_check(environment_name: str) -> str:
@@ -2721,6 +2725,7 @@ class TaskImageCapacityWait(Base):
     cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
     memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_waited_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     renewed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
@@ -5815,6 +5820,9 @@ class Trial(Base):
         JSONB(none_as_null=True), nullable=True
     )
     execution_route_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduling_observation: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     state: Mapped[str] = mapped_column(String, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)

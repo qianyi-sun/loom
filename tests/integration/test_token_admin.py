@@ -6,10 +6,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, insert, select, update
+from sqlalchemy import create_engine, delete, insert, select
 from sqlalchemy.orm import sessionmaker
 
-from loom.db.schema import TaskImageMaterialization, Token, WorkerPoolAutoscalerPolicy
+from loom.db.schema import TaskImageMaterialization, Token
 from loom_control_plane.app import create_app
 from loom_control_plane.config import ControlPlaneSettings
 
@@ -31,7 +31,7 @@ def _set_cp_env(
     monkeypatch: pytest.MonkeyPatch,
     postgres_url: str,
     *,
-    environment: str = "dev-token-test",
+    environment: str = "development",
 ) -> None:
     for k, v in {
         "LOOM_CP_DB_URL": postgres_url,
@@ -40,6 +40,7 @@ def _set_cp_env(
         "LOOM_CP_MINIO_SECRET_KEY": "y",
         "LOOM_CP_LLM_GATEWAY_URL": "http://gw:9100/",
         "LOOM_ENV": environment,
+        "LOOM_LOCAL_EXECUTION": "1",
     }.items():
         monkeypatch.setenv(k, v)
 
@@ -75,36 +76,7 @@ def app(
     _write_admin_secret(secret_file)
     _set_cp_env(monkeypatch, postgres_url)
     monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        session.execute(
-            delete(WorkerPoolAutoscalerPolicy).where(
-                WorkerPoolAutoscalerPolicy.environment == "dev-token-test",
-            ),
-        )
-        session.add(
-            WorkerPoolAutoscalerPolicy(
-                environment="dev-token-test",
-                pool_name="dev-token-test",
-                actuator="slurm",
-                enabled=True,
-                min_slots=0,
-                max_slots=2,
-                actuator_config={"external_runner": True},
-            ),
-        )
-        session.commit()
-    try:
-        yield create_app(ControlPlaneSettings(_env_file=None))
-    finally:
-        with sessionmaker(engine)() as session:
-            session.execute(
-                delete(WorkerPoolAutoscalerPolicy).where(
-                    WorkerPoolAutoscalerPolicy.environment == "dev-token-test",
-                ),
-            )
-            session.commit()
-        engine.dispose()
+    yield create_app(ControlPlaneSettings(_env_file=None))
 
 
 def test_issue_worker_token(app):  # type: ignore[no-untyped-def]
@@ -120,52 +92,23 @@ def test_issue_worker_token(app):  # type: ignore[no-untyped-def]
         assert "token_hash_prefix" in body
 
 
-def test_issue_worker_token_rejected_while_dev_policy_is_draining(
+@pytest.mark.parametrize("environment,enabled", [("production", "1"), ("development", "0")])
+def test_issue_worker_token_rejects_hosted_or_disabled_local_execution(
     app,  # type: ignore[no-untyped-def]
-    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+    enabled: str,
 ) -> None:
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        session.execute(
-            update(WorkerPoolAutoscalerPolicy)
-            .where(WorkerPoolAutoscalerPolicy.environment == "dev-token-test")
-            .values(max_slots=0),
-        )
-        session.commit()
-    engine.dispose()
-
+    monkeypatch.setenv("LOOM_ENV", environment)
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", enabled)
     with TestClient(app) as client:
         response = client.post(
             "/admin/worker-tokens",
             headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
             json={"expires_in_days": 30},
         )
-
     assert response.status_code == 409
-    assert "active development capacity policy" in response.json()["detail"]
-
-
-def test_revoke_all_worker_tokens(app, postgres_url: str) -> None:  # type: ignore[no-untyped-def]
-    headers = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
-    with TestClient(app) as client:
-        for _ in range(2):
-            issued = client.post(
-                "/admin/worker-tokens",
-                headers=headers,
-                json={"expires_in_days": 30},
-            )
-            assert issued.status_code == 201
-        revoked = client.delete("/admin/worker-tokens", headers=headers)
-    assert revoked.status_code == 200
-    assert revoked.json()["revoked"] >= 2
-
-    engine = create_engine(postgres_url)
-    with sessionmaker(engine)() as session:
-        active = session.execute(
-            select(Token).where(Token.type == "worker", Token.revoked_at.is_(None)),
-        ).scalars()
-        assert list(active) == []
-    engine.dispose()
+    assert "local development" in response.json()["detail"]
 
 
 def test_issue_batch_runner_token(
@@ -236,7 +179,7 @@ def test_issue_worker_token_accepts_singleton_admin_secret(
 ) -> None:
     secret_file = tmp_path / "secrets.toml"
     _write_admin_secret(secret_file)
-    _set_cp_env(monkeypatch, postgres_url, environment="test-token-admin")
+    _set_cp_env(monkeypatch, postgres_url, environment="development")
     monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
     admin_app = create_app(ControlPlaneSettings(_env_file=None))
 
@@ -454,7 +397,7 @@ def test_revoke_token_accepts_singleton_admin_secret(
 ) -> None:
     secret_file = tmp_path / "secrets.toml"
     _write_admin_secret(secret_file)
-    _set_cp_env(monkeypatch, postgres_url, environment="test-token-admin")
+    _set_cp_env(monkeypatch, postgres_url, environment="development")
     monkeypatch.setenv("LOOM_CP_ADMIN_SECRET_FILE", str(secret_file))
     admin_app = create_app(ControlPlaneSettings(_env_file=None))
 

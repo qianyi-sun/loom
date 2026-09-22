@@ -131,7 +131,8 @@ def test_uv_binary_and_lock_are_exact_and_current() -> None:
 def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> None:
     setup_steps: list[tuple[Path, dict[str, Any]]] = []
 
-    for path, workflow in _workflows().items():
+    workflows = _workflows()
+    for path, workflow in workflows.items():
         for step in _workflow_steps(workflow):
             uses = str(step.get("uses", ""))
             assert not uses.startswith("actions/cache@"), path
@@ -162,7 +163,12 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         checksum = inputs.get("checksum")
         assert checksum in {UV_CHECKSUMS["linux-x86_64"], MATRIX_CHECKSUM_EXPRESSION}, path
         assert inputs.get("enable-cache") is True, path
-        assert inputs.get("save-cache") == SAFE_SAVE_EXPRESSION, path
+        triggers = workflows[path].get("on", workflows[path].get(True, {}))
+        untrusted_events = {"pull_request", "pull_request_target", "merge_group", "workflow_call"}
+        if untrusted_events.intersection(triggers):
+            assert inputs.get("save-cache") == SAFE_SAVE_EXPRESSION, path
+        else:
+            assert inputs.get("save-cache") is True, path
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
 
 
@@ -214,16 +220,7 @@ def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None
     assert setup_uv["with"]["checksum"] == MATRIX_CHECKSUM_EXPRESSION
 
 
-def test_deploy_environment_installs_locked_runtime() -> None:
-    deploy_script = (ROOT / "scripts/ops/deploy_environment.sh").read_text(encoding="utf-8")
-    assert "uv sync --locked --extra cluster --python 3.11" in deploy_script
-    assert "uv run --no-sync" in deploy_script
 
-    # The staging rollout host installer (scripts/ops/staging_rollout_host.py)
-    # must also bind its runtime venv to the uv.lock digest, but dev has since
-    # restructured that installer and the original binding was dropped in an
-    # earlier merge. Re-grafting + validating it against the real rollout host
-    # is tracked separately (#920) so it is not asserted here.
 
 
 def test_runbook_uv_commands_never_resolve_implicitly() -> None:

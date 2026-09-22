@@ -1,0 +1,751 @@
+{
+  "schema_version": 1,
+  "scope": "Tracked working-tree text; includes existing historical records, excludes deleted files. This audit is category 3 historical evidence.",
+  "categories": {
+    "1": "required historical migration",
+    "2": "required retained-data compatibility",
+    "3": "clearly marked historical documentation/evidence",
+    "4": "still-required provider-independent logic",
+    "5": "accidental leftover (must be removed)"
+  },
+  "files": [
+    {
+      "path": ".gitignore",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Prevents an old owner-local credential filename from entering Git; does not read or use it."
+    },
+    {
+      "path": "config/component-ownership.toml",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Ownership selection for retained migration compatibility tests."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0006_demand.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0009_execution.py",
+      "matching_lines": 10,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0011_revocation.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0012_withdrawal.py",
+      "matching_lines": 4,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0013_terminal_inventory.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0015_hold_retirement.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0016_worker_registration.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0020_terminal_outcomes.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0021_registered_release.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_build_guard_migrations/versions/build_guard_0032_native_recovery.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/env.py",
+      "matching_lines": 24,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0003_prepared_admission.py",
+      "matching_lines": 12,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0010_protected_release_fence.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0011_atomic_trial_submission.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0013_executable_admission.py",
+      "matching_lines": 15,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0017_executable_unregistered_withdrawal.py",
+      "matching_lines": 9,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0018_prepared_bootstrap_revocation.py",
+      "matching_lines": 6,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0021_current_assignment_assertion.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0023_staging_worker_session.py",
+      "matching_lines": 87,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0028_terminal_inventory_recovery.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_guard_migrations/versions/guard_0032_typed_terminal_inventory.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0003_fenced_grant_protocol.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0004_executable_bridge.py",
+      "matching_lines": 71,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0006_executable_work_queue.py",
+      "matching_lines": 5,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0008_executable_bridge_completion.py",
+      "matching_lines": 101,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0014_protected_admission_plan.py",
+      "matching_lines": 7,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0015_terminal_inventory_evidence.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "database/capacity_migrations/versions/capacity_0018_personal_build_membership.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "docs/architecture/ci-runner-acceleration.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/architecture/nebius-primary-platform.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/architecture/nebius-service-execution.md",
+      "matching_lines": 2,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/architecture/terminus2-runtime.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/contributing/ci.md",
+      "matching_lines": 3,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/evidence/README.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/historical/shared-cluster-reference-audit.json",
+      "matching_lines": 7,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/historical/shared-cluster-retirement-2026-09.md",
+      "matching_lines": 7,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/integrations/provider-onboarding.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/runbooks/nebius-platform.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "docs/runbooks/nebius-terminus2.md",
+      "matching_lines": 1,
+      "category": 3,
+      "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
+    },
+    {
+      "path": "migrations/versions/0038_slurm_worker_jobs.py",
+      "matching_lines": 18,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0043_gb10_worker_lifecycle.py",
+      "matching_lines": 27,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0044_worker_pool_autoscaler.py",
+      "matching_lines": 17,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0049_gb10_source_provenance.py",
+      "matching_lines": 5,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0059_gb10_desired_source_git.py",
+      "matching_lines": 8,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0066_autoscaler_policy_prod_pressure_state.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0067_rename_pool_gb10arm64_to_gb10.py",
+      "matching_lines": 17,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0073_reconcile_renumbered_lineage.py",
+      "matching_lines": 14,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0074_slurm_worker_containment_identity.py",
+      "matching_lines": 37,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0079_pipeline_orchestrator.py",
+      "matching_lines": 12,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0089_pipeline_gpu_admission.py",
+      "matching_lines": 42,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0108_task_image_builder_phase2_foundation.py",
+      "matching_lines": 24,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0110_register_failed_smoke_storage_objects.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0123_personal_dev_native_builder.py",
+      "matching_lines": 2,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0125_task_image_builder_projection_authority.py",
+      "matching_lines": 4,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "migrations/versions/0143_task_image_grant_cleanup.py",
+      "matching_lines": 5,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "scripts/application_schema_baseline.py",
+      "matching_lines": 11,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "scripts/ops/ci_reliability_metrics.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Reads historical GitHub runner observations for reliability comparisons; no runner provisioning or routing."
+    },
+    {
+      "path": "src/loom/application_schema_provisioning.py",
+      "matching_lines": 5,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "src/loom/application_schema_readonly.py",
+      "matching_lines": 3,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom/db/build_guard_migration_privileges.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
+    },
+    {
+      "path": "src/loom/db/schema.py",
+      "matching_lines": 100,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom/pipeline/work_protocol.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom_task_image_authority/contracts.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom_task_image_authority/publication_contracts.py",
+      "matching_lines": 5,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom_task_image_authority/publication_jobs.py",
+      "matching_lines": 6,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "src/loom_task_image_signer/policy.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained database or immutable signed/result schema; historical identity is required for reading and verifying retained data."
+    },
+    {
+      "path": "tests/fixtures/historical/capacity_claim.json",
+      "matching_lines": 115,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/capacity_observation_binding.json",
+      "matching_lines": 6,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/completed_task_image_publication.json",
+      "matching_lines": 41,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/delegated_capacity_claim.json",
+      "matching_lines": 115,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/released_task_image_build_grant.json",
+      "matching_lines": 12,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/retirable_task_image_attempt.json",
+      "matching_lines": 41,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/retired_and_live_task_image_attempts.json",
+      "matching_lines": 41,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/historical/task_image_attempt.json",
+      "matching_lines": 41,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/fixtures/source_useful_5003_failure_classification.json",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/conftest.py",
+      "matching_lines": 10,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_alembic_migrations.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_capacity_agent_migrations.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_capacity_guard_migrations.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_capacity_management_migrations.py",
+      "matching_lines": 60,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_delivery_export.py",
+      "matching_lines": 3,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_execution_attempt_terminal_convergence.py",
+      "matching_lines": 3,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_historical_capacity_retirement_migrations.py",
+      "matching_lines": 27,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_migration_execution_routing_decision.py",
+      "matching_lines": 6,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_migration_failed_smoke_storage_registration.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_migration_pipeline_orchestrator.py",
+      "matching_lines": 3,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_migration_reconcile_renumbered_lineage.py",
+      "matching_lines": 6,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_migration_slurm_containment_identity.py",
+      "matching_lines": 4,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_nebius_task_image_claims.py",
+      "matching_lines": 2,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/integration/test_pipeline_platform_fanout_commit_runtime.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_protected_claim_application_migration.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_resource_pool_summary.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_service_execution_leases.py",
+      "matching_lines": 4,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_service_trials_read.py",
+      "matching_lines": 3,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/integration/test_task_image_builder_phase2_migration.py",
+      "matching_lines": 8,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_task_image_grant_cleanup_migration.py",
+      "matching_lines": 1,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_task_image_projection_migration.py",
+      "matching_lines": 14,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_task_image_session_generation_migration.py",
+      "matching_lines": 14,
+      "category": 1,
+      "reason": "Regression coverage or fixture for published migration lineage and retained schema."
+    },
+    {
+      "path": "tests/integration/test_trial_legacy_claim_identity.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/loom_cli/test_admin_cmd.py",
+      "matching_lines": 4,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/ops/test_ci_hosted_execution.py",
+      "matching_lines": 1,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/ops/test_ci_reliability_metrics.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/ops/test_nebius_ci_scope.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_control_plane_app.py",
+      "matching_lines": 2,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_cp_metrics_wiring.py",
+      "matching_lines": 1,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_explicit_nebius_backend.py",
+      "matching_lines": 2,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_hosted_backend_retirement.py",
+      "matching_lines": 2,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_nebius_platform_render.py",
+      "matching_lines": 1,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_nebius_terminus_ingest.py",
+      "matching_lines": 1,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_pipeline_work_protocol.py",
+      "matching_lines": 3,
+      "category": 4,
+      "reason": "Negative admission/retirement regression: legacy values are rejected or absent, not supported."
+    },
+    {
+      "path": "tests/unit/test_task_image_build_plan.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_task_image_execution_grant.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_task_image_publication_contracts.py",
+      "matching_lines": 3,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_task_image_publication_keyset.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_task_image_publication_set.py",
+      "matching_lines": 2,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "tests/unit/test_trial_cache.py",
+      "matching_lines": 1,
+      "category": 2,
+      "reason": "Retained result, signed provenance or historical observation fixture; does not assert hosted backend availability."
+    },
+    {
+      "path": "third_party/behavior-stage1/omnigibson/omnigibson/macros.py",
+      "matching_lines": 1,
+      "category": 4,
+      "reason": "Vendored GPU hardware tuning used by direct local simulation; not a hosted execution backend."
+    }
+  ]
+}

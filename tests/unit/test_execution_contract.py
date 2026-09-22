@@ -109,7 +109,7 @@ def test_provider_binding_lives_on_regional_execution_target() -> None:
 def test_pool_capacity_contract_keeps_stale_observations_non_executable() -> None:
     observed_at = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
     capacity = PoolCapacityV1(
-        logical_pool_id="oldlab",
+        logical_pool_id="local-cpu",
         adapter_kind="legacy_worker_claim",
         environment="production",
         region=None,
@@ -328,7 +328,7 @@ def test_routing_decision_binds_one_canonical_candidate_and_capacity_reason() ->
     now = datetime.now(UTC)
     candidates = (
         ExecutionRouteCandidateV1(
-            logical_pool_id="gb10",
+            logical_pool_id="local-gpu",
             adapter_kind="legacy_worker_claim",
             operator_weight=0,
             enabled=True,
@@ -365,13 +365,13 @@ def test_routing_decision_binds_one_canonical_candidate_and_capacity_reason() ->
     decision = ExecutionRoutingDecisionV1(
         generation=3,
         requirements_sha256="sha256:" + "a" * 64,
-        selected_pool_id="gb10",
+        selected_pool_id="local-gpu",
         selected_adapter_kind="legacy_worker_claim",
         reason="fresh_executable_capacity",
         decided_at=now,
         candidates=candidates,
     )
-    assert decision.selected_pool_id == "gb10"
+    assert decision.selected_pool_id == "local-gpu"
     with pytest.raises(ValidationError, match="evidence does not match"):
         ExecutionRoutingDecisionV1.model_validate(
             {

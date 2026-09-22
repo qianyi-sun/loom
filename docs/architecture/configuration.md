@@ -66,9 +66,10 @@ template macro behavior.
 loader; profile-specific paths should stay beside the profile when the schema
 description says they are profile-relative.
 
-Environment-specific cluster files belong under `deploy/environments/`. Use
-those profiles for durable settings and reserve environment variables for
-runtime service injection and documented CLI overrides. Secrets belong in
+Hosted platform input examples live under `deploy/nebius/`; follow the
+[Nebius deployment procedure](../runbooks/nebius-deployment.md) for those inputs.
+Disposable cluster profiles start from `deploy/local/local.example.cluster.toml`.
+Reserve environment variables for runtime service injection and documented CLI overrides. Secrets belong in
 Secret-backed settings or explicit credential-source files, never in committed
 profiles or command arguments.
 

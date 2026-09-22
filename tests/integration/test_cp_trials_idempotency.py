@@ -92,6 +92,8 @@ def app(
     seed_team: tuple[UUID, str],
 ):  # type: ignore[no-untyped-def]
     for k, v in {
+        "LOOM_ENV": "development",
+        "LOOM_LOCAL_EXECUTION": "1",
         "LOOM_CP_DB_URL": postgres_url,
         "LOOM_CP_MINIO_ENDPOINT": "http://minio:9000",
         "LOOM_CP_MINIO_ACCESS_KEY": "x",
@@ -198,8 +200,8 @@ def test_submit_trial_persists_required_worker_pool_capability(
             json={
                 "task_id": "hello",
                 "config": {"agent_name": "oracle", "agent_model": None},
-                "idempotency_key": "pool-coverage-oldlab",
-                "required_worker_pool": " oldlab ",
+                "idempotency_key": "pool-coverage-local-worker",
+                "required_worker_pool": " local-worker ",
             },
         )
 
@@ -213,7 +215,7 @@ def test_submit_trial_persists_required_worker_pool_capability(
         ).scalar_one()
     engine.dispose()
 
-    assert trial.requires_caps["worker_pool"] == "oldlab"
+    assert trial.requires_caps["worker_pool"] == "local-worker"
 
 
 def test_no_idempotency_key_creates_distinct_trials(

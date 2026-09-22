@@ -39,12 +39,6 @@ def test_env_vars_parse(monkeypatch: pytest.MonkeyPatch) -> None:
     # Dev-reload defaults off so production never accidentally
     # ships with a file-watcher in each container.
     assert s.dev_reload is False
-    assert s.personal_dev_acceptance_binding_json == "{}"
-    assert s.personal_dev_acceptance_plan_sha256 == ""
-    assert s.personal_dev_runtime_mode == "shadow"
-    assert s.personal_dev_operational_binding_json == "{}"
-    assert s.personal_dev_operational_plan_sha256 == ""
-    assert s.personal_dev_activation_public_key_sha256 == ""
 
 
 def test_dev_reload_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,3 +111,10 @@ def test_required_fields_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LOOM_SVC_DB_URL", raising=False)
     with pytest.raises(Exception):  # noqa: B017
         LoomServiceSettings(_env_file=None)
+
+
+def test_service_settings_do_not_advertise_retired_hosted_development() -> None:
+    assert not any(
+        field.startswith(("personal_dev", "dev_instance"))
+        for field in LoomServiceSettings.model_fields
+    )

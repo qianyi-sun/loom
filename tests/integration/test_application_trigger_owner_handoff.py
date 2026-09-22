@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.pool import NullPool
 
 from loom.trial_writer_trigger_authority import application_trigger_owner_handoff_ddl
-from tests.integration.test_capacity_agent_store import _value
+from tests.support.historical_capacity import _value
 
 _PUBLIC = (
     "loom_drop_trial_writer_triggers",

@@ -11,10 +11,10 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.integration.test_capacity_agent_store import (
-    _initialize_and_register,
-    _seed_trial,
+from tests.support.historical_capacity import (
     _value,
+    historical_agent_rows,
+    seed_unprotected_trial,
 )
 
 
@@ -32,7 +32,7 @@ async def _control_session(database: dict[str, object], *, isolation: str = "REA
 
 async def _initialize(database: dict[str, object], *, registration=None) -> dict[str, object]:
     if registration is None:
-        _, registration = await _initialize_and_register(database)
+        _, registration = await historical_agent_rows(database)
     async with _control_session(database) as session:
         result = await session.execute(
             text(
@@ -86,7 +86,7 @@ async def test_trial_writer_counts_committed_writes_not_observations_or_rollback
     capacity_guard_database: dict[str, object],
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     initial = await _initialize(database)
     engine = _legacy_engine(database)
     try:
@@ -130,7 +130,7 @@ async def test_trial_writer_transaction_open_before_freeze_cannot_write_afterwar
     capacity_guard_database: dict[str, object], isolation: str
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     initial = await _initialize(database)
     engine = _legacy_engine(database, isolation=isolation)
     try:
@@ -192,7 +192,7 @@ async def test_trial_writer_preserves_existing_lock_then_update_transaction_orde
 ) -> None:
     """The result route locks its trial before the later UPDATE statement."""
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     initialized = await _initialize(database) if bound else None
     provisioner = _legacy_engine(database)
     provisioner.dispose()

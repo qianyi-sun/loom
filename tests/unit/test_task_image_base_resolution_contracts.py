@@ -8,8 +8,6 @@ from pydantic import ValidationError
 
 from loom_task_image_authority.contracts import (
     TaskImageBaseResolutionEvidenceV1,
-    TaskImagePublicationCandidateRequestV1,
-    TaskImagePublicationCandidateRequestV2,
 )
 from loom_task_image_authority.http_contracts import (
     TaskImagePublicationCandidateResponseV1,
@@ -118,59 +116,10 @@ def test_base_record_accepts_exact_bounds_and_both_native_platforms() -> None:
         assert evidence.observed_base_digests == tuple(bases)
 
 
-def test_candidate_v2_keeps_metadata_and_rejects_v1_downgrade_or_upgrade() -> None:
-    request = TaskImagePublicationCandidateRequestV2.model_validate(_candidate())
-    assert request.public_binding()["base_resolution"] == _evidence()
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV1.model_validate(request.model_dump())
-    legacy = _candidate(schema_version=1)
-    del legacy["base_resolution"]
-    TaskImagePublicationCandidateRequestV1.model_validate(legacy)
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV2.model_validate(legacy)
-
-
-@pytest.mark.parametrize(
-    "evidence",
-    [None, _evidence(platform="linux/amd64"), _evidence(output_digest=BASE)],
-)
-def test_candidate_v2_rejects_missing_or_substituted_metadata(evidence: object) -> None:
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV2.model_validate(_candidate(base_resolution=evidence))
-
-
-def test_candidate_v2_revalidates_constructed_nested_evidence() -> None:
-    record = TaskImageBaseResolutionEvidenceV1.model_validate(_evidence())
-    forged = record.model_copy(update={"observed_base_digests": ("invalid",)})
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV2.model_validate(_candidate(base_resolution=forged))
-    missing = _candidate()
-    del missing["base_resolution"]
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV2.model_validate(missing)
-
-
-def test_candidate_v2_accepts_revalidated_evidence_instances() -> None:
-    record = TaskImageBaseResolutionEvidenceV1.model_validate(_evidence())
-    assert TaskImageBaseResolutionEvidenceV1.model_validate(record) == record
-    request = TaskImagePublicationCandidateRequestV2.model_validate(
-        _candidate(base_resolution=record)
-    )
-    assert request.public_binding()["base_resolution"] == _evidence()
-
-
-@pytest.mark.parametrize("version", [None, 1, 2.0, "2", True])
-def test_candidate_v2_requires_explicit_integer_version(version: object) -> None:
-    payload = _candidate(schema_version=version)
-    if version is None:
-        del payload["schema_version"]
-    with pytest.raises(ValidationError):
-        TaskImagePublicationCandidateRequestV2.model_validate(payload)
-
-
 def test_v2_acknowledgement_preserves_evidence_and_rejects_substitution() -> None:
-    request = TaskImagePublicationCandidateRequestV2.model_validate(_candidate())
-    payload = request.model_dump(mode="json", exclude={"session_token"})
+    payload = _candidate()
+    del payload["session_token"]
+    payload = {key: str(value) if isinstance(value, UUID) else value for key, value in payload.items()}
     payload.update(
         schema_version="loom.task-image-publication-candidate.v2",
         candidate_id="77777777-7777-4777-8777-777777777777",

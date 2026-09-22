@@ -41,8 +41,6 @@ _GOLDEN_FILES = (
     "web.yaml",
     "ingress.yaml",
     "gateway-router.yaml",
-    "worker-router.yaml",
-    "minio-router.yaml",
     # Phase C (#190) — egress proxy chain. Default replicas=0 so
     # the resources exist in the manifest but no pods until
     # operators scale up.
@@ -68,11 +66,10 @@ def _deployment_env_value(docs: list[dict], deployment: str, env_name: str) -> s
     return item.get("value") if item else None
 
 
-# Schema default flipped k8s_worker.enabled to false (#383): profiles
-# that share OLDLAB hosts with Slurm must not double-schedule the host.
+# Local in-cluster workers require explicit opt-in.
 # Render tests that exercise the worker Deployment / worker
 # NetworkPolicy must opt in explicitly. `_DEFAULT_CFG` mirrors the
-# development.cluster.toml profile (worker enabled) so the canonical
+# local worker configuration so the canonical
 # `deploy/k8s/*.yaml` golden files still apply.
 def _default_cfg(**kwargs: object) -> ClusterConfig:
     k8s_worker_cls = type(ClusterConfig().k8s_worker)
@@ -182,59 +179,6 @@ def test_load_config_from_toml_accepts_worker_subprocess_gateway_url(
     )
     cfg = load_cluster_config(cfg_path)
     assert cfg.worker_subprocess_gateway_url == "http://host.docker.internal:30444/openai/v1"
-
-
-def test_load_config_accepts_rollout_environment_state_and_gb10_pool(
-    tmp_path: Path,
-) -> None:
-    cfg_path = tmp_path / "cluster.toml"
-    cfg_path.write_text(
-        'env_state_profile = "../environment-state/staging.toml"\n'
-        "[gb10_pool]\n"
-        'ssh_config = "../worker-pools/gb10/ssh_config"\n'
-        'ssh_identity_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"\n'
-        'ssh_certificate_file = "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519-cert.pub"\n'
-        "hosts = [\n"
-        '  { ssh_target = "trt-gb10-1", repo_path = "/srv/loom", '
-        'env_file_path = "/srv/loom/.env", '
-        'repo_url = "https://github.com/qianyi-sun/loom.git", '
-        'node_agent_service = "loom-gb10-node-agent.service" },\n'
-        "]\n",
-        encoding="utf-8",
-    )
-
-    cfg = load_cluster_config(cfg_path)
-
-    assert cfg.env_state_profile == "../environment-state/staging.toml"
-    assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
-    assert (
-        cfg.gb10_pool.ssh_identity_file
-        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519"
-    )
-    assert (
-        cfg.gb10_pool.ssh_certificate_file
-        == "/shared_work/qianyi/loom-worker-capacity/staging-gb10-rollout-ed25519-cert.pub"
-    )
-    assert cfg.gb10_pool.hosts == [
-        {
-            "ssh_target": "trt-gb10-1",
-            "repo_path": "/srv/loom",
-            "env_file_path": "/srv/loom/.env",
-            "repo_url": "https://github.com/qianyi-sun/loom.git",
-            "node_agent_service": "loom-gb10-node-agent.service",
-        }
-    ]
-
-
-def test_load_config_rejects_non_array_gb10_hosts(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "cluster.toml"
-    cfg_path.write_text(
-        '[gb10_pool]\nhosts = "trt-gb10-1"\n',
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match=r"gb10_pool\.hosts must be a TOML array"):
-        load_cluster_config(cfg_path)
 
 
 def test_load_config_rejects_deprecated_gateway_public_host(
@@ -369,8 +313,8 @@ def test_load_config_gateway_local_providers_from_toml(tmp_path: Path) -> None:
 
 def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     """Smoke: every document parses, the set covers the 9 Deployments
-    + 3 DaemonSets + 10 Services + 3 StatefulSets + 1 Ingress
-    + 1 PodDisruptionBudget + 14 NetworkPolicies + 2 ConfigMaps
+    + 1 DaemonSet + 10 Services + 3 StatefulSets + 1 Ingress
+    + 1 PodDisruptionBudget + 13 NetworkPolicies + 2 ConfigMaps
     (Grafana dashboards + egress-proxy bootstrap) expected by
     cluster-deploy.md §Component map + sandbox-isolation.md."""
     text = render_manifests(_DEFAULT_CFG)
@@ -384,8 +328,8 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # cp, service, gateway, web + egress-xds + egress-proxy +
     # pgbouncer + family-orchestrator (#672) + disabled pipeline orchestrator.
     assert kinds.count("Deployment") == 9
-    # gateway-router + worker-router + minio-router
-    assert kinds.count("DaemonSet") == 3
+    # gateway-router
+    assert kinds.count("DaemonSet") == 1
     # postgres + pgbouncer + minio + cp + gateway + service + web
     # + ingress + egress + worker (headless, StatefulSet peer DNS) = 10
     assert kinds.count("Service") == 10
@@ -396,9 +340,9 @@ def test_render_produces_valid_yaml_with_expected_kinds() -> None:
     # pgbouncer PodDisruptionBudget.
     assert kinds.count("PodDisruptionBudget") == 1
     # NetworkPolicies: postgres + minio + cp + gateway + worker + svc
-    # + web + gateway-router + worker-router + minio-router + egress-xds
-    # + egress-proxy + pgbouncer + both orchestrators = 15.
-    assert kinds.count("NetworkPolicy") == 15
+    # + web + gateway-router + egress-xds
+    # + egress-proxy + pgbouncer + both orchestrators = 13.
+    assert kinds.count("NetworkPolicy") == 13
     assert kinds.count("CronJob") == 0
     # Grafana dashboards ConfigMap + egress-proxy bootstrap ConfigMap.
     assert kinds.count("ConfigMap") == 2
@@ -889,7 +833,7 @@ def test_render_profile_ingress_routes_api_and_spa_under_frontend_prefix(
     filename: str,
     route_path: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
     ingresses = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Ingress"}
     assert set(ingresses) == {"loom-ingress", "loom-frontend-prefix-redirect"}
@@ -1114,30 +1058,22 @@ def test_render_profiles_set_backend_runtime_environment(
     filename: str,
     runtime_environment: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
 
     for deployment in ("loom-control-plane", "loom-service", "loom-llm-gateway"):
         assert _deployment_env_value(docs, deployment, "LOOM_ENV") == runtime_environment
         assert _deployment_env_value(docs, deployment, "LOOM_NAMESPACE") == cfg.namespace
-    assert (
-        _deployment_env_value(
-            docs,
-            "loom-control-plane",
-            "LOOM_CP_SLURM_WORKER_CONTROLLER_ENVIRONMENT",
-        )
-        == runtime_environment
-    )
 
 
 @pytest.mark.parametrize(
     "filename",
     ["staging.cluster.toml", "staging.multinode.cluster.toml"],
 )
-def test_staging_control_plane_projects_protected_worker_runtime_credential(
+def test_staging_control_plane_has_no_retired_worker_runtime_dependency(
     filename: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
     docs = _load_docs(render_manifests(cfg))
     deployment = next(
         document
@@ -1147,16 +1083,10 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
     )
     pod = deployment["spec"]["template"]["spec"]
     container = pod["containers"][0]
-    protected_url = next(
-        item
-        for item in container["env"]
-        if item["name"] == "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE"
-    )
-
-    assert protected_url == {
-        "name": "LOOM_CP_PROTECTED_WORKER_RUNTIME_DB_URL_FILE",
-        "value": "/run/loom/protected-worker-runtime/files/database-url",
-    }
+    assert not pod.get("initContainers")
+    assert not any("PROTECTED_WORKER_RUNTIME" in item["name"] for item in container["env"])
+    assert {item["name"] for item in container["volumeMounts"]} == {"loom-admin-secret"}
+    assert {item["name"] for item in pod["volumes"]} == {"loom-admin-secret"}
     assert pod["automountServiceAccountToken"] is False
     assert pod["securityContext"] == {
         "runAsNonRoot": True,
@@ -1168,56 +1098,6 @@ def test_staging_control_plane_projects_protected_worker_runtime_credential(
     assert container["securityContext"] == {
         "allowPrivilegeEscalation": False,
         "capabilities": {"drop": ["ALL"]},
-    }
-    assert {
-        "name": "protected-worker-runtime",
-        "mountPath": "/run/loom/protected-worker-runtime",
-        "subPath": "private",
-        "readOnly": True,
-    } in container["volumeMounts"]
-
-    init = pod["initContainers"]
-    assert len(init) == 1
-    assert init[0]["name"] == "protected-worker-runtime-init"
-    assert init[0]["securityContext"] == {
-        "allowPrivilegeEscalation": False,
-        "capabilities": {"drop": ["ALL"]},
-        "readOnlyRootFilesystem": True,
-        "runAsNonRoot": True,
-        "runAsUser": 65532,
-    }
-    assert init[0]["command"][:2] == ["/bin/sh", "-euc"]
-    assert (
-        "loom.personal_dev_secret_init --profile staging-protected-worker-runtime"
-        in init[0]["command"][2]
-    )
-    assert init[0]["volumeMounts"] == [
-        {
-            "name": "protected-worker-runtime-projected",
-            "mountPath": "/var/run/loom/protected-worker-runtime-projected",
-            "readOnly": True,
-        },
-        {
-            "name": "protected-worker-runtime",
-            "mountPath": "/run/loom/protected-worker-runtime-volume",
-        },
-    ]
-
-    volumes = {volume["name"]: volume for volume in pod["volumes"]}
-    assert volumes["protected-worker-runtime-projected"] == {
-        "name": "protected-worker-runtime-projected",
-        "secret": {
-            "secretName": "loom-protected-worker-runtime",
-            "defaultMode": 0o440,
-            "items": [
-                {"key": "ca.crt", "path": "ca.crt"},
-                {"key": "database-url", "path": "database-url"},
-            ],
-        },
-    }
-    assert volumes["protected-worker-runtime"] == {
-        "name": "protected-worker-runtime",
-        "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"},
     }
 
 
@@ -1231,7 +1111,7 @@ def test_protected_profiles_declare_static_host_path_storage(
     filename: str,
     host_root: str,
 ) -> None:
-    cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / filename)
+    cfg = load_cluster_config(_REPO_ROOT / "tests" / "fixtures" / "cluster-render" / filename)
 
     assert cfg.persistent_storage_backend == "static-host-path"
     assert cfg.persistent_storage_host_path_root == host_root
@@ -1239,11 +1119,12 @@ def test_protected_profiles_declare_static_host_path_storage(
 
 def test_staging_minio_render_pins_reachable_source_without_changing_storage_topology() -> None:
     cfg = load_cluster_config(
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
+        _REPO_ROOT / "tests" / "fixtures" / "cluster-render" / "staging.multinode.cluster.toml"
     )
     docs = _load_docs(render_manifests(cfg))
     minio = next(
-        doc for doc in docs
+        doc
+        for doc in docs
         if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "loom-minio"
     )
     assert minio["spec"]["template"]["spec"]["containers"][0]["image"] == (
@@ -1256,46 +1137,11 @@ def test_staging_minio_render_pins_reachable_source_without_changing_storage_top
     assert claim["metadata"]["name"] == "data"
     assert claim["spec"]["storageClassName"] == "longhorn"
     pdb = next(
-        doc for doc in docs
+        doc
+        for doc in docs
         if doc["kind"] == "PodDisruptionBudget" and doc["metadata"]["name"] == "loom-minio"
     )
     assert pdb["spec"]["minAvailable"] == 3
-
-
-def test_staging_profile_declares_repo_owned_gb10_ssh_config() -> None:
-    cfg = load_cluster_config(
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
-    )
-    ssh_config = (_REPO_ROOT / "deploy" / "worker-pools" / "gb10" / "ssh_config").read_text(
-        encoding="utf-8"
-    )
-
-    assert cfg.gb10_pool.ssh_config == "../worker-pools/gb10/ssh_config"
-    assert cfg.gb10_pool.ssh_identity_file == "/var/lib/loom-staging-rollout/gb10-deploy-ed25519"
-    assert [host["ssh_target"] for host in cfg.gb10_pool.hosts] == [
-        f"trt-gb10-{index}" for index in range(1, 16)
-    ]
-    assert all(
-        set(host)
-        == {
-            "ssh_target",
-            "node_agent_service",
-        }
-        for host in cfg.gb10_pool.hosts
-    )
-    assert "/home/qianyi" not in (
-        _REPO_ROOT / "deploy" / "environments" / "staging.multinode.cluster.toml"
-    ).read_text(encoding="utf-8")
-    assert "IdentityFile /var/lib/loom-staging-rollout/gb10-deploy-ed25519" in ssh_config
-    assert "IdentitiesOnly yes" in ssh_config
-    expected_private_hosts = {
-        f"trt-gb10-{index}": ("192.168.20.77" if index == 7 else f"192.168.20.{index + 10}")
-        for index in range(2, 16)
-    }
-    assert "Host trt-gb10-1\n  HostName 207.35.188.227\n  Port 2221\n" in ssh_config
-    for host, address in expected_private_hosts.items():
-        assert (f"Host {host}\n  HostName {address}\n  ProxyJump trt-gb10-1\n") in ssh_config
-    assert "Host trt-gb10-*\n  User qianyi\n  Port 22\n" in ssh_config
 
 
 def test_render_custom_storage_sizes() -> None:
@@ -1659,8 +1505,7 @@ def test_cluster_commands_reject_explicit_config_target_conflicts_before_cluster
 
 
 def test_default_config_disables_k8s_worker() -> None:
-    """Schema default flipped to false so profiles that share OLDLAB
-    hosts with Slurm force intentional opt-in. See #383."""
+    """Local cluster workers require an explicit opt-in."""
     cfg = ClusterConfig()
     assert cfg.k8s_worker.enabled is False
 
@@ -1683,7 +1528,7 @@ def test_render_omits_worker_deployment_when_disabled() -> None:
 
 
 def test_render_includes_worker_when_enabled_via_profile() -> None:
-    """development.cluster.toml opts back in for local cluster workers.
+    """The local render config opts into in-cluster workers.
 
     Dynamic-storage profiles render loom-worker as a StatefulSet with
     per-pod PVCs from volumeClaimTemplates so RWO Longhorn volumes on
@@ -1701,16 +1546,14 @@ def test_render_includes_worker_when_enabled_via_profile() -> None:
     assert ("PersistentVolumeClaim", "loom-worker-trajectories") not in kinds_names
 
 
-def test_load_shipped_profile_files_have_explicit_k8s_worker_setting() -> None:
-    """Every profile that ships in `deploy/environments/` must
+def test_synthetic_profiles_have_explicit_k8s_worker_setting() -> None:
+    """Every synthetic renderer profile in `tests/fixtures/cluster-render/` must
     declare k8s_worker.enabled explicitly — no silent inheritance
     of the schema default. See #383 rationale."""
-    envs_dir = _REPO_ROOT / "deploy" / "environments"
+    envs_dir = _REPO_ROOT / "tests" / "fixtures" / "cluster-render"
     expected = {
-        # Shared dev runs trial execution on external Slurm (#857/#873), same
-        # as staging/prod, so its in-cluster loom-worker Deployment is disabled.
-        # Per-developer LOCAL dev uses deploy/local/local.example.cluster.toml,
-        # which can opt into k8s_worker for offline / no-Slurm use.
+        # Hosted identity fixtures omit local workers; the shipped local
+        # example explicitly opts into its in-cluster worker.
         "development.cluster.toml": False,
         "staging.cluster.toml": False,
         "staging.multinode.cluster.toml": False,
@@ -1752,7 +1595,9 @@ def test_loom_service_env_carries_v1_workload_trust_contract_from_profile() -> N
         "staging.multinode.cluster.toml",
         "production.cluster.toml",
     ):
-        cfg = load_cluster_config(_REPO_ROOT / "deploy" / "environments" / profile_name)
+        cfg = load_cluster_config(
+            _REPO_ROOT / "tests" / "fixtures" / "cluster-render" / profile_name
+        )
         assert (
             cfg.workload_contract.workload_trust_mode,
             cfg.workload_contract.taskset_transforms_enabled,
@@ -1827,62 +1672,6 @@ def test_default_config_disables_llm_gateway_sandbox() -> None:
     """Off by default because the DaemonSet needs an operator-
     provisioned TLS Secret (loom-sandbox-gateway-tls)."""
     assert ClusterConfig().llm_gateway_sandbox.enabled is False
-
-
-def test_default_config_disables_pipeline_stage1_smoke_authority() -> None:
-    assert ClusterConfig().pipeline_stage1_smoke_authority.enabled is False
-
-
-def test_render_mounts_pipeline_stage1_public_key_only_when_enabled() -> None:
-    disabled_docs = _load_docs(render_manifests(_DEFAULT_CFG))
-    disabled = next(
-        document
-        for document in disabled_docs
-        if document["kind"] == "Deployment" and document["metadata"]["name"] == "loom-service"
-    )
-    disabled_pod = disabled["spec"]["template"]["spec"]
-    disabled_container = disabled_pod["containers"][0]
-    assert not any(
-        item["name"] == "LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE"
-        for item in disabled_container["env"]
-    )
-    assert not any(
-        item["name"] == "pipeline-stage1-smoke-authority" for item in disabled_pod["volumes"]
-    )
-
-    authority_cls = type(ClusterConfig().pipeline_stage1_smoke_authority)
-    config = _default_cfg(
-        pipeline_stage1_smoke_authority=authority_cls(
-            enabled=True,
-            public_key_secret_name="stage1-owner-public-key",
-        )
-    )
-    docs = _load_docs(render_manifests(config))
-    service = next(
-        document
-        for document in docs
-        if document["kind"] == "Deployment" and document["metadata"]["name"] == "loom-service"
-    )
-    pod = service["spec"]["template"]["spec"]
-    container = pod["containers"][0]
-    env = {item["name"]: item for item in container["env"]}
-    assert env["LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE"] == {
-        "name": "LOOM_SVC_PIPELINE_STAGE1_SMOKE_PUBLIC_KEY_FILE",
-        "value": "/var/run/loom/stage1-authority/public-key",
-    }
-    assert {
-        "name": "pipeline-stage1-smoke-authority",
-        "mountPath": "/var/run/loom/stage1-authority",
-        "readOnly": True,
-    } in container["volumeMounts"]
-    assert {
-        "name": "pipeline-stage1-smoke-authority",
-        "secret": {
-            "secretName": "stage1-owner-public-key",
-            "defaultMode": 0o400,
-            "items": [{"key": "public-key", "path": "public-key", "mode": 0o400}],
-        },
-    } in pod["volumes"]
 
 
 def test_render_omits_llm_gateway_sandbox_when_disabled() -> None:
@@ -2114,8 +1903,8 @@ def test_local_example_template_renders() -> None:
 def _multi_node_cfg(**kwargs: object) -> ClusterConfig:
     """Build a 4-pod distributed-MinIO render config (#893).
 
-    Mirrors the checked-in live values in
-    `deploy/environments/staging.multinode.cluster.toml`. The topology
+    Uses the synthetic topology values in
+    `tests/fixtures/cluster-render/staging.multinode.cluster.toml`. The topology
     sub-dataclass is materialized from the schema at import time, so we
     reach it the same way the single-node tests reach `k8s_worker`
     (`type(ClusterConfig().<field>)`) rather than hand-rolling a config
@@ -2231,3 +2020,14 @@ def test_single_node_minio_pins_ifnotpresent_pull_policy() -> None:
 
     text = (resources.files("loom_cli.templates.k8s") / "minio.yaml.j2").read_text()
     assert "imagePullPolicy: IfNotPresent" in text
+
+
+def test_local_render_omits_retired_external_worker_transports() -> None:
+    docs = _load_docs(render_manifests(_DEFAULT_CFG))
+    names = {doc["metadata"]["name"] for doc in docs}
+    assert not {"loom-worker-router", "loom-minio-router"} & names
+    # Local Docker sandboxes still need their Gateway transport.
+    assert "loom-gateway-router" in names
+    policies = [doc for doc in docs if doc["kind"] == "NetworkPolicy"]
+    assert "loom-worker-router" not in str(policies)
+    assert "loom-minio-router" not in str(policies)

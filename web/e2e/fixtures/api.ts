@@ -108,7 +108,8 @@ const overview = {
   },
   provider_health: { total: 0, ready: 0, needs_attention: 0, untested: 0, latest: [] },
   benchmark_readiness: { total: 0, runnable: 0, needs_attention: 0, blocked: [] },
-  worker_health: { active: 1, available_backends: ["docker"], has_default_backend: true },
+  execution_health: { configured_targets: 1, status: "observed" },
+  worker_health: { active: 0, available_backends: [], has_default_backend: false },
   run_activity: {
     batches: { submitted: 0, running: 0, finished: 0, cancelled: 0 },
     trials: { queued: 0, claimed: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0 },
@@ -134,7 +135,7 @@ const taskSet = {
   created_at: "2026-07-16T00:00:00Z",
 };
 
-function monitorSummary() {
+export function monitorSummary() {
   return {
     scope: { view: "trials", team_id: team.id, benchmark_id: null, agent: null, model: null, batch_id: null, state: null },
     state_counts: {
@@ -153,11 +154,7 @@ function monitorSummary() {
     },
     resources: {
       aggregate: {
-        desired_slots: 1,
-        pending_slots: 0,
         current_active_slots: 1,
-        max_slots: 1,
-        ceiling_slots: 1,
         active_workers: 1,
         draining_workers: 0,
         total_slots: 1,
@@ -209,7 +206,17 @@ function defaultApiResponse(
   if (path === "/v1/tokens") return jsonResponse({ items: [] });
   if (path === "/v1/invites") return jsonResponse({ items: [] });
   if (path === "/v1/usage") return jsonResponse({ degraded: false, buckets: [] });
-  if (path === "/v1/backends") return jsonResponse({ items: [{ name: "docker", description: "Docker", available: true }] });
+  if (path === "/v1/backends") {
+    return jsonResponse({
+      items: [{
+        name: "nebius",
+        description: "Nebius Kubernetes execution pool; scales from zero.",
+        available: false,
+        cold_start_available: true,
+        cold_start_pools: ["nebius-cpu"],
+      }],
+    });
+  }
   if (path === "/v1/agents") return jsonResponse({ items: [] });
   if (path.startsWith("/v1/benchmarks")) return jsonResponse({ items: [], next_cursor: null });
   if (path.startsWith("/v1/models")) return jsonResponse({ items: [] });

@@ -68,18 +68,6 @@ WORKER_POOL_WORKERS = Gauge(
     labelnames=("pool_name", "backend", "cpu_arch"),
 )
 
-WORKER_POOL_DESIRED_SLOTS = Gauge(
-    "loom_worker_pool_desired_slots",
-    "Autoscaler desired execution slots by resource pool",
-    labelnames=("pool_name", "backend", "cpu_arch"),
-)
-
-WORKER_POOL_PENDING_SLOTS = Gauge(
-    "loom_worker_pool_pending_slots",
-    "Autoscaler pending execution slots by resource pool",
-    labelnames=("pool_name", "backend", "cpu_arch"),
-)
-
 WORKER_POOL_DRAINING_SLOTS = Gauge(
     "loom_worker_pool_draining_slots",
     "Draining worker execution slots by resource pool",
@@ -89,24 +77,6 @@ WORKER_POOL_DRAINING_SLOTS = Gauge(
 WORKER_POOL_DRAINING_WORKERS = Gauge(
     "loom_worker_pool_draining_workers",
     "Draining worker processes by resource pool",
-    labelnames=("pool_name", "backend", "cpu_arch"),
-)
-
-WORKER_POOL_AUTOSCALER_DECISION = Gauge(
-    "loom_worker_pool_autoscaler_decision",
-    "Last autoscaler decision by resource pool, action, and reason",
-    labelnames=("pool_name", "backend", "cpu_arch", "action", "reason"),
-)
-
-WORKER_POOL_AUTOSCALER_ERROR = Gauge(
-    "loom_worker_pool_autoscaler_error",
-    "Autoscaler actuator error present by resource pool",
-    labelnames=("pool_name", "backend", "cpu_arch"),
-)
-
-WORKER_POOL_AUTOSCALER_IDLE_SECONDS = Gauge(
-    "loom_worker_pool_autoscaler_idle_seconds",
-    "Autoscaler idle-window age in seconds by resource pool",
     labelnames=("pool_name", "backend", "cpu_arch"),
 )
 
@@ -229,11 +199,6 @@ EXECUTION_ATTEMPTS = Gauge(
     "Current Pipeline execution Attempts",
     labelnames=("state", "resource_class"),
 )
-PIPELINE_GPU_SECONDS_TOTAL = Counter(
-    "loom_pipeline_gpu_seconds_total",
-    "Settled Pipeline GPU seconds",
-    labelnames=("slurm_cluster", "gpu_count_class"),
-)
 PIPELINE_ARTIFACT_BYTES_TOTAL = Counter(
     "loom_pipeline_artifact_bytes_total",
     "Newly committed Pipeline Artifact bytes charged to the run budget",
@@ -308,64 +273,4 @@ WORKER_TOKENS_STALE_COUNT = Gauge(
     "loom_worker_tokens_stale_count",
     "Live worker tokens flagged by the staleness audit",
     labelnames=("reason",),
-)
-
-SLURM_WORKER_DESIRED_SLOTS = Gauge(
-    "loom_slurm_worker_desired_slots",
-    "Desired Slurm worker slots by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_ACTIVE_SLOTS = Gauge(
-    "loom_slurm_worker_active_slots",
-    "Running Slurm worker slots by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_PENDING_SLOTS = Gauge(
-    "loom_slurm_worker_pending_slots",
-    "Pending Slurm worker slots by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_STALE_SLOTS = Gauge(
-    "loom_slurm_worker_stale_slots",
-    "Stale Slurm worker slots by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_RUNNING_JOBS = Gauge(
-    "loom_slurm_worker_running_jobs",
-    "Running Slurm worker jobs by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_PENDING_JOBS = Gauge(
-    "loom_slurm_worker_pending_jobs",
-    "Pending Slurm worker jobs by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_STALE_JOBS = Gauge(
-    "loom_slurm_worker_stale_jobs",
-    "Stale Slurm worker jobs by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_FAILED_SUBMISSIONS = Gauge(
-    "loom_slurm_worker_failed_submissions",
-    "Failed Slurm worker submissions by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_CANCELLED_PENDING_JOBS = Gauge(
-    "loom_slurm_worker_cancelled_pending_jobs",
-    "Cancelled pending Slurm worker jobs by environment and pool",
-    labelnames=("environment", "pool_name"),
-)
-
-SLURM_WORKER_IDLE_EXITS = Gauge(
-    "loom_slurm_worker_idle_exits",
-    "Slurm workers that intentionally exited after idle timeout by pool",
-    labelnames=("environment", "pool_name"),
 )

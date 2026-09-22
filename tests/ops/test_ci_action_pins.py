@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 import yaml
 from scripts.check_ci_action_pins import check_action_pins
-from scripts.ci_image_release_evidence import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
+from scripts.install_trivy import TRIVY_ARCHIVE_SHA256, TRIVY_RELEASE_URL
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,7 +83,6 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
     assert result.workflow_count > 0
     assert result.reference_count > 0
     assert set(result.remote_actions) == {
-        "actions/attest-build-provenance",
         "actions/checkout",
         "actions/download-artifact",
         "actions/setup-go",
@@ -108,7 +107,7 @@ def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> Non
     assert forbidden == set()
 
 
-def test_release_evidence_trivy_identity_matches_repository_owned_installer() -> None:
+def test_image_scans_use_repository_owned_trivy_installer() -> None:
     lock = json.loads(
         (REPO_ROOT / "config/ci-actions-lock.json").read_text(encoding="utf-8"),
     )
@@ -136,8 +135,8 @@ def test_release_evidence_trivy_identity_matches_repository_owned_installer() ->
 
     assert "aquasecurity/trivy-action" not in lock["actions"]
     assert remote_trivy_uses == []
-    assert len(scan_steps) == 4
-    assert {job_name for job_name, _ in scan_steps} == {"build", "nebius-harness-build", "scanner-cache-build", "publish"}
+    assert len(scan_steps) == 2
+    assert {job_name for job_name, _ in scan_steps} == {"build", "nebius-harness-build"}
     scan_scripts = [script for _, script in scan_steps]
     assert len(installer_scripts) == 1
     assert "python3 scripts/install_trivy.py" in installer_scripts[0]

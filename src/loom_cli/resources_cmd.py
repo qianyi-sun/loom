@@ -25,29 +25,6 @@ def _format_slots(pool: dict[str, Any]) -> str:
     return f"{int(pool.get('occupied_slots', 0))}/{active_slots}"
 
 
-def _format_idle(pool: dict[str, Any]) -> str:
-    value = pool.get("autoscaler_idle_seconds")
-    return "-" if value is None else f"idle={int(value)}s"
-
-
-def _format_blocked_details(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    node_exclusions = value.get("node_exclusions")
-    if isinstance(node_exclusions, list):
-        parts: list[str] = []
-        for item in node_exclusions:
-            if not isinstance(item, dict):
-                continue
-            hostname = str(item.get("hostname") or "").strip()
-            reason = str(item.get("reason") or "").strip()
-            if hostname and reason:
-                parts.append(f"{hostname}:{reason}")
-        if parts:
-            return ",".join(parts)
-    reason = str(value.get("reason") or "").strip()
-    return reason
-
 
 def _print_text(resources: dict[str, Any]) -> None:
     aggregate = cast(dict[str, Any], resources.get("aggregate") or {})
@@ -62,14 +39,6 @@ def _print_text(resources: dict[str, Any]) -> None:
     queued = int(aggregate.get("queued_tasks", 0))
     active_workers = int(aggregate.get("active_workers", 0))
     draining_workers = int(aggregate.get("draining_workers", 0))
-    desired = int(aggregate.get("desired_slots", 0))
-    pending = int(aggregate.get("pending_slots", 0))
-    max_slots = int(
-        aggregate.get(
-            "max_slots",
-            aggregate.get("ceiling_slots", aggregate.get("total_slots", 0)),
-        ),
-    )
     draining = int(aggregate.get("draining_slots", 0))
     free = int(aggregate.get("free_slots", 0))
 
@@ -81,64 +50,30 @@ def _print_text(resources: dict[str, Any]) -> None:
         f"{oldest_starting_age if oldest_starting_age is not None else '-'}s",
     )
     print(f"Workers: {active_workers} active · Free slots: {free}")
-    print(
-        f"Capacity: active {total} · pending {pending} · "
-        f"desired {desired} · max {max_slots}",
-    )
-    print(
-        f"Autoscaler: desired {desired} · pending {pending} · "
-        f"draining {draining} slots / {draining_workers} workers",
-    )
+    print(f"Draining: {draining} slots / {draining_workers} workers")
     print()
     print("Pools:")
     if not pools:
         print("  no active resource pools")
         return
     print(
-        "  Pool                Backend  Arch    Actuator  Active  Pending  "
-        "Desired  Max  Draining  Idle       Running  Starting  Queued  Workers  "
-        "PreStart  OldestStart  Decision       Reason                Blocked"
+        "  Pool                Backend  Arch    Used/Slots  Draining  "
+        "Running  Starting  Queued  Workers  PreStart  OldestStart"
     )
     for pool in pools:
-        decision = pool.get("last_autoscaler_decision") or "-"
-        actuator = pool.get("autoscaler_actuator") or "-"
-        reason = pool.get("decision_reason") or pool.get("last_autoscaler_reason") or "-"
-        blocked = (
-            pool.get("blocked_reason")
-            or pool.get("last_autoscaler_blocked_reason")
-            or "-"
-        )
-        blocked_details = _format_blocked_details(
-            pool.get("blocked_details")
-            or pool.get("last_autoscaler_blocked_details"),
-        )
-        blocked_text = (
-            f"{blocked} ({blocked_details})" if blocked_details else str(blocked)
-        )
-        pool_max_slots = int(
-            pool.get("max_slots", pool.get("ceiling_slots", pool.get("total_slots", 0))),
-        )
         print(
             "  "
             f"{pool.get('pool_name', 'default')!s:<19} "
             f"{pool.get('backend', 'docker')!s:<8} "
             f"{pool.get('cpu_arch', 'x86_64')!s:<7} "
-            f"{actuator!s:<9} "
-            f"{_format_slots(pool):<7} "
-            f"{int(pool.get('pending_slots', 0)):<8} "
-            f"{int(pool.get('desired_slots', 0)):<8} "
-            f"{pool_max_slots:<4} "
+            f"{_format_slots(pool):<11} "
             f"{int(pool.get('draining_slots', 0)):<9} "
-            f"{_format_idle(pool):<10} "
             f"{int(pool.get('running_tasks', 0)):<8} "
             f"{int(pool.get('starting_tasks', 0)):<9} "
             f"{int(pool.get('queued_tasks', 0)):<7} "
-            f"{int(pool.get('active_workers', 0)):<7} "
-            f"{int(pool.get('pre_start_heartbeat_fresh_tasks', 0)):<8} "
-            f"{pool.get('oldest_starting_task_age_sec') or '-'!s:<12} "
-            f"{decision!s:<14} "
-            f"{reason!s:<21} "
-            f"{blocked_text}",
+            f"{int(pool.get('active_workers', 0)):<8} "
+            f"{int(pool.get('pre_start_heartbeat_fresh_tasks', 0)):<9} "
+            f"{pool.get('oldest_starting_task_age_sec') if pool.get('oldest_starting_task_age_sec') is not None else '-'}",
         )
 
 

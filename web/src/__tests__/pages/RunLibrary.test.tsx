@@ -516,6 +516,15 @@ function mockRunLibrary({
       ) {
         return Promise.resolve(new Response("report", { status: 200 }));
       }
+      if (url.endsWith("/api/v1/batches/batch-alpha/delivery-export")) {
+        return Promise.resolve(jsonResponse(init?.method === "POST" ? {
+          status: "ready", download_url: "/api/v1/batches/batch-alpha/delivery-export/export-id/download",
+          archive_filename: "batch-delivery.tar.gz", manifest: { trial_count: 1 },
+        } : { status: "not_ready", reason: "no_delivery_export" }));
+      }
+      if (url.endsWith("/api/v1/batches/batch-alpha/delivery-export/export-id/download")) {
+        return Promise.resolve(new Response("delivery", { status: 200 }));
+      }
       if (url.endsWith("/api/v1/trials/trial-alpha/bundle/download")) {
         return Promise.resolve(new Response("complete-bundle", { status: 200 }));
       }
@@ -802,6 +811,34 @@ describe("RunLibraryBatchDetail", () => {
     expect((await screen.findAllByText(/terminus-2@harbor-v2/)).length).toBeGreaterThan(0);
   });
 
+  it("uses server reuse permission for verified internal bundle files", async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockRunLibrary({ detailOverride: {
+      ...detailBatch,
+      artifact_inventory: {
+        ...detailBatch.artifact_inventory,
+        reports: [{
+          ...detailBatch.artifact_inventory.reports[0],
+          relative_path: "files/artifacts/verifier/ctrf.json",
+          share_status: "pending_scan",
+          safety_state: "verified_internal",
+          redaction_state: "pending",
+          can_reuse: true,
+        }],
+      },
+    } });
+    renderWithProviders(
+      <Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+    await user.click(await screen.findByRole("button", { name: "Reuse files/artifacts/verifier/ctrf.json" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/run-library/trials/trial-alpha/artifacts/reuse"),
+      expect.objectContaining({ method: "POST", body: expect.stringContaining('"key":"team-alpha/trial-alpha/main/report.json"') }),
+    );
+    expect(screen.queryByRole("button", { name: /Reuse.*debug.log/ })).not.toBeInTheDocument();
+  });
+
   it("groups artifacts and exposes clone, download, and reuse actions", async () => {
     const fetchMock = mockRunLibrary();
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");
@@ -911,6 +948,30 @@ describe("RunLibraryBatchDetail", () => {
     expect(exportUrl.searchParams.get("scope")).toBe("all");
     expect(exportUrl.searchParams.get("source_batch_id")).toBe("batch-alpha");
     expect(exportUrl.searchParams.get("format")).toBe("jsonl");
+  });
+
+  it("prepares and downloads a complete batch delivery through the owner-team flow", async () => {
+    const fetchMock = mockRunLibrary({ detailOverride: { ...detailBatch, team_id: "team-beta" } });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:delivery");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>,
+      { route: "/library/batches/batch-alpha" });
+    await user.click(await screen.findByRole("button", { name: "Prepare bundle" }));
+    await user.click(await screen.findByRole("button", { name: "Download bundle" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/batches/batch-alpha/delivery-export/export-id/download",
+      expect.objectContaining({ credentials: "include" }),
+    ));
+  });
+
+  it("does not offer private batch delivery for another team's shared run", async () => {
+    const fetchMock = mockRunLibrary();
+    renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>,
+      { route: "/library/batches/batch-alpha" });
+    await screen.findByRole("heading", { name: "shared alpha run" });
+    expect(screen.queryByRole("region", { name: "Batch delivery export" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/delivery-export"))).toBe(false);
   });
 
   it("exposes complete canonical Trial bundles to the owner", async () => {

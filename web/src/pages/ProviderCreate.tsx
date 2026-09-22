@@ -14,13 +14,6 @@ import { useCreateConnection } from "../hooks/providers";
 import { hostedProviderCommands } from "../lib/quickstartSnippets";
 import { currentServerOrigin } from "../lib/serverOrigin";
 
-const CLUSTER_DEPLOY_COMMAND = [
-  "loom inference deploy slurm",
-  "  --name lab-vllm",
-  "  --model-path /models/checkpoint",
-  "  --expose bastion-forward",
-].join(" \\\n");
-
 export default function ProviderCreate(): JSX.Element {
   const navigate = useNavigate();
   const [params] = useSearchParams();
@@ -84,22 +77,12 @@ export default function ProviderCreate(): JSX.Element {
           </section>
           <section className="rounded-md border border-slate-200 bg-slate-50 p-3">
             <h2 className="text-sm font-semibold text-slate-900">
-              GPU cluster checkpoint
+              User-managed model server
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-              On a Slurm cluster, run{" "}
-              <code className="rounded bg-white px-1 py-0.5 font-mono text-xs">
-                loom inference deploy slurm
-              </code>{" "}
-              to generate a vLLM service bundle and registration fields.
+              Register your existing OpenAI-compatible inference URL and API key
+              with this form. The server must be reachable from Loom.
             </p>
-            <div className="mt-3">
-              <CommandSnippet
-                label="Cluster deploy CLI"
-                command={CLUSTER_DEPLOY_COMMAND}
-                helperText="The generated registration script should use a file: or env: key reference."
-              />
-            </div>
           </section>
         </div>
         {error && (

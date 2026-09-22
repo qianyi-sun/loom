@@ -214,6 +214,9 @@ def test_conversion_preserves_history_and_reaches_dev(
             after = _snapshot(connection)
             for row in before["trials"]:
                 row["legacy_claim_id"] = None
+                # 0153 adds nullable diagnostics; historical rows retain their
+                # original data and must not acquire invented observations.
+                row["scheduling_observation"] = None
             if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None

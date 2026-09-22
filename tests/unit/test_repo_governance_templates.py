@@ -135,7 +135,7 @@ def test_release_promotion_binds_main_merge_to_prod_evidence() -> None:
     assert "immutable `vX.Y.Z` production release tags" in contributing
     assert "Never force-move or reuse a published prod tag" in contributing
     assert "immutable SemVer `prod_tag`" in operator_runbook
-    assert "deploy-environment.yml` from `main`" in operator_runbook
+    assert "verify_production_release_gate.sh` from `main`" in operator_runbook
     assert "`prod_tag`" in operator_runbook
     assert "`frontend_route_evidence`" in staging_validation
     assert "`prod_staging_isolation`" in staging_validation

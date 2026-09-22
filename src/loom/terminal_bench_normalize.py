@@ -2,19 +2,25 @@
 
 The 5003-task Source Useful bundle and similar Terminal-Bench imports ship
 ``task.toml`` files with top-level ``metadata`` instead of Loom's ``task``
-section. The worker stores a Loom ``TaskConfig`` in the DB, while preserving the
-uploaded bundle files for audit and verifier/runtime use.
+section. Harbor-native Terminal-Bench 2.1 / 3 / 4 packages use a ``[task]``
+section with an upstream name but no Loom task id. The worker stores a Loom
+``TaskConfig`` in the DB, while preserving the uploaded bundle files for audit
+and verifier/runtime use.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import PurePosixPath
 from typing import Any
 
 DEFAULT_AGENT_TIMEOUT_SEC = 360.0
 DEFAULT_VERIFIER_TIMEOUT_SEC = 60.0
 DEFAULT_VERIFIER_SCRIPT_PATH = "/app/verifier/run.sh"
-_TB21_VERIFIER_ARTIFACT_GLOB = "logs/verifier/**"
+DEFAULT_HARBOR_DOCKERFILE = "environment/Dockerfile"
+DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT = "environment"
+_HARBOR_VERIFIER_ARTIFACT_GLOB = "logs/verifier/**"
+_HARBOR_ENV_MODES = frozenset({"shared", "separate"})
 
 _UNSUPPORTED_ENVIRONMENT_FIELDS: frozenset[str] = frozenset(
     {
@@ -29,11 +35,19 @@ def is_terminal_bench_shape(raw: dict[str, Any]) -> bool:
     """True if ``raw`` looks like a Terminal-Bench-style task.toml."""
     if isinstance(raw.get("metadata"), dict) and "task" not in raw:
         return True
-    # Harbor-native Terminal-Bench 2.1 packages use schema 1.1. Their
-    # ``[task]`` section has the upstream task name but no Loom task id; all
-    # native-only metadata remains in ``upstream-task.toml`` after conversion.
+    # Harbor-native Terminal-Bench packages (2.1 / 3 / 4) declare an upstream
+    # ``[task].name`` without Loom's ``task.id``. Do not require a specific
+    # ``schema_version`` stamp; TB3/TB4 often omit ``1.1`` and still carry
+    # ``[metadata]`` alongside ``[task]``.
+    return _is_harbor_native_task(raw)
+
+
+def _is_harbor_native_task(raw: dict[str, Any]) -> bool:
     task = raw.get("task")
-    return raw.get("schema_version") == "1.1" and isinstance(task, dict) and "id" not in task
+    if not isinstance(task, dict) or "id" in task:
+        return False
+    name = task.get("name")
+    return isinstance(name, str) and bool(name)
 
 
 def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
@@ -46,11 +60,8 @@ def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
     if not is_terminal_bench_shape(payload):
         return payload
 
-    if payload.get("schema_version") == "1.1" and isinstance(
-        payload.get("task"),
-        dict,
-    ):
-        return _normalize_native_tb21_task_toml(payload)
+    if _is_harbor_native_task(payload):
+        return _normalize_harbor_native_task_toml(payload)
 
     metadata = payload.pop("metadata")
     payload.pop("version", None)
@@ -107,13 +118,12 @@ def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
-    """Project a Harbor-native TB2.1 task into Loom's runnable schema.
+def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project a Harbor-native Terminal-Bench task into Loom's runnable schema.
 
     Native-only resource, internet, architecture, verifier-env, and solution
-    metadata is deliberately not invented in the Loom projection. The adapter
-    retains the complete source bytes alongside this normalized file as
-    ``upstream-task.toml`` for later profile provenance and preflight work.
+    metadata is deliberately not invented in the Loom projection. Callers that
+    need the untouched source keep it as ``upstream-task.toml``.
     """
     source_task = payload.get("task")
     if not isinstance(source_task, dict):  # protected by shape detection
@@ -129,6 +139,10 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     labels = source_task.get("labels")
     if not isinstance(labels, list):
         labels = source_task.get("keywords")
+    if not isinstance(labels, list):
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            labels = metadata.get("tags")
     if isinstance(labels, list) and all(isinstance(item, str) for item in labels):
         task["labels"] = list(labels)
 
@@ -136,9 +150,9 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     source_environment = source_environment if isinstance(source_environment, dict) else {}
     environment: dict[str, Any] = {
         "os": source_environment.get("os", "linux"),
-        # Harbor-native TB2.1 images and the verifier bridge use /app. Without
-        # this explicit projection Loom defaults to /workspace while the
-        # normalized script verifier still points at /app/verifier/run.sh.
+        # Harbor-native images and the verifier bridge use /app. Without this
+        # explicit projection Loom defaults to /workspace while the normalized
+        # script verifier still points at /app/verifier/run.sh.
         "workdir": source_environment.get("workdir", "/app"),
     }
     for field in (
@@ -166,6 +180,12 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if field in source_environment:
             environment[field] = deepcopy(source_environment[field])
+    if "dockerfile" not in environment and "docker_image" not in environment:
+        environment["dockerfile"] = DEFAULT_HARBOR_DOCKERFILE
+        environment.setdefault(
+            "docker_build_context",
+            DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT,
+        )
     architecture = source_environment.get("architecture")
     if architecture in {"x86_64", "arm64", "any"}:
         environment["cpu_arch"] = architecture
@@ -213,6 +233,10 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     for field in ("timeout_sec", "env_mode", "user"):
         if field in source_verifier:
             verifier[field] = deepcopy(source_verifier[field])
+    if "env_mode" not in verifier:
+        environment_mode = source_verifier.get("environment_mode")
+        if environment_mode in _HARBOR_ENV_MODES:
+            verifier["env_mode"] = environment_mode
 
     artifacts = payload.get("artifacts")
     source_artifacts = (
@@ -220,24 +244,33 @@ def _normalize_native_tb21_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(artifacts, list) and all(isinstance(item, str) for item in artifacts)
         else []
     )
-    if _TB21_VERIFIER_ARTIFACT_GLOB not in source_artifacts:
-        source_artifacts.append(_TB21_VERIFIER_ARTIFACT_GLOB)
-    steps = [{"name": "main", "artifacts": source_artifacts}]
+    relative_artifacts = [
+        item
+        for item in source_artifacts
+        if not PurePosixPath(item).is_absolute() and ".." not in PurePosixPath(item).parts
+    ]
+    if _HARBOR_VERIFIER_ARTIFACT_GLOB not in relative_artifacts:
+        relative_artifacts.append(_HARBOR_VERIFIER_ARTIFACT_GLOB)
+    steps = [{"name": "main", "artifacts": relative_artifacts}]
 
-    normalized: dict[str, Any] = {
+    return {
         "schema_version": "1",
         "task": task,
         "environment": environment,
         "agent": agent,
         "verifier": verifier,
+        "steps": steps,
     }
-    if steps:
-        normalized["steps"] = steps
-    return normalized
+
+
+# Back-compat alias for callers/tests that still name the TB2.1 projector.
+_normalize_native_tb21_task_toml = _normalize_harbor_native_task_toml
 
 
 __all__ = [
     "DEFAULT_AGENT_TIMEOUT_SEC",
+    "DEFAULT_HARBOR_DOCKERFILE",
+    "DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT",
     "DEFAULT_VERIFIER_SCRIPT_PATH",
     "DEFAULT_VERIFIER_TIMEOUT_SEC",
     "is_terminal_bench_shape",

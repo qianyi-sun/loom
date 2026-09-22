@@ -46,7 +46,7 @@ def _factory(identity: RecipeIdentityV1, parameters: Mapping[str, Any]) -> RunGr
                     "image": IMAGE,
                     "argv": ["python", "-m", "pipeline.root"],
                     "workdir": "/workspace",
-                    "resource_profile": "cpu_small@1",
+                    "resource_profile": "pipeline-test-cpu-none@1",
                     "network_profile": "none",
                     "needs": [],
                     "inputs": [],

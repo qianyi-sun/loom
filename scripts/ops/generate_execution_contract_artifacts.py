@@ -80,24 +80,10 @@ def _load_entrypoints() -> dict[str, dict[str, str]]:
 def _validate_policy(raw: dict[str, Any]) -> None:
     if raw.get("schema_version") != "loom.service-workload-compatibility-policy.v2":
         raise ValueError("unsupported compatibility policy schema")
-    pool_policies = raw.get("pool_policies", [])
-    pool_ids = [row.get("logical_pool_id") for row in pool_policies]
-    if sorted(pool_ids) != ["gb10", "nebius-cpu", "oldlab"] or len(set(pool_ids)) != 3:
-        raise ValueError("compatibility policy must define the three accepted service pools")
-    workload_policy_pool_id = raw.get("workload_policy_pool_id")
-    for row in pool_policies:
-        mode = row.get("mode")
-        if row["logical_pool_id"] == workload_policy_pool_id:
-            if mode != "workload_specific":
-                raise ValueError("workload policy pool must use workload_specific mode")
-        elif (
-            mode != "runtime_admission"
-            or row.get("default_disposition") != "runtime_admission_required"
-            or not row.get("owner")
-            or not row.get("reason")
-            or not row.get("required_actions")
-        ):
-            raise ValueError("legacy pool policies require explicit runtime admission evidence")
+    if raw.get("pool_policies") != [
+        {"logical_pool_id": "nebius-cpu", "mode": "workload_specific"}
+    ] or raw.get("workload_policy_pool_id") != "nebius-cpu":
+        raise ValueError("compatibility policy must define only the Nebius service pool")
     for collection in ("policies", "additional_workloads", "pipeline_profile_policies"):
         for row in raw.get(collection, []):
             if row.get("disposition") not in _DISPOSITIONS:
@@ -184,18 +170,9 @@ def build_report() -> dict[str, Any]:
             "reason": row.pop("reason"),
             "required_actions": row.pop("required_changes"),
         }
-        pool_dispositions = []
-        for pool in pool_policies:
-            if pool["logical_pool_id"] == workload_policy_pool_id:
-                disposition = specific
-            else:
-                disposition = {
-                    "disposition": pool["default_disposition"],
-                    "owner": pool["owner"],
-                    "reason": pool["reason"],
-                    "required_actions": pool["required_actions"],
-                }
-            pool_dispositions.append({"logical_pool_id": pool["logical_pool_id"], **disposition})
+        pool_dispositions = [
+            {"logical_pool_id": workload_policy_pool_id, **specific}
+        ]
         routed_workloads.append({**row, "pool_dispositions": pool_dispositions})
     pool_summary = {}
     for pool_id in sorted(row["logical_pool_id"] for row in pool_policies):

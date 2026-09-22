@@ -15,6 +15,8 @@ from pydantic import ValidationError
 from loom.models.task import TaskConfig
 from loom_cli.terminal_bench_normalize import (
     DEFAULT_AGENT_TIMEOUT_SEC,
+    DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT,
+    DEFAULT_HARBOR_DOCKERFILE,
     DEFAULT_VERIFIER_SCRIPT_PATH,
     DEFAULT_VERIFIER_TIMEOUT_SEC,
     is_terminal_bench_shape,
@@ -41,12 +43,18 @@ class TestIsTerminalBenchShape:
     def test_true_when_metadata_present_and_task_absent(self) -> None:
         assert is_terminal_bench_shape(_tb_raw()) is True
 
-    def test_false_when_task_section_present(self) -> None:
+    def test_true_for_harbor_task_name_without_loom_id(self) -> None:
+        assert is_terminal_bench_shape({
+            "task": {"name": "terminal-bench/atrx-vep-crispr"},
+            "metadata": {"tags": ["genomics"]},
+        }) is True
+
+    def test_false_when_loom_task_id_present(self) -> None:
         raw = _tb_raw()
         raw["task"] = {"id": "foo", "name": "bar"}
         assert is_terminal_bench_shape(raw) is False
 
-    def test_false_when_no_metadata_section(self) -> None:
+    def test_false_when_loom_shaped_task_only(self) -> None:
         raw = {"task": {"id": "foo", "name": "bar"}}
         assert is_terminal_bench_shape(raw) is False
 
@@ -118,6 +126,94 @@ class TestNormalizeMapping:
         assert cfg.steps[0].artifacts == ["logs/verifier/**"]
         assert raw["schema_version"] == "1.1"
         assert raw["environment"]["architecture"] == "x86_64"
+
+    def test_normalizes_tb3_harbor_task_without_schema_1_1(self) -> None:
+        """TB3/TB4 Harbor trees omit schema 1.1 and carry [metadata] + resources."""
+        raw = {
+            "artifacts": ["/app/output/mutation.report.json"],
+            "task": {
+                "name": "terminal-bench/atrx-vep-crispr",
+                "description": "",
+                "authors": [{"name": "ScaleAI", "email": "tbench@scale.com"}],
+            },
+            "metadata": {
+                "author_name": "ScaleAI",
+                "category": "Science",
+                "tags": ["genomics", "ensembl-vep"],
+            },
+            "verifier": {
+                "timeout_sec": 600.0,
+                "environment_mode": "separate",
+            },
+            "agent": {"timeout_sec": 18000.0},
+            "environment": {
+                "build_timeout_sec": 1800.0,
+                "cpus": 2,
+                "memory_mb": 4096,
+                "storage_mb": 10240,
+                "gpus": 0,
+            },
+        }
+
+        normalized = normalize_terminal_bench_task_toml(raw)
+        cfg = TaskConfig.model_validate(normalized)
+
+        assert is_terminal_bench_shape(raw) is True
+        assert cfg.task.id == "terminal-bench/atrx-vep-crispr"
+        assert cfg.task.labels == ["genomics", "ensembl-vep"]
+        assert cfg.environment.cpus == 2
+        assert cfg.environment.memory_mb == 4096
+        assert cfg.environment.storage_mb == 10240
+        assert cfg.environment.dockerfile.as_posix() == DEFAULT_HARBOR_DOCKERFILE
+        assert (
+            cfg.environment.docker_build_context.as_posix()
+            == DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT
+        )
+        assert cfg.environment.workdir.as_posix() == "/app"
+        assert cfg.agent.timeout_sec == 18000.0
+        assert cfg.verifier.env_mode == "separate"
+        assert cfg.verifier.timeout_sec == 600.0
+        assert cfg.steps[0].artifacts == ["logs/verifier/**"]
+        assert "authors" not in normalized["task"]
+        assert "metadata" not in normalized
+
+    def test_normalizes_tb4_harbor_task_with_schema_1_0(self) -> None:
+        raw = {
+            "schema_version": "1.0",
+            "artifacts": ["relative-output.json"],
+            "task": {"name": "terminal-bench/batched-eval-parity"},
+            "metadata": {"tags": ["evaluation", "batching"]},
+            "verifier": {
+                "timeout_sec": 900.0,
+                "environment_mode": "separate",
+                "environment": {
+                    "cpus": 1,
+                    "memory_mb": 4096,
+                    "storage_mb": 10240,
+                },
+            },
+            "agent": {"timeout_sec": 28800.0},
+            "environment": {
+                "build_timeout_sec": 600.0,
+                "cpus": 1,
+                "memory_mb": 4096,
+                "storage_mb": 10240,
+                "gpus": 0,
+            },
+        }
+
+        normalized = normalize_terminal_bench_task_toml(raw)
+        cfg = TaskConfig.model_validate(normalized)
+
+        assert cfg.task.id == "terminal-bench/batched-eval-parity"
+        assert cfg.task.labels == ["evaluation", "batching"]
+        assert cfg.agent.timeout_sec == 28800.0
+        assert cfg.verifier.env_mode == "separate"
+        assert cfg.steps[0].artifacts == [
+            "relative-output.json",
+            "logs/verifier/**",
+        ]
+        assert "environment" not in normalized["verifier"]
 
     def test_native_tb21_maps_no_internet_to_no_network(self) -> None:
         raw = {

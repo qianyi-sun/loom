@@ -1,0 +1,32 @@
+# Synthetic renderer input; not an operator deployment profile.
+namespace = "loom-staging"
+runtime_environment = "staging"
+ingress_host = "yylx.world"
+ingress_redirect_hosts = ["www.yylx.world"]
+ingress_tls_secret_name = "loom-staging-tls"
+frontend_environment = "staging"
+frontend_route_path = "/staging"
+frontend_api_base_path = "/staging"
+trajectories_bucket = "loom-staging-trajectories"
+artifacts_bucket = "loom-staging-artifacts"
+persistent_storage_backend = "dynamic"
+persistent_storage_host_path_root = "/data/loom-staging"
+lifecycle_legacy_buckets = ["artifacts", "trajectories"]
+minio_image = "quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
+
+[k8s_worker]
+enabled = false
+
+[workload_contract]
+workload_trust_mode = "internal_trusted"
+taskset_transforms_enabled = false
+taskset_transform_network_isolated = false
+untrusted_workload_isolation = false
+
+[topology]
+multi_node = true
+storage_backend = "longhorn"
+postgres_replicas = 3
+minio_replicas = 4
+anti_affinity = "required"
+min_available = 3

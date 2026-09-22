@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from scripts.component_ownership import load_manifest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -27,36 +26,27 @@ def test_ci_has_no_shared_host_placement_or_local_cache_dependency(name: str) ->
                 assert "manifest-file" not in step.get("with", {})
 
 
-def test_cross_language_flow_tests_have_only_the_go_lane() -> None:
-    manifest = load_manifest(ROOT / "config/component-ownership.toml")
-    for name in ("test_task_image_builder_guard_local_flow.py", "test_task_image_publication_full_flow.py"):
-        owners = manifest.test_owners_for_path(f"tests/integration/{name}")
-        assert len(owners) == 1
-        assert owners[0].lane == "go-checks"
-
-
-@pytest.mark.parametrize("publishing", [False, True])
-def test_pr_matrix_runs_amd64_and_preserves_declared_publication_contract(
-    tmp_path: Path, publishing: bool,
+def test_candidate_matrix_runs_only_amd64(
+    tmp_path: Path,
 ) -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())
     step = next(item for item in workflow["jobs"]["plan"]["steps"]
                 if item.get("id") == "build-matrices")
     rows = [
         {"image": image, "architecture": arch, "platform": f"linux/{arch}"}
-        for image in ("service", "personal-dev-scanner-cache")
+        for image in ("service", "control-plane")
         for arch in ("amd64", "arm64")
     ]
     output = tmp_path / "output"
     result = subprocess.run(
         ["bash", "-c", step["run"]], text=True, capture_output=True,
-        env={**os.environ, "PUBLISHING": str(publishing).lower(),
+        env={**os.environ,
              "NATIVE_BUILDS": json.dumps(rows), "GITHUB_OUTPUT": str(output)},
     )
     assert result.returncode == 0, result.stderr
     matrices = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    selected = json.loads(matrices["ordinary_builds"]) + json.loads(matrices["scanner_cache_builds"])
-    assert selected == [row for row in rows if publishing or row["architecture"] == "amd64"]
+    selected = json.loads(matrices["ordinary_builds"])
+    assert selected == [row for row in rows if row["architecture"] == "amd64"]
 
 
 def test_linux_runtime_dependency_check_is_amd64_only() -> None:

@@ -884,3 +884,26 @@ def test_audit_network_policy_with_non_app_selector_ignored() -> None:
         "loom-control-plane", "loom-llm-gateway", "loom-service",
         "loom-web", "loom-worker", "loom-postgres", "loom-minio", "loom-gateway-router",
     }
+
+
+@pytest.mark.parametrize("name", ["loom-worker-router", "loom-minio-router"])
+def test_retired_router_names_no_longer_exempt_host_ports(name: str) -> None:
+    manifest = {
+        "apiVersion": "apps/v1",
+        "kind": "DaemonSet",
+        "metadata": {"name": name},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "proxy",
+                            "ports": [{"containerPort": 30080, "hostPort": 30080}],
+                        }
+                    ]
+                }
+            }
+        },
+    }
+    violations = audit_boundary(yaml.safe_dump(manifest), require_network_policies=False)
+    assert any(violation.kind == "host-port" for violation in violations)

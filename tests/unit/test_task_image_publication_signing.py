@@ -38,13 +38,13 @@ def setup_signing():
         expires_at=NOW + timedelta(minutes=1),
     )
     unsigned = c.decode_unsigned_input(rfc8785.dumps(unsigned_payload()))
-    statement = s.prepare_publication_statement(
-        unsigned,
-        key=key,
-        state=state,
-        distribution=distribution,
-        signer_now=NOW,
-    )
+    statement = c.PublicationStatement.model_validate({
+        **unsigned.model_dump(mode="json", by_alias=True, exclude_none=True),
+        "issued_at": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "signing_key_id": key.key_id,
+        "distributed_keyset_version": state.keyset_version,
+        "revocation_epoch": state.revocation_epoch,
+    })
     canonical = c.canonical_publication_bytes(statement)
     signature = private.sign(DOMAIN + canonical)
     reply = {
@@ -57,17 +57,9 @@ def setup_signing():
     return c, s, private, key, state, distribution, unsigned, reply
 
 
-def test_signer_stamps_own_clock_and_independent_ed25519_verifier_accepts_exact_domain():
-    _c, s, private, key, state, distribution, unsigned, reply = setup_signing()
-    result = s.verify_publication_reply(
-        rfc8785.dumps(reply),
-        unsigned=unsigned,
-        key=key,
-        state=state,
-        distribution=distribution,
-        requested_at=NOW,
-        received_at=NOW,
-    )
+def test_historical_signature_preserves_time_and_exact_domain():
+    _c, s, private, key, _state, _distribution, _unsigned, reply = setup_signing()
+    result = s.verify_historical_publication(rfc8785.dumps(reply), key=key)
     assert result.statement.issued_at == "2026-09-05T12:00:00Z"
     signature = base64.urlsafe_b64decode(reply["signature"] + "==")
     private.public_key().verify(signature, DOMAIN + reply["canonical_statement"].encode())
@@ -86,7 +78,7 @@ def test_signer_stamps_own_clock_and_independent_ed25519_verifier_accepts_exact_
     ],
 )
 def test_every_statement_field_is_cryptographically_bound(field):
-    _c, s, private, key, state, distribution, unsigned, reply = setup_signing()
+    _c, s, private, key, _state, _distribution, _unsigned, reply = setup_signing()
     payload = json.loads(reply["canonical_statement"])
     payload[field] = "substitution"
     changed = rfc8785.dumps(payload)
@@ -97,15 +89,7 @@ def test_every_statement_field_is_cryptographically_bound(field):
         canonical_statement=changed.decode(), statement_sha256=hashlib.sha256(changed).hexdigest()
     )
     with pytest.raises(ValueError):
-        s.verify_publication_reply(
-            rfc8785.dumps(reply),
-            unsigned=unsigned,
-            key=key,
-            state=state,
-            distribution=distribution,
-            requested_at=NOW,
-            received_at=NOW,
-        )
+        s.verify_historical_publication(rfc8785.dumps(reply), key=key)
 
 
 @pytest.mark.parametrize(
@@ -119,23 +103,11 @@ def test_every_statement_field_is_cryptographically_bound(field):
         "duplicate",
         "oversize",
         "domain",
-        "backdate",
-        "future",
-        "input",
-        "retired",
-        "revoked",
         "unknown_public_key",
-        "undistributed",
-        "expired_distribution",
-        "stale_epoch",
-        "stale_version",
-        "missing_membership",
-        "new_epoch",
-        "new_version",
     ],
 )
-def test_reply_rejects_substitution_clock_key_and_distribution_failures(mutation):
-    _c, s, private, key, state, distribution, unsigned, reply = setup_signing()
+def test_historical_signature_rejects_substitution_and_unknown_keys(mutation):
+    _c, s, private, key, _state, _distribution, _unsigned, reply = setup_signing()
     raw = None
     if mutation == "algorithm":
         reply["algorithm"] = "RS256"
@@ -153,59 +125,20 @@ def test_reply_rejects_substitution_clock_key_and_distribution_failures(mutation
         )
     if mutation == "oversize":
         raw = b"x" * (256 * 1024)
-    if mutation in {"domain", "backdate", "future", "input"}:
-        data = json.loads(reply["canonical_statement"])
-        if mutation == "backdate":
-            data["issued_at"] = "2026-09-05T11:59:50Z"
-        if mutation == "future":
-            data["issued_at"] = "2026-09-05T12:00:10Z"
-        if mutation == "input":
-            data["task_id"] = "different-task"
-        canonical = rfc8785.dumps(data)
-        reply.update(
-            canonical_statement=canonical.decode(),
-            statement_sha256=hashlib.sha256(canonical).hexdigest(),
-            signature=base64.urlsafe_b64encode(
-                private.sign((b"different\x00" if mutation == "domain" else DOMAIN) + canonical)
-            )
-            .rstrip(b"=")
-            .decode(),
-        )
-    if mutation == "retired":
-        key = replace(key, status="verify_only", retired_at=NOW + timedelta(seconds=1))
-    if mutation == "revoked":
-        key = replace(key, status="revoked", revoked_at=NOW + timedelta(seconds=1))
+    if mutation == "domain":
+        canonical = reply["canonical_statement"].encode()
+        reply["signature"] = base64.urlsafe_b64encode(
+            private.sign(b"different\x00" + canonical)
+        ).rstrip(b"=").decode()
     if mutation == "unknown_public_key":
         key = replace(key, public_key=Ed25519PrivateKey.generate().public_key().public_bytes_raw())
-    if mutation == "undistributed":
-        distribution = None
-    if mutation == "expired_distribution":
-        distribution = replace(distribution, expires_at=NOW)
-    if mutation == "stale_epoch":
-        distribution = replace(distribution, revocation_epoch=1)
-    if mutation == "stale_version":
-        distribution = replace(distribution, keyset_version=2)
-    if mutation == "missing_membership":
-        distribution = replace(distribution, key_ids=())
-    if mutation == "new_epoch":
-        state = replace(state, revocation_epoch=3)
-    if mutation == "new_version":
-        state = replace(state, keyset_version=4)
     with pytest.raises(ValueError):
-        s.verify_publication_reply(
-            raw or rfc8785.dumps(reply),
-            unsigned=unsigned,
-            key=key,
-            state=state,
-            distribution=distribution,
-            requested_at=NOW,
-            received_at=NOW,
-        )
+        s.verify_historical_publication(raw or rfc8785.dumps(reply), key=key)
 
 
 @pytest.mark.parametrize("status", ["verify_only", "revoked"])
-def test_retired_keys_verify_historical_statements_but_never_sign_new_ones(status):
-    _c, s, _private, key, state, distribution, unsigned, reply = setup_signing()
+def test_retired_keys_verify_historical_statements(status):
+    _c, s, _private, key, _state, _distribution, _unsigned, reply = setup_signing()
     key = replace(
         key,
         status=status,
@@ -216,10 +149,6 @@ def test_retired_keys_verify_historical_statements_but_never_sign_new_ones(statu
         s.verify_historical_publication(rfc8785.dumps(reply), key=key).statement.task_id
         == "task-123"
     )
-    with pytest.raises(ValueError):
-        s.prepare_publication_statement(
-            unsigned, key=key, state=state, distribution=distribution, signer_now=NOW
-        )
 
 
 @pytest.mark.parametrize(
@@ -253,121 +182,6 @@ def test_key_record_rejects_invalid_lifecycle(changes):
         replace(key, **changes)
 
 
-def test_active_key_does_not_open_uncomposed_distribution_gate():
-    _c, s, _private, key, state, _distribution, unsigned, _reply = setup_signing()
-    with pytest.raises(ValueError):
-        s.prepare_publication_statement(unsigned, key=key, state=state, signer_now=NOW)
-
-
-@pytest.mark.asyncio
-async def test_dedicated_protocol_only_accepts_unsigned_schema_and_returns_checked_envelope():
-    _c, s, _private, key, state, distribution, unsigned, reply = setup_signing()
-
-    class TestTransport:
-        async def sign_publication(
-            self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int
-        ) -> bytes:
-            assert json.loads(canonical_unsigned_input) == unsigned_payload()
-            assert "issued_at" not in json.loads(canonical_unsigned_input)
-            assert maximum_reply_bytes <= 256 * 1024
-            return rfc8785.dumps(reply)
-
-    result = await s.request_publication_signature(
-        TestTransport(),
-        unsigned,
-        key=key,
-        state=state,
-        distribution=distribution,
-        clock=lambda: NOW,
-    )
-    assert result.statement.task_id == "task-123"
-
-
-@pytest.mark.asyncio
-async def test_signer_call_has_bounded_deadline():
-    import asyncio
-
-    _c, s, _private, key, state, distribution, unsigned, _reply = setup_signing()
-
-    class StalledTransport:
-        async def sign_publication(
-            self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int
-        ) -> bytes:
-            await asyncio.Event().wait()
-
-    with pytest.raises(TimeoutError):
-        await s.request_publication_signature(
-            StalledTransport(),
-            unsigned,
-            key=key,
-            state=state,
-            distribution=distribution,
-            clock=lambda: NOW,
-            timeout_seconds=0.01,
-        )
-
-
-@pytest.mark.parametrize("field", [name for name in unsigned_payload() if name != "schema"])
-def test_validly_resigned_substitution_of_every_unsigned_field_is_rejected(field):
-    _c, s, private, key, state, distribution, unsigned, reply = setup_signing()
-    data = json.loads(reply["canonical_statement"])
-    old = data[field]
-    if field in {"root", "manifest"}:
-        data["root"]["digest"] = "sha256:" + "b" * 64
-        data["manifest"]["digest"] = "sha256:" + "b" * 64
-    elif field == "config":
-        data["config"]["digest"] = "sha256:" + "b" * 64
-    elif field == "layers":
-        data["layers"] *= 2
-    elif field == "observed_base_digests":
-        data[field] = ["sha256:" + "c" * 64]
-    elif field in {"platform", "slurm_cluster_id", "repository"}:
-        data.update(platform="linux/amd64", slurm_cluster_id="oldlab")
-        data["repository"] = data["repository"].replace("/arm64/", "/x86_64/")
-    elif field == "component":
-        data[field] = "sidecar:redis"
-        segment = hashlib.sha256(b"sidecar:redis").hexdigest()
-        data["repository"] = data["repository"].removesuffix("task") + "sidecar-sha256-" + segment
-    elif field == "purpose":
-        campaign = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-        data.update(purpose="shadow", shadow_campaign_id=campaign)
-        data["repository"] = data["repository"].replace(
-            "loom-task-image-attempts/", f"loom-task-image-shadow/{campaign}/"
-        )
-    elif type(old) is int:
-        data[field] += 1
-    elif field.endswith("_id") and len(old) == 36:
-        data[field] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-        if field == "attempt_id":
-            data["repository"] = data["repository"].replace(old, data[field])
-    elif field == "registry_origin":
-        data[field] = "https://other-registry.example"
-    elif len(old) == 64:
-        data[field] = "c" * 64
-    elif field == "slurm_job_id":
-        data[field] = "4321"
-    else:
-        data[field] = "different-identity"
-    canonical = rfc8785.dumps(data)
-    reply.update(
-        canonical_statement=canonical.decode(),
-        statement_sha256=hashlib.sha256(canonical).hexdigest(),
-        signature=base64.urlsafe_b64encode(private.sign(DOMAIN + canonical)).rstrip(b"=").decode(),
-    )
-    # This is a VALID schema and signature, not merely a malformed-input test.
-    s.verify_historical_publication(rfc8785.dumps(reply), key=key)
-    with pytest.raises(ValueError, match="binding mismatch"):
-        s.verify_publication_reply(
-            rfc8785.dumps(reply),
-            unsigned=unsigned,
-            key=key,
-            state=state,
-            distribution=distribution,
-            requested_at=NOW,
-            received_at=NOW,
-        )
-
-
 @pytest.mark.parametrize(
     "issued",
     [
@@ -399,43 +213,6 @@ def test_distribution_snapshot_has_a_hard_freshness_ceiling():
     _c, _s, _private, _key, _state, distribution, _unsigned, _reply = setup_signing()
     with pytest.raises(ValueError):
         replace(distribution, expires_at=distribution.issued_at + timedelta(minutes=15, seconds=1))
-
-
-@pytest.mark.parametrize("skew,accepted", [(-6, False), (-5, True), (5, True), (6, False)])
-def test_signer_clock_skew_is_bounded_at_exactly_five_seconds(skew, accepted):
-    _c, s, private, key, state, distribution, unsigned, reply = setup_signing()
-    data = json.loads(reply["canonical_statement"])
-    data["issued_at"] = (NOW + timedelta(seconds=skew)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    canonical = rfc8785.dumps(data)
-    reply.update(
-        canonical_statement=canonical.decode(),
-        statement_sha256=hashlib.sha256(canonical).hexdigest(),
-        signature=base64.urlsafe_b64encode(private.sign(DOMAIN + canonical)).rstrip(b"=").decode(),
-    )
-    if accepted:
-        assert (
-            s.verify_publication_reply(
-                rfc8785.dumps(reply),
-                unsigned=unsigned,
-                key=key,
-                state=state,
-                distribution=distribution,
-                requested_at=NOW,
-                received_at=NOW,
-            ).statement.issued_at
-            == data["issued_at"]
-        )
-    else:
-        with pytest.raises(ValueError):
-            s.verify_publication_reply(
-                rfc8785.dumps(reply),
-                unsigned=unsigned,
-                key=key,
-                state=state,
-                distribution=distribution,
-                requested_at=NOW,
-                received_at=NOW,
-            )
 
 
 def test_base64url_signature_rejects_nonzero_padding_bits_without_changing_signature_bytes():

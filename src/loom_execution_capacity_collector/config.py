@@ -33,6 +33,8 @@ class ExecutionCapacityCollectorSettings(BaseSettings):
 
     target_id: str = Field(min_length=1, max_length=120)
     pool_id: str = Field(min_length=1, max_length=120)
+    # Rendered from the same settings as the actuator, independent of active Jobs.
+    build_concurrency_limit: int | None = Field(default=None, ge=1)
     namespace: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
     node_label_selector: str = Field(min_length=1, max_length=500)
     nebius_project_id: str = Field(min_length=1, max_length=160)

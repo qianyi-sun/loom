@@ -1,118 +1,66 @@
 # Overview
 
-Loom runs LLMs against customizable tasks through pluggable agent
-harnesses, capturing the full execution trace + metrics for browsing
-and download. Two execution modes share the same primitives:
+Loom runs model and agent evaluations and retains their trajectories, verifier
+results, artifacts and provider usage. **Nebius is the only supported hosted
+backend.** Local CLI execution and disposable local development remain supported.
+Users choose their own external inference APIs; Nebius hosting does not require
+using a particular inference provider.
 
-- **CLI mode** — `loom run` on a laptop. No server stack. Trajectories
-  and ATIF docs land on local disk. Provider SDKs called directly.
-  See [cli-mode.md](cli-mode.md).
-- **Service mode** — Control Plane + Workers + LLM Gateway + Postgres
-  + MinIO. Multi-team with DRF (Dominant Resource Fairness)
-  scheduling. SPA at `web/` for browsing trials. See
-  [service-mode.md](service-mode.md).
+## Hosted execution
 
-CLI and worker execution share `Trial.run()`. Native Nebius service execution
-uses durable leases, namespace-scoped Kubernetes Jobs and a reusable harness
-runtime, with canonical artifacts and Gateway accounting. `dev` includes this
-path alongside existing worker support; see the
-[Nebius platform contract](nebius-primary-platform.md).
+The REST service, web frontend, control plane and LLM Gateway run on Nebius.
+The control plane admits compatible workloads into durable execution leases.
+The execution actuator reconciles those leases into namespace-scoped Kubernetes
+Jobs, using immutable task images and a reusable harness runtime. Output
+publication is fenced by attempt and generation identity.
 
-## Component map
+Nebius provides the database, object storage, registry, backups and monitoring
+specified by the [platform contract](nebius-primary-platform.md). GitHub-hosted
+CI performs validation, builds and publication. A test passing in CI does not
+establish live deployment or workload acceptance.
 
-| Component | Path | Role |
+| Component | Path | Responsibility |
 |---|---|---|
-| Foundation library | `src/loom/` | Types, errors, models, Driver Protocol, Trial orchestrator, Trajectory writer/reader, ATIF projection, Verifier base |
-| `loom` CLI | `src/loom_cli/` | `loom run/config/datasets`; stateless wrapper around `Trial.run()` |
-| Cloud drivers | `src/loom_drivers/` | `Driver` Protocol implementations for Modal sandboxes |
-| Control Plane | `src/loom_control_plane/` | Trial state machine, DRF claim, trajectory index, signed-URL artifact upload |
-| LLM Gateway | `src/loom_llm_gateway/` | LiteLLM-backed provider proxy with rate-card cost compute + per-call attribution |
-| Native execution | `src/loom_execution_actuator/` + `cmd/loom-execution-runtime/` | Reconciles lease-bound Kubernetes Jobs; runs prepared task images and reusable harnesses |
-| Worker | `src/loom_worker/` | Polls Control Plane for trials, runs them locally, emits trajectory to MinIO, reports state via fenced PATCH |
-| Service (REST + SPA) | `src/loom_service/` + `web/` | External REST surface (`/api/v1/...`) and React SPA |
-| Operator CLI | `src/loom_benchmark_tool/` | `loom-benchmark list/import/verify` for cluster-side adapter management |
-| Benchmark adapters | `packages/loom-benchmarks/` (13) + `packages/loom-benchmark-terminal-bench-2/` (1) | One PyPI-style sibling package per adapter family; discovered via `loom.benchmarks` entry-points |
-| Agent adapters | `packages/loom-launcher/` (11 production + `hello` test reference) | Subprocess-based CLI agent wrappers (claude-code, codex, openhands, ...) |
+| Core library | `src/loom/` | Task/trial types, orchestration, trajectories, verifiers and durable data contracts |
+| CLI | `src/loom_cli/` | Local runs and authenticated hosted API clients |
+| Service and web | `src/loom_service/`, `web/` | Teams, task catalogs, batch submission, monitoring and result access |
+| Control plane | `src/loom_control_plane/` | Trial/attempt state, admission, leases and fenced publication |
+| Execution actuator | `src/loom_execution_actuator/` | Native trial and task-image Kubernetes Job reconciliation |
+| Execution runtime | `cmd/loom-execution-runtime/` | Runs prepared task images and agent/verifier phases |
+| Capacity collector | `src/loom_execution_capacity_collector/` | Native target and resource observations |
+| LLM Gateway | `src/loom_llm_gateway/` | External inference access, credential isolation and usage accounting |
+| Local worker helpers | `src/loom_worker/` | Local runners and disposable worker execution |
+| Adapters | `packages/` | Benchmark ingestion and agent harnesses |
 
-Postgres + MinIO are the only stateful services. Control Plane,
-Gateway, Worker, Service are all stateless.
+See [native service execution](nebius-service-execution.md),
+[task-image materialization](task-image-materialization.md), and
+[service mode](service-mode.md) for the execution and user-facing contracts.
 
-## Where Trial.run() lives
+## Local execution
 
-For CLI and worker execution, `loom.trial.trial.Trial.run()` takes a
-`TrialContext` and walks the trial state machine. Both modes construct
-a `TrialContext` and hand it to `Trial.run()`; the only differences
-are the wiring of the four dependencies:
+`loom run` executes a local trial without the hosted stack. It uses local task
+and artifact storage and calls configured inference providers directly.
+The Driver protocol remains useful for local Docker and disposable test drivers;
+it is not a catalog of supported hosted backends.
 
-| Dependency | CLI mode | Service mode |
-|---|---|---|
-| `ObjectStore` | `LocalDiskObjectStore` (host filesystem) | `MinioObjectStore` (MinIO via boto3) |
-| `LLMGatewayClient` | `UpstreamDirectGatewayClient` (provider SDKs) | `HttpLLMGatewayClient` (HTTP to Loom Gateway) |
-| `state_patch_callback` | None (no Control Plane) | `loom_worker.control_plane_client.PatchState` (fenced HTTP) |
-| `Driver` | `FakeDriver` / `DockerDriver` / cloud driver | same set (chosen by `--backend` / worker config) |
+The disposable Compose stack explicitly sets `LOOM_LOCAL_EXECUTION=1` with
+`LOOM_ENV=development`. This opt-in permits worker backends in its service
+catalog and admission path. The default is hosted Nebius execution; staging
+and production cannot enable local worker admission. See [CLI mode](cli-mode.md).
 
-Trajectories produced by both modes parse identically; ATIF JSON is
-the same shape; verifier results are the same type.
+## Workload and data boundaries
 
-## Data flow (one sentence)
+Desktop/GUI and Behavior GPU hosted execution are unsupported. Other pipeline
+and task classes still require conversion under the native compatibility policy.
+Their retired shared-cluster paths are not fallbacks. Local/domain functionality
+and retained results remain usable; retirement does not implement replacements
+or claim workload parity.
 
-A researcher (CLI) or `POST /trials` (service) submits a trial; the
-trial loads + converts its task bundle, starts a sandbox, runs the
-agent against the instruction, lets the verifier grade the result,
-finalizes (uploads final trajectory parts, projects to ATIF), and
-returns a `TrialResult`. See [service-mode.md](service-mode.md) for
-the full ASCII timing diagram with claim, fencing, and finalize.
+Trial and attempt identity, generation fencing, verifier rewards, trajectories,
+artifacts, usage and provenance remain durable. Published database migrations
+remain intact, including legacy schema and the qualified divergent Nebius
+lineage conversion. Historical identifiers do not authorize new execution.
 
-## State machine
-
-`loom.models.result.TrialState` defines six terminal/non-terminal
-states:
-
-```
-queued ──(claim SQL)──► claimed ──► running ──► succeeded
-                            │            │           │
-                            │            └──────►  failed
-                            │
-                            └─────────────────►  cancelled
-                                   (PATCH from operator,
-                                    valid from queued, claimed, or running)
-```
-
-`queued → claimed` happens only through the atomic claim SQL (a Worker
-takes ownership); all other transitions go through `PATCH
-/trials/{id}/state` and are fenced by `worker_id` match. Trial
-finalization (uploading the last trajectory part + projecting ATIF) is
-a side-effect of reaching `succeeded`/`failed`/`cancelled`, not its
-own state.
-
-## What lives where (so you can `cd` straight to it)
-
-- **A Driver Protocol method's contract** —
-  `src/loom/driver/base.py` (Protocol + ExecHandle + ExecResult + 10
-  MB cap constant)
-- **DockerDriver impl** — `src/loom/driver/docker.py`
-- **ModalDriver impl** — `src/loom_drivers/modal/driver.py`
-- **FakeDriver impl** — `src/loom/driver/fake.py`
-- **Trial orchestrator** — `src/loom/trial/trial.py`
-- **Trajectory writer** — `src/loom/trajectory/writer.py`
-- **ATIF projection** — `src/loom/trajectory/atif.py`
-- **Per-step runner** — `src/loom/trial/step_runner.py`
-- **Verifier base** — `src/loom/verifier/base.py`
-- **Concrete verifiers** — `src/loom/verifier/{pytest_verifier,script_verifier,structured,llm_judge,composite}.py`
-- **Control Plane FastAPI app** — `src/loom_control_plane/app.py`
-- **Worker main loop** — `src/loom_worker/main_loop.py`
-- **LLM Gateway routes** — `src/loom_llm_gateway/routes/`
-- **Service REST routes** — `src/loom_service/routes/`
-- **CLI argparse** — `src/loom_cli/__main__.py`
-- **CLI orchestrator** — `src/loom_cli/run_cmd.py`
-- **Database schema** — `src/loom/db/schema.py` (SQLAlchemy models)
-- **Migrations** — `migrations/versions/`
-
-## See also
-
-- [driver-protocol.md](driver-protocol.md)
-- [benchmark-adapter.md](benchmark-adapter.md)
-- [agent-adapter.md](agent-adapter.md)
-- [trajectory-and-atif.md](trajectory-and-atif.md)
-- [cli-mode.md](cli-mode.md)
-- [service-mode.md](service-mode.md)
+The [shared-cluster retirement record](../historical/shared-cluster-retirement-2026-09.md)
+identifies the retired architecture, source snapshot and retained compatibility.
+Git history is the archive for retired implementation.

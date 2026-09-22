@@ -1,13 +1,13 @@
 # Cluster Deployment
 
-`loom cluster` renders and operates Loom on Kubernetes. It is the direct
-cluster interface for unprotected shared deployments and the underlying
-rollout surface for protected staging and production. Within `loom service`,
-the `local` target manages Docker Compose, while a `dev-<name>` target submits a
-sealed personal candidate through the remote environment API; protected
-targets redirect operators to the cluster rollout workflow. Cluster behavior
-is driven by a TOML profile validated against the [configuration
-schema](configuration.md).
+Hosted Loom runs on Nebius. Its current deployment contract is the
+[Nebius deployment procedure](../runbooks/nebius-deployment.md), driven by the
+Nebius renderer and deployer. `loom cluster up` is limited to disposable
+local development. `loom service up --environment local` manages Docker
+Compose. Shared remote workers and personal hosted environments are retired.
+
+The generic cluster renderer remains useful for disposable test clusters;
+its topology options do not represent additional supported hosted platforms.
 
 ## Components
 
@@ -16,7 +16,7 @@ schema](configuration.md).
 | `loom-service` | Public REST API, authentication, catalog, and SPA backend |
 | `loom-web` | Static React application and runtime frontend configuration |
 | `loom-control-plane` | Trial state, scheduling, worker APIs, and step-token minting |
-| `loom-worker` | Optional in-cluster trial executor; external pools can replace it |
+| `loom-worker` | Local/disposable trial executor |
 | `loom-llm-gateway` | Provider routing, credential use, attribution, and usage accounting |
 | Postgres and PgBouncer | Durable application state and pooled client connections |
 | MinIO or another configured S3-compatible store | Task bundles, trajectories, and artifacts |
@@ -34,8 +34,8 @@ Ingress exposes only the web application and `loom-service`:
 - `/api/v1` under the matching API prefix.
 
 The Control Plane, LLM Gateway, Postgres, PgBouncer, object store, and egress
-components have no public Ingress backend. Router hostPorts are internal
-worker/fleet transport surfaces and are validated against the render contract.
+components have no public Ingress backend. Gateway router hostPorts are local
+sandbox transport surfaces and are validated against the render contract.
 
 `loom cluster audit` rejects public Services, unexpected Ingress backends,
 missing TLS, unsafe paths, unsupported hostPorts, missing selecting
@@ -57,10 +57,11 @@ connections to their resolved upstream identities. See
 
 ## Configuration and secrets
 
-Durable environment profiles live under `deploy/environments/`. Profiles set
-namespace, runtime and frontend identity, route prefixes, image sources,
-storage, replica counts, worker shape, external pool transport, and rollout
-policy.
+Hosted platform inputs use the examples in `deploy/nebius/` and the Nebius
+deployment procedure. Disposable local clusters can start from
+`deploy/local/local.example.cluster.toml`. Local profiles set namespace,
+runtime and frontend identity, route prefixes, image sources, storage,
+replica counts, worker shape and test policy.
 
 Runtime secrets are projected from Kubernetes Secrets according to
 `config/loom-schema.toml`. The singleton operator secret is mounted as a file;
@@ -96,7 +97,6 @@ loom cluster render-migration
 loom cluster release-manifest
 loom cluster minio-storage-preflight
 loom cluster release-gate
-loom cluster rollout ...
 ```
 
 Bootstrap and maintenance commands:
@@ -115,21 +115,9 @@ deletion flags are supplied.
 
 ## Apply sequence
 
-For an ordinary unprotected cluster:
-
-```bash
-uv run --no-sync loom cluster preflight --config deploy/environments/ENV.cluster.toml
-uv run --no-sync loom cluster render --config deploy/environments/ENV.cluster.toml > /tmp/loom-rendered.yaml
-uv run --no-sync loom cluster audit --config deploy/environments/ENV.cluster.toml
-kubectl apply -f /tmp/loom-rendered.yaml
-uv run --no-sync loom cluster status --config deploy/environments/ENV.cluster.toml
-```
-
-`loom cluster up` composes preflight, render, apply, and readiness waiting. A
-protected staging or production rollout additionally requires candidate-bound
-backup, migration, environment-state, release-manifest, release-gate, and smoke
-evidence. Use the installed [protected staging rollout](staging-rollout.md) for
-shared staging instead of running lower-level mutation commands directly.
+For hosted targets, follow the [Nebius deployment procedure](../runbooks/nebius-deployment.md).
+For disposable local clusters, `loom cluster up` composes preflight, render,
+apply, and readiness waiting. Use an explicit development configuration.
 
 ## Preflight and diagnosis
 

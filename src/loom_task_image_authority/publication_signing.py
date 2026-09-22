@@ -1,22 +1,16 @@
-"""Dedicated publication signer boundary; no production private keys or DB I/O.
+"""Retained publication signature verification and public key lifecycle records.
 
-The dedicated mutual-TLS client lives in publication_transport; production
-transport and signed-keyset distribution remain deliberately uncomposed.
-Evidence returned here is NOT readiness: the final transaction must lock the
-durable publication singleton first, then keys, grant, projection, current
-session, materialization, attempt, candidate/job and (later) trial-start rows.
-Never hold those locks across this module's signer call.
+Historical signatures prove their recorded provenance, not present execution
+readiness. Execution verifies the current keyset and grant separately.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol
+from typing import Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -25,15 +19,11 @@ from pydantic import TypeAdapter
 from loom_task_image_authority.contracts import Identifier
 from loom_task_image_authority.publication_contracts import (
     MAX_SAFE_INTEGER,
-    MAX_SIGNER_REPLY_BYTES,
     PUBLICATION_DOMAIN,
     PublicationEnvelope,
     PublicationStatement,
-    PublicationUnsignedInput,
-    canonical_publication_bytes,
     decode_publication_envelope,
     decode_publication_statement,
-    decode_unsigned_input,
 )
 
 MAX_SIGNER_CLOCK_SKEW = timedelta(seconds=5)
@@ -129,51 +119,6 @@ class DistributedKeysetSnapshot:
             TypeAdapter(Identifier).validate_python(key_id, strict=True)
 
 
-def _eligible(
-    key: PublicationKeyRecord,
-    state: PublicationState,
-    distribution: DistributedKeysetSnapshot | None,
-    now: datetime,
-) -> None:
-    _time(now)
-    if (
-        key.status != "active"
-        or now < key.activated_at
-        or distribution is None
-        or not distribution.issued_at <= now < distribution.expires_at
-        or key.key_id not in distribution.key_ids
-        or distribution.keyset_version != state.keyset_version
-        or distribution.revocation_epoch != state.revocation_epoch
-    ):
-        raise ValueError("publication signing eligibility is closed")
-
-
-def prepare_publication_statement(
-    unsigned: PublicationUnsignedInput,
-    *,
-    key: PublicationKeyRecord,
-    state: PublicationState,
-    signer_now: datetime,
-    distribution: DistributedKeysetSnapshot | None = None,
-) -> PublicationStatement:
-    """Dedicated service policy: stamp its clock after validating unsigned input.
-
-    This prepares only this schema/domain; actual signing belongs to a dedicated
-    host service or KMS/HSM, never an in-process production private key provider.
-    """
-    validated = decode_unsigned_input(canonical_publication_bytes(unsigned))
-    _eligible(key, state, distribution, signer_now)
-    return PublicationStatement.model_validate(
-        {
-            **validated.model_dump(mode="json", by_alias=True, exclude_none=True),
-            "issued_at": signer_now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "signing_key_id": key.key_id,
-            "distributed_keyset_version": state.keyset_version,
-            "revocation_epoch": state.revocation_epoch,
-        }
-    )
-
-
 @dataclass(frozen=True)
 class VerifiedPublication:
     envelope: PublicationEnvelope
@@ -207,75 +152,3 @@ def verify_historical_publication(
     except InvalidSignature:
         raise ValueError("invalid publication signature") from None
     return VerifiedPublication(envelope, statement)
-
-
-def verify_publication_reply(
-    reply: bytes,
-    *,
-    unsigned: PublicationUnsignedInput,
-    key: PublicationKeyRecord,
-    state: PublicationState,
-    requested_at: datetime,
-    received_at: datetime,
-    distribution: DistributedKeysetSnapshot | None = None,
-) -> VerifiedPublication:
-    _time(requested_at)
-    _eligible(key, state, distribution, received_at)
-    if received_at < requested_at:
-        raise ValueError("publication request clock regressed")
-    result = verify_historical_publication(reply, key=key)
-    statement = result.statement
-    issued = datetime.strptime(statement.issued_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    _eligible(key, state, distribution, issued)
-    if (
-        not requested_at - MAX_SIGNER_CLOCK_SKEW <= issued <= received_at + MAX_SIGNER_CLOCK_SKEW
-        or statement.distributed_keyset_version != state.keyset_version
-        or statement.revocation_epoch != state.revocation_epoch
-        or canonical_publication_bytes(statement.unsigned_input())
-        != canonical_publication_bytes(unsigned)
-    ):
-        raise ValueError("publication signer reply binding mismatch")
-    return result
-
-
-class PublicationSigner(Protocol):
-    """Authenticated dedicated service transport; never arbitrary-byte signing.
-
-    Implementations must enforce maximum_reply_bytes while reading, not after
-    buffering an unbounded response, and close I/O on timeout or cancellation.
-    Production composition must supply and verify this transport explicitly.
-    """
-
-    async def sign_publication(
-        self, canonical_unsigned_input: bytes, *, maximum_reply_bytes: int
-    ) -> bytes: ...
-
-
-async def request_publication_signature(
-    signer: PublicationSigner,
-    unsigned: PublicationUnsignedInput,
-    *,
-    key: PublicationKeyRecord,
-    state: PublicationState,
-    distribution: DistributedKeysetSnapshot | None = None,
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC).replace(microsecond=0),
-    timeout_seconds: float = 5,
-) -> VerifiedPublication:
-    if isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= 10:
-        raise ValueError("invalid publication signer deadline")
-    canonical = canonical_publication_bytes(
-        decode_unsigned_input(canonical_publication_bytes(unsigned))
-    )
-    requested_at = clock()
-    _eligible(key, state, distribution, requested_at)
-    async with asyncio.timeout(timeout_seconds):
-        reply = await signer.sign_publication(canonical, maximum_reply_bytes=MAX_SIGNER_REPLY_BYTES)
-    return verify_publication_reply(
-        reply,
-        unsigned=unsigned,
-        key=key,
-        state=state,
-        distribution=distribution,
-        requested_at=requested_at,
-        received_at=clock(),
-    )

@@ -2499,6 +2499,19 @@ async def test_retry_creates_a_new_attempt_and_finalization_is_idempotent(
             await session.commit()
             assert (second.attempt, second.generation) == (2, 1)
             assert second.id != first.id
+            # Current task counts use the latest attempt, while cleanup keeps both.
+            from loom_service.routes.batches import _batch_service_execution_summary
+            from loom_service.routes.monitor import _service_execution_activity
+
+            trial = await session.get(Trial, trial_id)
+            summary = await _batch_service_execution_summary(session, [trial_id])
+            activity = await _service_execution_activity(
+                session, target_team=trial.team_id, filters={"task_id": trial.task_id},
+            )
+            assert summary["lease_count"] == 1
+            assert activity["lease_count"] == 1
+            assert sum(activity["lifecycle_stages"].values()) == 1
+            assert sum(activity["source_cleanup_states"].values()) == 2
 
         async with sessions() as session:
             await enqueue_execution_transition(
@@ -2585,7 +2598,6 @@ async def test_reservation_cannot_reopen_cancelled_trial(
             cached = await reserve_session.get(Trial, trial_id) if cached_trial else None
             cancelled = await cancel_trial_under_authority(
                 session_factory=sessions,
-                protected_store=None,
                 trial_id=trial_id,
                 team_id=None,
             )
@@ -2653,7 +2665,6 @@ async def test_retry_cannot_reopen_cancelled_trial_after_timeout_reclaim(
                 await session.commit()
             cancelled = await cancel_trial_under_authority(
                 session_factory=sessions,
-                protected_store=None,
                 trial_id=trial_id,
                 team_id=None,
             )
@@ -3005,7 +3016,6 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
                 ttl_sec=600,
             ),
             principal=auth,
-            protected_worker_session=None,
             execution_lease_id=lease.id,
             execution_generation=lease.generation,
         )

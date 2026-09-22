@@ -1,15 +1,12 @@
 # Contributing
 
-Documentation for people changing Loom itself. End-user instructions are in
-[`../user-guide.md`](../user-guide.md); operator procedures are in
-[`../runbooks/`](../runbooks/).
+- [Contributor quickstart](contributor-quickstart.md): setup, development and checks.
+- [Repository map](repository-layout.md): source, packages, deployment and schema boundaries.
+- [CI](ci.md): validation selection, publication and regression lanes.
+- [Required checks](required-checks.md): native GitHub check ownership and merge authority.
+- [Loom and Harbor](loom-vs-harbor.md): interoperability and capability boundaries.
+- [Contribution policy](../../CONTRIBUTING.md): authoritative workflow and Definition of Done.
 
-- **[Contributor quickstart](contributor-quickstart.md)** — repository layout,
-  development setup, tests, coverage gates, workflow, and merge mechanics.
-- **[Loom and Harbor](loom-vs-harbor.md)** — current interoperability,
-  architectural differences, and capability boundaries.
-- [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) — change workflow, commit
-  style, and Definition of Done.
-
-Contributor docs describe the current repository. Put completed migrations,
-dated assessments, plans, and decision history in [`../../archive/`](../../archive/).
+End-user instructions belong in the [user guide](../user-guide.md); repeatable
+operator procedures belong in [runbooks](../runbooks/README.md). Keep execution
+plans and session artifacts outside the repository.

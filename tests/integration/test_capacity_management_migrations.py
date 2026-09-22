@@ -17,19 +17,12 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
-from sqlalchemy.ext.asyncio import AsyncEngine
 
-from loom_capacity_manager.executable_contracts import (
-    MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES,
-)
-from loom_capacity_manager.models import CapacityAuditEvent, CapacityAuthorityState
-from loom_capacity_manager.schema_startup import (
-    CapacitySchemaNotAtHeadError,
-    assert_capacity_schema_at_head,
-)
+# Published capacity_0014 JSON payload limit; independent of retired issuers.
+MAX_EXECUTABLE_ADMISSION_PROPOSAL_BYTES = 8_388_466
 
 EXPECTED_TABLES = {
     "capacity_account_policies",
@@ -101,8 +94,8 @@ def _normalize_sql(sql: str) -> str:
 
 def _capacity_config(url: str) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     os.environ["LOOM_CAPACITY_DB_URL"] = url
     return cfg
 
@@ -2671,24 +2664,6 @@ def test_capacity_schema_has_independent_revision_table(
         environment_engine.dispose()
 
 
-async def test_capacity_schema_error_uses_installed_capacity_migration_command(
-    empty_capacity_engine: AsyncEngine,
-) -> None:
-    with pytest.raises(CapacitySchemaNotAtHeadError) as caught:
-        await assert_capacity_schema_at_head(empty_capacity_engine)
-    message = str(caught.value)
-    assert "python -m loom_capacity_manager.migrate" in message
-    assert "--db-url-file <owner-only-database-url-file>" in message
-    assert "--expected-authority-incarnation <reviewed-non-nil-uuid>" in message
-    assert "capacity_migrations/alembic.ini" not in message
-
-
-async def test_capacity_schema_startup_returns_numeric_head(
-    capacity_engine: AsyncEngine,
-) -> None:
-    assert await assert_capacity_schema_at_head(capacity_engine) == 23
-
-
 def test_capacity_0015_terminal_inventory_evidence_is_append_only_and_reversible(
     isolated_capacity_migration_url: str,
 ) -> None:
@@ -2972,20 +2947,12 @@ def test_capacity_migration_downgrades_and_reupgrades(
         command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert EXPECTED_TABLES <= set(inspect(connection).get_table_names())
-            authority = connection.execute(
-                select(CapacityAuthorityState.authority_incarnation).where(
-                    CapacityAuthorityState.singleton_id == 1
-                )
-            ).scalar_one()
-            seeds = (
-                connection.execute(
-                    select(CapacityAuditEvent).where(
-                        CapacityAuditEvent.event_kind == "authority_incarnation_seeded"
-                    )
-                )
-                .mappings()
-                .all()
-            )
+            authority = connection.execute(text(
+                "SELECT authority_incarnation FROM capacity_authority_state WHERE singleton_id=1"
+            )).scalar_one()
+            seeds = connection.execute(text(
+                "SELECT * FROM capacity_audit_events WHERE event_kind='authority_incarnation_seeded'"
+            )).mappings().all()
             assert len(seeds) == 1
             assert seeds[0]["actor_kind"] == "migration"
             assert seeds[0]["actor_id"] == "capacity-authority-bootstrap"
@@ -2995,12 +2962,8 @@ def test_capacity_migration_downgrades_and_reupgrades(
         engine.dispose()
 
 
-def test_capacity_models_match_migration_head(capacity_postgres_url: str) -> None:
-    command.check(_capacity_config(capacity_postgres_url))
-
-
 def test_capacity_alembic_environment_has_no_environment_db_fallback() -> None:
-    source = Path("capacity_migrations/env.py").read_text(encoding="utf-8")
+    source = Path("database/capacity_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_DB_URL" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
@@ -3014,8 +2977,8 @@ def test_capacity_alembic_connection_enforces_fixed_postgres_timeouts(
     encoded_url = (
         f"{capacity_postgres_url}?application_name=capacity%40migration&connect_timeout=99"
     )
-    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     monkeypatch.setenv("LOOM_CAPACITY_DB_URL", encoded_url)
     real_engine_from_config = sqlalchemy.engine_from_config
     captured: dict[str, object] = {}

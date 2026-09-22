@@ -12,13 +12,13 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from loom.trial_writer_trigger_authority import trial_writer_trigger_retirement_ddl
-from tests.integration.test_capacity_agent_store import (
-    _initialize_and_register,
-    _seed_trial,
-    _value,
-)
 from tests.integration.test_capacity_trial_writer_fence import _control_session, _legacy_engine
 from tests.integration.test_capacity_trial_writer_retirement import _downgrade
+from tests.support.historical_capacity import (
+    _value,
+    historical_agent_rows,
+    seed_unprotected_trial,
+)
 
 
 @pytest.mark.parametrize("inherited_owner", [False, True])
@@ -33,7 +33,7 @@ def test_owner_login_sealing_does_not_revoke_open_session_ddl_authority(
     surviving session. This is not a production ownership-convergence API.
     """
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     admin = create_engine(_value(database, "admin_url"))
     suffix = uuid4().hex
     login_role = f"writer_login_{suffix}"
@@ -248,7 +248,7 @@ async def test_retirement_refuses_in_flight_initialization_and_restores_triggers
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = capacity_guard_database
-    _, registration = await _initialize_and_register(database)
+    _, registration = await historical_agent_rows(database)
     async with _control_session(database) as initializer:
         await initializer.execute(
             text("SELECT loom_capacity_guard.initialize_trial_writer_fence(:agent, :writer)"),
@@ -273,7 +273,7 @@ async def test_initialization_cannot_cross_in_flight_retirement(
     capacity_guard_database: dict[str, object],
 ) -> None:
     database = capacity_guard_database
-    _, registration = await _initialize_and_register(database)
+    _, registration = await historical_agent_rows(database)
     migration = importlib.import_module(
         "capacity_guard_migrations.versions.guard_0035_trial_writer_interception"
     )
@@ -301,7 +301,7 @@ def test_helper_provisioning_rejects_drift_and_rolls_back_the_transaction(
     capacity_guard_database: dict[str, object], drift: str
 ) -> None:
     database = capacity_guard_database
-    trial = _seed_trial(database)
+    trial = seed_unprotected_trial(database)
     engine = create_engine(_value(database, "admin_url"))
     quote = engine.dialect.identifier_preparer.quote
     try:

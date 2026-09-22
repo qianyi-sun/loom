@@ -19,8 +19,10 @@ from loom.pipeline.state import PipelineRunResult, PipelineStageRunState
 
 
 def test_required_fault_matrix_is_closed_complete_and_digestible() -> None:
-    assert [item.row for item in PIPELINE_CORE_FAULT_MATRIX] == list(range(1, 45))
-    assert len({item.scenario for item in PIPELINE_CORE_FAULT_MATRIX}) == 44
+    assert [item.row for item in PIPELINE_CORE_FAULT_MATRIX] == [
+        row for row in range(1, 45) if row not in {39, 42}
+    ]
+    assert len({item.scenario for item in PIPELINE_CORE_FAULT_MATRIX}) == 42
     assert all(len(item.pytest_nodeids) >= 2 for item in PIPELINE_CORE_FAULT_MATRIX)
     assert {item.execution_tier for item in PIPELINE_CORE_FAULT_MATRIX} == {"typed_model"}
     assert all(item.supporting_tiers[0] == "typed_model" for item in PIPELINE_CORE_FAULT_MATRIX)

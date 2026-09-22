@@ -30,6 +30,8 @@ from loom.db.schema import (
     DataLifecycleObject,
     LlmCall,
     ProviderConnection,
+    ServiceExecutionClass,
+    ServiceExecutionTarget,
     Task,
     Team,
     TeamQuota,
@@ -37,9 +39,18 @@ from loom.db.schema import (
     Trial,
     User,
 )
+from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
+from loom.pipeline.keys import canonical_digest
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from loom_service.routes import run_library as run_library_routes
+from tests.integration.test_service_batch_resource_requests import _NEBIUS_DEFAULT_REQUESTS
+from tests.integration.test_service_batches_crud import (
+    _automatic_service_execution_task_config,
+    _service_execution_runtime_profile,
+)
+from tests.support.execution_image_admission import signed_image_admission_bundle
 
 
 @pytest.fixture
@@ -60,7 +71,20 @@ async def run_library_setup(
     }.items():
         monkeypatch.setenv(k, v)
 
-    settings = LoomServiceSettings(_env_file=None)
+    monkeypatch.setenv("LOOM_ENV", "development")
+    profile = _service_execution_runtime_profile()
+    controller = "registry.example/controller@sha256:" + "9" * 64
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **profile.model_dump(mode="json"),
+        "agent_image_ref": controller,
+        "image_admission": signed_image_admission_bundle((
+            profile.task_image_ref, profile.runtime_image_ref, controller,
+        )).model_dump(mode="json"),
+        "default_task_resource_requests": _NEBIUS_DEFAULT_REQUESTS,
+    })
+    settings = LoomServiceSettings(_env_file=None).model_copy(update={
+        "service_execution_runtime_profile_json": profile.model_dump_json(),
+    })
     app = create_app(settings)
     engine = create_async_engine(str(settings.db_url))
     app.state.settings = settings
@@ -109,7 +133,22 @@ async def run_library_setup(
     blocked_artifact_id = uuid4()
     parent_artifact_id = uuid4()
 
+    target_id = "library-" + uuid4().hex
+    execution_class = NEBIUS_CPU_EXECUTION_CLASS_V1
     with sl() as s:
+        s.add(ServiceExecutionClass(
+            id=execution_class.class_id, schema_version=execution_class.schema_version,
+            spec_json=execution_class.model_dump(mode="json"),
+            spec_sha256=canonical_digest(execution_class.model_dump(mode="json")), enabled=True,
+        ))
+        s.add(ServiceExecutionTarget(
+            id=target_id, logical_pool_id="nebius-cpu", execution_class_id=execution_class.class_id,
+            schema_version="loom.execution-target.v1", spec_json={"health_stale_after_seconds": 60},
+            spec_sha256="sha256:" + "e" * 64, environment="development", provider="nebius",
+            region="eu-north1", failure_domain="eu-north1-a", data_residency="eu",
+            desired_state="active", observed_state="ready", health_status="healthy",
+            health_observed_at=now,
+        ))
         s.execute(insert(Team).values(id=team_a, name="Alpha Research"))
         s.execute(insert(Team).values(id=team_b, name="Beta Apps"))
         s.execute(
@@ -161,8 +200,13 @@ async def run_library_setup(
             insert(Task).values(
                 id=task_id,
                 checksum="1" * 64,
-                config={"benchmark_id": "humaneval"},
+                config=_automatic_service_execution_task_config(task_id),
                 source="local",
+                source_provenance={"service_execution_input": {
+                    "schema_version": "loom.service-execution-input.v1",
+                    "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                    "manifest_sha256": "sha256:" + "d" * 64, "file_count": 3, "total_bytes": 4096,
+                }},
             )
         )
         for conn_id, team_id, name in (
@@ -210,7 +254,7 @@ async def run_library_setup(
                     created_by_token_prefix="test:web",
                     expected_trial_count=1,
                     n_per_task=1,
-                    backend="docker",
+                    backend="nebius",
                     combinations=[],
                     provider_connection_id=conn_a if team_id == team_a else conn_b,
                     provider_model_id="gpt-4o-mini",
@@ -233,7 +277,7 @@ async def run_library_setup(
                 created_by_token_prefix="test:web",
                 expected_trial_count=1,
                 n_per_task=1,
-                backend="docker",
+                backend="nebius",
                 combinations=[],
                 provider_connection_id=conn_a,
                 provider_model_id="gpt-4o-mini",
@@ -463,6 +507,8 @@ async def run_library_setup(
         await app.state.http_client.aclose()
         await engine.dispose()
         with sl() as s:
+            s.execute(delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target_id))
+            s.execute(delete(ServiceExecutionClass).where(ServiceExecutionClass.id == execution_class.class_id))
             s.execute(delete(ArtifactLineageEdge))
             s.execute(delete(Artifact))
             s.execute(delete(LlmCall))
@@ -520,7 +566,7 @@ def _seed_cursor_batches(
                 "created_by_token_prefix": "test:774",
                 "expected_trial_count": 1,
                 "n_per_task": 1,
-                "backend": "docker",
+                "backend": "nebius",
                 "combinations": [],
                 "provider_connection_id": provider_connection_id,
                 "provider_model_id": "gpt-4o-mini",
@@ -602,7 +648,7 @@ def _seed_cursor_batches(
             "created_by_token_prefix": "test:774",
             "expected_trial_count": 1,
             "n_per_task": 1,
-            "backend": "docker",
+            "backend": "nebius",
             "combinations": [],
             "provider_connection_id": provider_connection_id,
             "provider_model_id": "gpt-4o-mini",
@@ -1175,7 +1221,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "finished_at": now,
                     "created_by_token_prefix": "test:web",
                     "expected_trial_count": 1,
-                    "backend": "docker",
+                    "backend": "nebius",
                     "combinations": [
                         {
                             "agent_name": "codex",
@@ -1209,7 +1255,7 @@ async def test_run_library_filters_by_structured_batch_fields(
                     "finished_at": now,
                     "created_by_token_prefix": "test:web",
                     "expected_trial_count": 1,
-                    "backend": "docker",
+                    "backend": "nebius",
                     "combinations": [
                         {
                             "agent_name": "codex",
@@ -1521,7 +1567,7 @@ async def test_run_library_batch_detail_includes_combination_summary(
                 finished_at=now,
                 created_by_token_prefix="test:web",
                 expected_trial_count=1,
-                backend="docker",
+                backend="nebius",
                 combinations=combinations,
                 visibility="org",
                 share_status="shared",
@@ -1807,7 +1853,7 @@ async def test_artifact_filter_is_applied_before_batch_limit(
                     finished_at=created,
                     created_by_token_prefix="test:web",
                     expected_trial_count=1,
-                    backend="docker",
+                    backend="nebius",
                     combinations=[],
                     provider_connection_id=conn_a,
                     provider_model_id="gpt-4o-mini",
@@ -2173,6 +2219,54 @@ async def test_clone_config_uses_destination_provider_and_records_provenance(
     sync_engine.dispose()
 
 
+async def test_clone_and_reuse_reject_batch_on_retired_backend(
+    run_library_setup: dict[str, object],
+) -> None:
+    """A historical batch stays readable but cannot seed a new hosted
+    submission: it would inherit the retired backend or be silently relabelled
+    as Nebius."""
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_shared = run_library_setup["trial_shared"]
+    conn_b = run_library_setup["conn_b"]
+    safe_key = run_library_setup["safe_key"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(update(Batch).where(Batch.id == batch_shared).values(backend="docker"))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        headers = {"Authorization": f"Bearer {raw_b}"}
+        cloned = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={"name": "clone of historical", "provider_connection_id": str(conn_b)},
+            headers=headers,
+        )
+        reused = await ac.post(
+            f"/api/v1/run-library/trials/{trial_shared}/artifacts/reuse",
+            json={"key": safe_key, "name": "reuse of historical"},
+            headers=headers,
+        )
+        detail = await ac.get(f"/api/v1/run-library/batches/{batch_shared}", headers=headers)
+
+    with sync_engine.connect() as conn:
+        derived = conn.execute(
+            select(Batch.id).where(Batch.name.in_(["clone of historical", "reuse of historical"]))
+        ).all()
+    sync_engine.dispose()
+
+    for response in (cloned, reused):
+        assert response.status_code == 400, response.text
+        assert "'docker'" in response.json()["detail"]
+        assert "Nebius-only" in response.json()["detail"]
+    assert derived == []
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["backend"] == "docker"
+
+
 async def test_clone_config_rejects_task_that_became_agent_incompatible(
     run_library_setup: dict[str, object],
 ) -> None:
@@ -2453,3 +2547,194 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
         assert row.required_worker_pools == []
         assert row.expected_trial_count == 1
     sync_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_library_costs_match_batch_accounting_without_inventing_zero(run_library_setup):
+    setup = run_library_setup
+    engine = create_engine(str(setup["postgres_url"]))
+    with engine.begin() as conn:
+        conn.execute(insert(LlmCall).values(
+            id=uuid4(), team_id=setup["team_a"], trial_id=setup["trial_shared"],
+            step_id="main", model="openai/test", dialect="openai",
+            input_tokens=10, output_tokens=5, provider_extras={},
+            cost_usd=Decimal("0"), rate_card_hash="facade:tokens-only:test",
+        ))
+    engine.dispose()
+    headers = {"Authorization": f"Bearer {setup['raw_a']}"}
+    batch_id = str(setup["batch_shared"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=setup["app"]), base_url="http://svc") as client:
+        listing = await client.get("/api/v1/run-library/batches?scope=my", headers=headers)
+        detail = await client.get(f"/api/v1/run-library/batches/{batch_id}", headers=headers)
+        batch = await client.get(f"/api/v1/batches/{batch_id}", headers=headers)
+    assert listing.status_code == detail.status_code == batch.status_code == 200
+    item = next(row for row in listing.json()["items"] if row["id"] == batch_id)
+    for row in (item, detail.json(), batch.json()):
+        assert row["estimated_cost_usd"] is None
+        assert row["cost_status"] == "not_applicable"
+        assert row["cost_estimate_source"] == "tokens-only"
+        assert row["llm_calls_count"] == 1
+
+
+@pytest.mark.parametrize("route", ["clone", "reuse", "native_reuse"])
+async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_admission(
+    run_library_setup, route,
+):
+    from loom_control_plane.routes.trials import router as cp_trials_router
+
+    f = run_library_setup
+    app = f["app"]
+    app.include_router(cp_trials_router, prefix="/cp")
+    engine = create_engine(str(f["postgres_url"]))
+    sessions = sessionmaker(engine)
+    config = {"agent_name": "terminus-2", "agent_model": {"provider": "openai", "name": "gpt-4o-mini"}}
+    combinations = [{**config, "label": label, "n_per_task": 2} for label in ("a", "b")]
+    stale_profile = {**json.loads(app.state.settings.service_execution_runtime_profile_json),
+                     "candidate_sha": "2" * 40}
+    with sessions() as s:
+        source = s.get(Batch, f["batch_shared"])
+        source.trial_config = config
+        source.combinations = combinations
+        source.n_per_task = 2
+        source.service_execution_runtime_profile = stale_profile
+        s.commit()
+    native = route == "native_reuse"
+    destination = "a" if native else "b"
+    file_path = "artifacts/verifier/ctrf.json"
+    file_key = f"native/{f['trial_shared']}/{file_path}"
+    if native:
+        # Real native storage: no top-level key and no legacy trajectory inventory.
+        content = b'{"results": {"tests": []}}\n'
+        native_bucket = f"native-{f['trial_shared']}"
+        storage = {
+            "schema_version": "loom.canonical-trial-bundle-storage.v1",
+            "attempt": 1,
+            "files": [{"relative_path": file_path, "key": file_key,
+                       "bucket": native_bucket,
+                       "size_bytes": len(content), "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                       "media_type": "application/json"}],
+            "source_evidence": [{"relative_path": "source/_manifest.json",
+                                 "bucket": app.state.settings.artifacts_bucket,
+                                 "key": f"native/{f['trial_shared']}/_manifest.json",
+                                 "size_bytes": 2, "sha256": "sha256:" + "a" * 64,
+                                 "media_type": "application/json"}],
+        }
+        storage["files"].append({
+            **storage["files"][0], "relative_path": "result.json", "key": file_key + ".result",
+        })
+        with sessions() as s:
+            artifact = s.get(Artifact, f["safe_artifact_id"])
+            artifact.artifact_type = "loom.trial-artifact-bundle.v1"
+            artifact.storage = storage
+            artifact.content_hash = "sha256:" + "b" * 64
+            artifact.visibility = "team"
+            artifact.share_status = "pending_scan"
+            artifact.safety_state = "verified_internal"
+            artifact.redaction_state = "pending"
+            source_trial = s.get(Trial, f["trial_shared"])
+            source_trial.attempt_count = 1
+            source_trial.trajectory_index = {"artifacts": []}
+            s.commit()
+        app.state.minio_client.create_bucket(Bucket=native_bucket)
+        for item in storage["files"]:
+            app.state.minio_client.put_object(Bucket=native_bucket, Key=item["key"], Body=content)
+    url = (f"/api/v1/run-library/batches/{f['batch_shared']}/clone-config" if route == "clone"
+           else f"/api/v1/run-library/trials/{f['trial_shared']}/artifacts/reuse")
+    provider_id = f[f"conn_{destination}"]
+    payload = {"name": "derived native", "provider_connection_id": str(provider_id)}
+    if route != "clone":
+        payload["key"] = file_key if native else f["safe_key"]
+    headers = {"Authorization": f"Bearer {f[f'raw_{destination}']}"}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            if native:
+                detail = await c.get(
+                    f"/api/v1/run-library/batches/{f['batch_shared']}", headers=headers,
+                )
+                assert detail.status_code == 200, detail.text
+                items = [item for group in detail.json()["artifact_inventory"].values() for item in group]
+                selected = next((item for item in items if item["key"] == file_key), None)
+                assert selected is not None, "native bundle file missing from Run Library"
+                assert selected["can_reuse"] is True
+                assert selected["relative_path"] == "files/" + file_path
+                assert {item["key"] for item in items if item["id"] == str(f["safe_artifact_id"])} == {
+                    file_key, file_key + ".result",
+                }
+                listing = await c.get("/api/v1/run-library/artifacts", headers=headers)
+                assert any(item["key"] == file_key for item in listing.json()["items"])
+                download = await c.get(selected["download_url"], headers=headers)
+                assert download.status_code == 200 and download.content == content
+                foreign_headers = {"Authorization": f"Bearer {f['raw_b']}"}
+                foreign_payload = {**payload, "provider_connection_id": str(f["conn_b"])}
+                denied = await c.post(url, json=foreign_payload, headers=foreign_headers)
+                assert denied.status_code == 403, denied.text
+                denied_download = await c.get(selected["download_url"], headers=foreign_headers)
+                assert denied_download.status_code == 403
+                foreign_detail = await c.get(
+                    f"/api/v1/run-library/batches/{f['batch_shared']}", headers=foreign_headers,
+                )
+                assert all(
+                    item["id"] != str(f["safe_artifact_id"])
+                    for group in foreign_detail.json()["artifact_inventory"].values() for item in group
+                )
+            response = await c.post(url, json=payload, headers=headers)
+            assert response.status_code == 201, response.text
+            derived_id = UUID(response.json()["batch_id"])
+            # Follow the real persisted batch through Control Plane admission;
+            # a 201 from Run Library alone did not detect the original defect.
+            submitted = await c.post("/cp/trials", headers=headers, json={
+                "batch_id": str(derived_id), "task_id": f["task_id"], "config": config,
+                "provider_connection_id": str(provider_id),
+            })
+            assert submitted.status_code == 201, submitted.text
+            with sessions() as s:
+                derived = s.get(Batch, derived_id)
+                frozen = derived.service_execution_runtime_profile
+                current = json.loads(app.state.settings.service_execution_runtime_profile_json)
+                assert frozen["candidate_sha"] == current["candidate_sha"]
+                assert frozen["agent_image_ref"] == current["agent_image_ref"]
+                assert frozen["task_resource_requests"] == {f["task_id"]: {
+                    "task_revision_sha256": "sha256:" + "1" * 64,
+                    "requests": _NEBIUS_DEFAULT_REQUESTS,
+                }}
+                assert derived.team_id == f[f"team_{destination}"] and derived.provider_connection_id == provider_id
+                assert derived.combinations == combinations and derived.expected_trial_count == 4
+                assert derived.source_provenance[0]["source_batch_id"] == str(f["batch_shared"])
+                assert s.get(Batch, f["batch_shared"]).service_execution_runtime_profile == stale_profile
+                admitted = s.get(Trial, UUID(submitted.json()["trial_id"]))
+                assert admitted.requires_caps["worker_pool"] == "nebius-cpu"
+            if native:
+                with sessions() as s:
+                    derived = s.get(Batch, derived_id)
+                    provenance = derived.source_provenance[0]
+                    assert provenance["source_artifact_id"] == str(f["safe_artifact_id"])
+                    assert provenance["source_artifact_relative_path"] == "files/" + file_path
+                    assert provenance["source_file_sha256"] == "sha256:" + hashlib.sha256(content).hexdigest()
+                    original = s.get(Artifact, f["safe_artifact_id"])
+                    assert original.storage == storage
+                    assert original.share_status == "pending_scan"
+                    assert original.safety_state == "verified_internal"
+                    original.share_status = "blocked"
+                    original.safety_state = "unsafe"
+                    original.blocked_reason = "secret-like content detected"
+                    s.commit()
+                denied = await c.post(url, json=payload, headers=headers)
+                assert denied.status_code == 403
+                assert denied.json()["detail"] == "secret-like content detected"
+                with sessions() as s:
+                    original = s.get(Artifact, f["safe_artifact_id"])
+                    original.share_status = "pending_scan"
+                    original.safety_state = "verified_internal"
+                    original.blocked_reason = None
+                    s.commit()
+            # No profile means reject before persisting another derived batch.
+            app.state.settings = app.state.settings.model_copy(update={
+                "service_execution_runtime_profile_json": "{}",
+            })
+            rejected = await c.post(url, json={**payload, "name": "no runtime"}, headers=headers)
+            assert rejected.status_code == 400, rejected.text
+            assert "runtime_profile_unavailable" in rejected.text
+            with sessions() as s:
+                assert s.scalar(select(func.count()).select_from(Batch).where(Batch.name == "no runtime")) == 0
+    finally:
+        engine.dispose()

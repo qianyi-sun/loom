@@ -5,11 +5,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 _EDITABLE_ROOT_IMAGES = (
-    "Dockerfile.capacity-manager",
     "Dockerfile.control-plane",
     "Dockerfile.family-orchestrator",
     "Dockerfile.gateway",
-    "Dockerfile.personal-dev-activation-agent",
     "Dockerfile.pipeline-orchestrator",
     "Dockerfile.service",
     "Dockerfile.worker",
@@ -73,13 +71,13 @@ def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
 def test_control_plane_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 
-    assert "chmod -R a+rX ./src ./migrations ./capacity_guard_migrations" in text
+    assert "chmod -R a+rX ./src ./migrations ./database/capacity_guard_migrations" in text
 
 
 def test_control_plane_image_contains_capacity_guard_migrations() -> None:
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 
-    assert "COPY capacity_guard_migrations ./capacity_guard_migrations" in text
+    assert "COPY database/capacity_guard_migrations ./database/capacity_guard_migrations" in text
 
 
 def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
@@ -91,13 +89,13 @@ def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
 def test_service_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert "chmod -R a+rX ./src ./packages ./migrations ./capacity_guard_migrations" in text
+    assert "chmod -R a+rX ./src ./packages ./migrations ./database/capacity_guard_migrations" in text
 
 
 def test_service_image_contains_capacity_guard_migrations() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert "COPY capacity_guard_migrations ./capacity_guard_migrations" in text
+    assert "COPY database/capacity_guard_migrations ./database/capacity_guard_migrations" in text
 
 
 def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -> None:

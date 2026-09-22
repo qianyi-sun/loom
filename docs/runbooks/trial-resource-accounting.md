@@ -2,7 +2,7 @@
 
 Loom persists resource usage per trial attempt and execution container in
 `trial_resource_usage`. This evidence is separate from configured limits,
-Prometheus process health, provider billing, and Slurm requested resources.
+Prometheus process health, provider billing, and requested execution resources.
 
 ## Semantics
 

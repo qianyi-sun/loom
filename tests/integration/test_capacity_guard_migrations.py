@@ -20,19 +20,8 @@ from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import Task, Team, TeamQuota, Trial
-from loom_capacity_agent.contracts import AgentRegistrationV1
-from loom_capacity_agent.store import CapacityAgentStore
-from loom_capacity_guard.contracts import GuardFenceV1, canonical_digest
-from loom_capacity_guard.schema_startup import assert_capacity_guard_schema_at_head
-from loom_capacity_manager.contracts import ResourceVectorV1
-from loom_capacity_manager.executable_contracts import (
-    CandidateBindingV2,
-    ExecutableIntentBindingV2,
-    ExecutionFenceV2,
-)
 
 EXPECTED_GUARD_TABLES = {
     "capacity_guard_alembic_version",
@@ -96,30 +85,13 @@ def _value(database: dict[str, object], key: str) -> str:
 def _digest_payload(payload: dict[str, object]) -> str:
     encoded = json.dumps(
         payload,
+        default=str,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
-
-
-@pytest.mark.asyncio
-async def test_guard_schema_startup_returns_numeric_head(
-    capacity_guard_database: dict[str, object],
-) -> None:
-    engine = create_async_engine(_value(capacity_guard_database, "migrator_url"))
-    try:
-        head = await assert_capacity_guard_schema_at_head(engine)
-        assert type(head) is int
-        async with engine.connect() as connection:
-            revision = (await connection.execute(text(
-                "SELECT version_num FROM loom_capacity_guard.capacity_guard_alembic_version"
-            ))).scalar_one()
-        # Compare to the actual migrated database, not a second stale head pin.
-        assert revision == f"guard_{head:04d}"
-    finally:
-        await engine.dispose()
 
 
 @contextmanager
@@ -231,46 +203,11 @@ def _insert_foundation_rows(connection: Any, trial_id: UUID) -> tuple[UUID, UUID
     return protected_attempt_id, subject_id
 
 
-def _executable_binding(subject_id: UUID, subject_incarnation: UUID) -> ExecutableIntentBindingV2:
-    return ExecutableIntentBindingV2(
-        execution=ExecutionFenceV2(
-            authority_incarnation=UUID(int=101),
-            writer_epoch=3,
-            configuration_epoch=5,
-            execution_epoch=7,
-            execution_manifest_sha256="1" * 64,
-            execution_state="active",
-            executable_new_capacity_ceiling=1,
-            executable_new_capacity_rate_per_minute=1,
-            trusted_fleet_release_sha256="2" * 64,
-            allocation_epoch=11,
-        ),
-        tranche_id=UUID(int=102),
-        intent_id=UUID(int=103),
-        shape_instance_id="oldlab-shape-0001",
-        subject_id=subject_id,
-        subject_incarnation=subject_incarnation,
-        account_id="owner-alice",
-        tier_id="development",
-        candidate=CandidateBindingV2(
-            algorithm="git-sha1",
-            identity="a" * 40,
-            publication_sha256="a" * 64,
-        ),
-        candidate_generation=7,
-        deployment_generation=7,
-        pool_id="oldlab",
-        pool_generation=13,
-        executor_id="oldlab-executor",
-        executor_incarnation=UUID(int=104),
-        shape_id="oldlab-cpu-small",
-        profile_id="oldlab-default",
-        profile_generation=17,
-        profile_digest="3" * 64,
-        concurrency_slots=1,
-        resources=ResourceVectorV1(slots=1, cpu_millicores=1000, memory_bytes=1024),
-        node_ids=("oldlab-node-01",),
-    )
+def _executable_binding(subject_id: UUID, subject_incarnation: UUID) -> dict[str, Any]:
+    payload = json.loads((Path(__file__).parents[1] / "fixtures" / "historical" /
+                          "capacity_observation_binding.json").read_text())
+    payload.update(subject_id=str(subject_id), subject_incarnation=str(subject_incarnation))
+    return payload
 
 
 def _seed_executable_observation_rows(
@@ -284,7 +221,7 @@ def _seed_executable_observation_rows(
     worker_id = uuid4()
     worker_incarnation = uuid4()
     binding = _executable_binding(subject_id, subject_incarnation)
-    binding_json = json.dumps(binding.model_dump(mode="json"), sort_keys=True)
+    binding_json = json.dumps(binding, sort_keys=True)
     connection.execute(
         text(
             "INSERT INTO loom_capacity_guard.authority_state "
@@ -298,7 +235,7 @@ def _seed_executable_observation_rows(
         {
             "subject_id": subject_id,
             "subject_incarnation": subject_incarnation,
-            "authority_incarnation": binding.execution.authority_incarnation,
+            "authority_incarnation": binding["execution"]["authority_incarnation"],
             "reporter_incarnation": uuid4(),
             "digest": "b" * 64,
         },
@@ -319,7 +256,7 @@ def _seed_executable_observation_rows(
             "agent_incarnation": agent_incarnation,
             "subject_id": subject_id,
             "subject_incarnation": subject_incarnation,
-            "authority_incarnation": binding.execution.authority_incarnation,
+            "authority_incarnation": binding["execution"]["authority_incarnation"],
             "reporter_incarnation": uuid4(),
             "digest": "c" * 64,
         },
@@ -333,7 +270,7 @@ def _seed_executable_observation_rows(
             "0, 0, false)"
         ),
         {
-            "intent_id": binding.intent_id,
+            "intent_id": UUID(binding["intent_id"]),
             "subject_id": subject_id,
             "subject_incarnation": subject_incarnation,
             "binding": binding_json,
@@ -358,7 +295,7 @@ def _seed_executable_observation_rows(
             "agent_incarnation": agent_incarnation,
             "subject_id": subject_id,
             "subject_incarnation": subject_incarnation,
-            "intent_id": binding.intent_id,
+            "intent_id": UUID(binding["intent_id"]),
             "worker_id": worker_id,
             "worker_incarnation": worker_incarnation,
             "worker_credential_sha256": "d" * 64,
@@ -385,7 +322,7 @@ def _seed_executable_observation_rows(
                 "agent_incarnation": agent_incarnation,
                 "subject_id": subject_id,
                 "subject_incarnation": subject_incarnation,
-                "intent_id": binding.intent_id,
+                "intent_id": UUID(binding["intent_id"]),
                 "bootstrap_sha256": "f" * 64,
                 "binding": binding_json,
                 "request_payload": '{"schema_version":2}',
@@ -396,7 +333,7 @@ def _seed_executable_observation_rows(
     return (
         subject_id,
         subject_incarnation,
-        binding.intent_id,
+        UUID(binding["intent_id"]),
         worker_id,
         worker_incarnation,
     )
@@ -937,8 +874,8 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
 
 def _guard_config(database: dict[str, object]) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
@@ -2704,9 +2641,8 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
     """Upgraded guard_0015 agent registrations must replay against current audits."""
 
     cfg = _guard_config(capacity_guard_database)
-    owner_role = _value(capacity_guard_database, "owner_role")
-    agent_role = _value(capacity_guard_database, "agent_role")
-    fence = GuardFenceV1(
+    fence = dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+
         environment_id="dev-legacy-audit",
         subject_id=uuid4(),
         subject_incarnation=uuid4(),
@@ -2716,18 +2652,22 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
         configuration_generation=11,
         candidate_digest="c" * 64,
     )
-    registration = AgentRegistrationV1(
-        environment_id=fence.environment_id,
-        subject_id=fence.subject_id,
-        subject_incarnation=fence.subject_incarnation,
-        authority_incarnation=fence.authority_incarnation,
+    registration = dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+        candidate_identity_algorithm="source-sha256",
+
+        environment_id=fence["environment_id"],
+        subject_id=fence["subject_id"],
+        subject_incarnation=fence["subject_incarnation"],
+        authority_incarnation=fence["authority_incarnation"],
         agent_incarnation=uuid4(),
-        reporter_incarnation=fence.reporter_incarnation,
-        candidate_digest=fence.candidate_digest,
-        deployment_generation=fence.deployment_generation,
-        configuration_generation=fence.configuration_generation,
+        reporter_incarnation=fence["reporter_incarnation"],
+        candidate_digest=fence["candidate_digest"],
+        deployment_generation=fence["deployment_generation"],
+        configuration_generation=fence["configuration_generation"],
     )
-    legacy_registration_payload = registration.model_dump(mode="json", exclude_none=False)
+    registration.update(candidate_identity=registration["candidate_digest"],
+                        candidate_publication_sha256=registration["candidate_digest"])
+    legacy_registration_payload = json.loads(json.dumps(registration, default=str))
     for field in (
         "candidate_identity_algorithm",
         "candidate_identity",
@@ -2748,7 +2688,7 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
                 "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, "
                 ":deployment_generation, :configuration_generation, :candidate_digest)"
             ),
-            fence.model_dump(mode="python", exclude_none=False),
+            fence,
         )
         connection.execute(
             text(
@@ -2757,8 +2697,8 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
                 "VALUES ('authority_initialized.v1', CAST(:payload AS jsonb), :digest)"
             ),
             {
-                "payload": json.dumps(fence.model_dump(mode="json", exclude_none=False)),
-                "digest": canonical_digest(fence),
+                "payload": json.dumps(fence, default=str),
+                "digest": _digest_payload(fence),
             },
         )
         connection.execute(
@@ -2774,14 +2714,14 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
                 "'disabled', 0, :candidate_digest, :deployment_generation, "
                 ":configuration_generation, 'registered')"
             ),
-            registration.model_dump(mode="python", exclude_none=False),
+            registration,
         )
         connection.execute(
             text(
                 "INSERT INTO loom_capacity_guard.agent_reporter_state "
                 "(agent_incarnation, high_water) VALUES (:agent_incarnation, 0)"
             ),
-            {"agent_incarnation": registration.agent_incarnation},
+            {"agent_incarnation": registration["agent_incarnation"]},
         )
         connection.execute(
             text(
@@ -2796,23 +2736,17 @@ async def test_guard_0016_backfills_legacy_agent_registration_audit_for_replay(
         )
 
     command.upgrade(cfg, "head")
-    engine = create_async_engine(
-        make_url(_value(capacity_guard_database, "migrator_url")),
-        isolation_level="SERIALIZABLE",
-    )
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    quoted_owner = engine.sync_engine.dialect.identifier_preparer.quote(owner_role)
+    engine = create_engine(_value(capacity_guard_database, "admin_url"))
     try:
-        async with factory() as session, session.begin():
-            await session.execute(text(f"SET LOCAL ROLE {quoted_owner}"))
-            store = CapacityAgentStore(
-                session,
-                expected_owner_role=owner_role,
-                expected_agent_role=agent_role,
-            )
-            assert await store.register_agent(registration) == registration
+        with engine.connect() as connection:
+            payload, digest = connection.execute(text(
+                "SELECT payload, payload_digest FROM loom_capacity_guard.audit_events "
+                "WHERE event_type='agent_registered.v1'"
+            )).one()
+        assert payload == json.loads(json.dumps(registration, default=str))
+        assert digest == _digest_payload(registration)
     finally:
-        await engine.dispose()
+        engine.dispose()
 
 
 def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_digest(
@@ -2821,7 +2755,8 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
     """Legacy register/reconfigure audits keep their event-time candidate identity."""
 
     cfg = _guard_config(capacity_guard_database)
-    fence_a = GuardFenceV1(
+    fence_a = dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+
         environment_id="dev-legacy-audit-history",
         subject_id=uuid4(),
         subject_incarnation=uuid4(),
@@ -2831,31 +2766,39 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
         configuration_generation=11,
         candidate_digest="c" * 64,
     )
-    registration_a = AgentRegistrationV1(
-        environment_id=fence_a.environment_id,
-        subject_id=fence_a.subject_id,
-        subject_incarnation=fence_a.subject_incarnation,
-        authority_incarnation=fence_a.authority_incarnation,
+    registration_a = dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+        candidate_identity_algorithm="source-sha256",
+
+        environment_id=fence_a["environment_id"],
+        subject_id=fence_a["subject_id"],
+        subject_incarnation=fence_a["subject_incarnation"],
+        authority_incarnation=fence_a["authority_incarnation"],
         agent_incarnation=uuid4(),
-        reporter_incarnation=fence_a.reporter_incarnation,
-        candidate_digest=fence_a.candidate_digest,
-        deployment_generation=fence_a.deployment_generation,
-        configuration_generation=fence_a.configuration_generation,
+        reporter_incarnation=fence_a["reporter_incarnation"],
+        candidate_digest=fence_a["candidate_digest"],
+        deployment_generation=fence_a["deployment_generation"],
+        configuration_generation=fence_a["configuration_generation"],
     )
-    registration_b = AgentRegistrationV1(
-        environment_id=fence_a.environment_id,
-        subject_id=fence_a.subject_id,
-        subject_incarnation=fence_a.subject_incarnation,
-        authority_incarnation=fence_a.authority_incarnation,
-        agent_incarnation=registration_a.agent_incarnation,
+    registration_b = dict(schema_version=1, authority_mode="disabled", reporter_high_water=0, allocation_epoch=0,
+        candidate_identity_algorithm="source-sha256",
+
+        environment_id=fence_a["environment_id"],
+        subject_id=fence_a["subject_id"],
+        subject_incarnation=fence_a["subject_incarnation"],
+        authority_incarnation=fence_a["authority_incarnation"],
+        agent_incarnation=registration_a["agent_incarnation"],
         reporter_incarnation=uuid4(),
         candidate_digest="d" * 64,
         deployment_generation=8,
         configuration_generation=12,
     )
 
-    def legacy_payload(registration: AgentRegistrationV1) -> dict[str, object]:
-        payload = registration.model_dump(mode="json", exclude_none=False)
+    for record in (registration_a, registration_b):
+        record.update(candidate_identity=record["candidate_digest"],
+                      candidate_publication_sha256=record["candidate_digest"])
+
+    def legacy_payload(registration: dict[str, Any]) -> dict[str, object]:
+        payload = json.loads(json.dumps(registration, default=str))
         for field in (
             "candidate_identity_algorithm",
             "candidate_identity",
@@ -2880,7 +2823,7 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
                 "'disabled', :authority_incarnation, :reporter_incarnation, 0, 0, "
                 ":deployment_generation, :configuration_generation, :candidate_digest)"
             ),
-            fence_a.model_dump(mode="python", exclude_none=False),
+            fence_a,
         )
         connection.execute(
             text(
@@ -2895,14 +2838,14 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
                 "'disabled', 0, :candidate_digest, :deployment_generation, "
                 ":configuration_generation, 'registered')"
             ),
-            registration_a.model_dump(mode="python", exclude_none=False),
+            registration_a,
         )
         connection.execute(
             text(
                 "INSERT INTO loom_capacity_guard.agent_reporter_state "
                 "(agent_incarnation, high_water) VALUES (:agent_incarnation, 0)"
             ),
-            {"agent_incarnation": registration_a.agent_incarnation},
+            {"agent_incarnation": registration_a["agent_incarnation"]},
         )
         connection.execute(
             text(
@@ -2925,7 +2868,7 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
                 "updated_at = updated_at + interval '1 second' "
                 "WHERE singleton_id = 1"
             ),
-            registration_b.model_dump(mode="python", exclude_none=False),
+            registration_b,
         )
         connection.execute(
             text(
@@ -2936,7 +2879,7 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
                 "configuration_generation = :configuration_generation "
                 "WHERE agent_incarnation = :agent_incarnation"
             ),
-            registration_b.model_dump(mode="python", exclude_none=False),
+            registration_b,
         )
         connection.execute(
             text(
@@ -2973,13 +2916,13 @@ def test_guard_0016_backfills_legacy_agent_audits_from_event_time_candidate_dige
     expected = [
         (
             "agent_registered.v1",
-            registration_a.model_dump(mode="json", exclude_none=False),
-            canonical_digest(registration_a),
+            json.loads(json.dumps(registration_a, default=str)),
+            _digest_payload(registration_a),
         ),
         (
             "agent_reconfigured.v1",
-            registration_b.model_dump(mode="json", exclude_none=False),
-            canonical_digest(registration_b),
+            json.loads(json.dumps(registration_b, default=str)),
+            _digest_payload(registration_b),
         ),
     ]
     assert [(row["event_type"], row["payload"], row["payload_digest"]) for row in rows] == expected
@@ -3117,7 +3060,7 @@ def test_lifecycle_projection_has_bounded_unresolved_blocker_access_path(
 
 
 def test_guard_alembic_environment_has_no_database_fallback() -> None:
-    source = Path("capacity_guard_migrations/env.py").read_text(encoding="utf-8")
+    source = Path("database/capacity_guard_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
@@ -3130,7 +3073,7 @@ def test_guard_alembic_environment_has_no_database_fallback() -> None:
 
 def test_guard_alembic_logging_formatter_is_valid() -> None:
     config = ConfigParser(interpolation=None)
-    assert config.read("capacity_guard_migrations/alembic.ini")
+    assert config.read("database/capacity_guard_migrations/alembic.ini")
     formatter = Formatter(
         config["formatter_generic"]["format"],
         datefmt=config["formatter_generic"]["datefmt"],
@@ -3144,8 +3087,8 @@ def test_guard_migration_requires_explicit_canonical_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
 
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_DB_URL", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_OWNER_ROLE", raising=False)
@@ -3210,8 +3153,8 @@ def test_guard_migration_login_must_be_owner_member(
         password=password,
     )
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     try:
         with engine.begin() as connection:
             connection.exec_driver_sql(
@@ -3247,8 +3190,8 @@ def test_guard_migration_rejects_superuser_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     monkeypatch.setenv("LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "admin_url"))
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")

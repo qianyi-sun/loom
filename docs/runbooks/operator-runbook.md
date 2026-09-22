@@ -1,6 +1,6 @@
 # Loom operator runbook
 
-This is the current operating reference for shared and production Loom
+This is the current operating reference for Nebius-hosted Loom
 deployments. Component behavior belongs in the
 [architecture documentation](../architecture/README.md); local-only setup is
 covered by the [local development runbook](local-dev-workflow.md).
@@ -17,21 +17,14 @@ GitHub Environment secrets separate.
 | staging | pinned `dev` SHA | `loom-staging` | `https://yylx.world/staging` | `https://yylx.world/staging/api` |
 | production | `main` | `loom-prod` | `https://yylx.world/prod` | `https://yylx.world/prod/api` |
 
-The checked-in profiles are under `deploy/environments/`. Validate their
-identity and the deployment workflow before promotion:
+Use the [native Nebius deployment procedure](nebius-deployment.md) with
+reviewed environment JSON, signed candidate, runtime profile and trusted keyring.
+The shared-cluster deployment workflow is retired. Automated hosted rollout is
+unavailable until environment-specific native inputs and approval wiring are
+reviewed; repository examples do not establish live staging or production identity.
 
-```bash
-uv run --no-sync python scripts/validate_environment_isolation.py \
-  --profiles-dir deploy/environments \
-  --workflow .github/workflows/deploy-environment.yml \
-  --dry-run-artifact release-evidence/environment-isolation-dry-run.json
-```
-
-The generic `.github/workflows/deploy-environment.yml` deployment path owns
-development and production only. It rejects staging; validation of the staging
-profile here does not grant the hosted workflow staging mutation authority.
-
-Dry-run evidence may contain safe secret references, but never credentials,
+Release promotion still requires candidate evidence and production approval.
+Evidence may contain safe secret references, never credentials,
 bearer tokens, signed URLs, object-store keys, or provider API keys.
 
 ## Locked operator environment
@@ -48,197 +41,19 @@ The rollout extra installs the implementations under
 After syncing, use `uv run --no-sync` so an operational command cannot change
 the environment implicitly.
 
-## Shared staging
+## Hosted deployment
 
-> **Shared-staging invariant:** only the root-installed rollout authority may
-> mutate `loom-staging`. It fresh-fetches its configured remote, admits only
-> the configured merged branch head (`refs/heads/dev` for staging), binds a
-> request to that immutable candidate, creates the protected backup, and owns
-> the complete rollout lifecycle. Unmerged pull-request refs, personal
-> checkouts, caller-supplied SHAs, and direct lower-level cluster mutations are
-> rejected.
+Nebius is the only supported hosted platform. Use the
+[Nebius deployment procedure](nebius-deployment.md), including its exact
+cluster identity, backup, migration, readiness and evidence checks. The
+shared-cluster rollout broker and remote-worker deployment paths are retired.
+`loom cluster up` accepts disposable development targets only.
 
-`loom-staging-rollout --env staging start` is the only staging mutation path.
-Hosted workflow dispatch cannot substitute for the installed authority's
-host-local secrets, shared lock, protected backup, isolated rehearsal, or final
-gate evidence.
-
-Use the installed client:
-
-```bash
-loom-staging-rollout --env staging preflight
-loom-staging-rollout --env staging start --dry-run
-loom-staging-rollout --env staging start
-loom-staging-rollout --env staging status REQUEST_ID
-loom-staging-rollout --env staging logs REQUEST_ID
-loom-staging-rollout --env staging logs REQUEST_ID --follow
-loom-staging-rollout --env staging resume REQUEST_ID
-loom-staging-rollout --env staging cancel REQUEST_ID --reason "bounded operational reason"
-loom-staging-rollout --env staging cleanup-incomplete-backup REQUEST_ID
-loom-staging-rollout --env staging lifecycle-capacity inventory --artifact-bundle-sha256 DIGEST
-loom-staging-rollout --env staging lifecycle-capacity apply --artifact-bundle-sha256 DIGEST --approved-plan-sha256 SHA256
-loom-staging-rollout --env staging backup-recovery inventory
-loom-staging-rollout --env staging backup-recovery apply --approved-plan-sha256 SHA256
-loom-staging-rollout --env staging backup-retention inventory
-loom-staging-rollout --env staging backup-retention apply --approved-plan-sha256 SHA256
-```
-
-`start` accepts no ref, SHA, image tag, checkout, secret, or passthrough
-argument. `--dry-run` validates authority and resolves the current candidate
-without mutating staging. `status` and `logs` expose redacted request evidence.
-When a protected component is incomplete, `status` includes
-`protected_component` and `protected_component_status`. If that component
-published a validated service-owned failure diagnostic, the response also
-includes its closed-schema `protected_failure_code` and certified secret-safe
-`protected_failure_diagnostic`; missing or invalid diagnostic records remain
-private.
-Use the `preflight_artifact_bundle_sha256` value returned by a passing
-`preflight` or `start` command as `DIGEST`; use the same value for inventory and
-apply.
-Use `resume` only for the same immutable request after correcting its failure;
-use a merged revert on `dev` and a new request to roll code back.
-
-If a detached backup job is already `backup_verified`, `launch_pending`, or
-`launch_running` while rotation still contains its manifest-verified candidate,
-do not use incomplete-backup cleanup and do not edit the rotation files. While
-the lifecycle is maintenance-idle, inspect `backup-recovery inventory`, approve
-the exact printed plan digest, and apply that digest. Then inspect and separately
-approve `backup-retention` to retire the prior active payload. Exact replay is
-idempotent; any lease, attestation, request, Attempt, or rotation drift is a
-hard refusal.
-
-These two rotation-maintenance commands are supported by both installed source
-modes, including an exact pinned `merged-dev` install. Do not reinstall into a
-sealed mode or edit rotation data to gain maintenance access. Source mode is
-not their authority boundary: the broker still requires a coordinator caller,
-the staging/`loom-staging` install binding, the lifecycle launch lock,
-maintenance-idle state, canonical immutable evidence, and the exact inventory
-digest for apply. Manifest ownership remains a separate explicit installer
-opt-in because it mutates candidate-derived Kubernetes resources.
-
-If a host upgrade instead reports an active rollout solely because an older
-nonterminal preflight-backup record survives after its owner units disappeared,
-do not edit `state.json`, invent a lifecycle transition, or delete its bundle.
-Run the installer from a clean, root-owned checkout of the exact merged `dev`
-commit and review the bounded recovery inventory:
-
-```bash
-sudo -n python3 scripts/ops/staging_rollout_host.py \
-  orphaned-backup-recovery inventory
-sudo -n python3 scripts/ops/staging_rollout_host.py \
-  orphaned-backup-recovery apply --approved-plan-sha256 SHA256
-```
-
-The command authenticates that checkout as the exact current merged `dev` head,
-proves the installed source is its ancestor, and validates its rollout assets
-before entering maintenance. This includes a ready `sealed-cumulative`
-installation only when its exact recorded commit has since landed in current
-`dev`; an unmerged sealed source refuses, and recovery does not change the
-installation mode. Run the normal merged-dev installer after recovery. Apply is
-authorized only by the exact inventory digest. It requires no active pointer or
-live rollout/backup/guard unit, rejects
-malformed canonical rotation/job/state/lease evidence at publication and again
-at every receipt use, rejects any payload still present in
-active/candidate/retirement rotation state, and refuses a request for either the
-installed candidate or the authenticated current-`dev` candidate. Recovery Git
-uses sanitized configuration and rejects replace refs, grafts, shallow history,
-and local or HTTP object alternates. Every recovered candidate must be a Git
-ancestor of that authenticated head and its immutable job tree must equal Git's
-exact candidate tree; unknown, unrelated, or tree-forged history refuses
-recovery. Apply repeats this history check on the exact recomputed plan whose
-approved digest will be published. Inventory is capped at 10,000 requests and
-each of the two systemd inventories is capped at 30 seconds.
-
-A process-level watchdog starts before the lifecycle lock and enforces one
-600-second monotonic deadline across authentication, external commands,
-filesystem work, maintenance, and publication. No receipt replacement begins
-after its final post-fsync deadline check. The watchdog requires the main thread
-and refuses before lifecycle mutation when a foreign `ITIMER_REAL` is active or
-`SIGALRM` is pending; it never consumes or replaces another subsystem's timer or
-pending signal. Otherwise it captures the main-thread identity, installs and
-unblocks its `SIGALRM` handler, and starts a dedicated sender thread. The sender
-waits on the monotonic deadline and then uses `signal.pthread_kill` to target the
-main thread; the watchdog never arms `ITIMER_REAL`. During restoration, an owned
-delivery immediately before the signal block is recorded and blocking is retried
-within a fixed bound. Once blocking is independently verified, the helper sets
-the sender cancellation event, bounded-joins the sender, and verifies that it
-stopped. With the watchdog handler still installed, it then drains and verifies
-owned pending delivery before restoring and verifying the prior handler and exact
-mask. If blocking cannot be proven, restoration aborts before restoring the
-recorded handler or mask; it leaves the current handler unchanged and reports
-that the mask state is unverified. After blocking is proven, a sender-stop,
-handler-ownership, or pending-delivery proof failure leaves `SIGALRM` blocked and
-the current handler unchanged. A later exact-mask restoration failure is safe
-because the sender is stopped and its pending delivery is already drained.
-Restoration failure outranks owned expiry, owned expiry outranks a body error,
-and an unrelated body error is otherwise preserved.
-
-Maintenance enable owns and rolls back its previously empty marker slot across
-the create-return boundary, while recovery owns cleanup before enable begins
-and removes a successful marker without a second status probe. An absent marker
-is an immediate idempotent cleanup. Cleanup uses the original absolute deadline
-and the exact service UID/GID authenticated at maintenance enable; it performs
-no fresh NSS identity lookup after expiry. It uses nonblocking launch-lock
-attempts bounded by the same monotonic deadline after sender delivery is
-observed. Cleanup starts no second sender and polls that absolute deadline
-instead. Lock wait remains normally interruptible before delivery. If the cached
-identity is unavailable or the lock is unavailable at expiry, recovery returns
-an error and retains the marker. Only after lock acquisition and marker
-validation is `SIGALRM` deferred across unlink plus directory fsync; a timeout
-pending there is reported immediately after that critical section. A host stuck
-in kernel uninterruptible I/O cannot be preempted by userspace; if the command
-itself does not return, treat that as a fail-closed host fault and diagnose the
-host rather than rerunning or deleting the marker.
-
-Apply publishes a root-owned receipt bound to the exact unchanged candidate,
-job, and state. Plans retain already-receipted eligible items, so the same
-approved digest is replay-safe after success or partial publication. A later
-byte change, renewed rotation reference, or selection of the receipt's candidate
-as either the installed or prospective install source invalidates its authority
-and blocks installation again. The live-rotation lookup uses the payload ID from
-the exact job bytes that validated the receipt, not a second job read. Uninstall
-explicitly retains the service state and root receipt directory while removing
-the tmpfiles asset and ephemeral runtime directory; a fresh reinstall
-detects any path entry at either retained namespace immediately after invocation
-authentication and before install-source or transaction root-directory
-convergence. A non-directory or symlink refuses there. A safe directory entry
-selects the later fence, which authenticates the retained service identity,
-bootstraps only the fixed `0700` runtime directory, and proves service state,
-marker, and unit authority before install-record, account, service-directory,
-candidate, runtime, or admission convergence. Receipt-root and receipt-file
-semantics are checked only when an active durable request can consume the
-receipt; unsafe receipt metadata never authorizes it. This migration attests
-that the historical record no longer owns work; it does not mutate the
-service-owned history or clean backup data. Until that exact receipt exists, a
-nonterminal durable phase blocks the host even when its unit has disappeared.
-Host inactivity brackets the owner-unit inventory with two complete retained
-state reads so a worker's final atomic publication cannot race the decision.
-
-The broker enforces a single environment lifecycle owner. Broker unavailability
-does not grant authority for direct mutation. See
-[Protected Staging Rollout](../architecture/staging-rollout.md) for the
-persistence and refusal contract and [Staging Release Validation](staging-launch.md)
-for the current acceptance checks.
-
-## Unprotected and custom clusters
-
-For an operator-authorized custom cluster, inspect before applying:
-
-```bash
-uv run --no-sync loom cluster preflight --config cluster-config.toml
-uv run --no-sync loom cluster render --config cluster-config.toml > /tmp/loom-rendered.yaml
-uv run --no-sync loom cluster audit --config cluster-config.toml
-uv run --no-sync loom cluster up --config cluster-config.toml --migrate
-uv run --no-sync loom cluster status --config cluster-config.toml
-```
-
-Use `loom cluster reconcile --shadow` for a read-only desired-vs-live drift
-report. `loom cluster down` preserves PVCs and the namespace unless explicit
-volume or namespace deletion flags are supplied. Never use these direct
-mutation commands against shared staging.
-
-The checked-in multi-node staging deployment has its own
-[k3s procedure](deploy-staging-k3s.md).
+Hosted desktop/GUI and Behavior GPU execution is unavailable. Several pipeline
+classes still require Nebius conversion; see the
+[retirement record](../historical/shared-cluster-retirement-2026-09.md).
+Local execution remains available. A deployment smoke check does not prove
+workload parity or full recovery acceptance.
 
 ## Workload trust boundary
 
@@ -453,8 +268,8 @@ an arbitrary branch or tag.
 
 1. Choose the 40-character candidate SHA, built image tag or digest, and a new
    immutable SemVer `prod_tag` such as `v1.2.3`.
-2. Deploy the exact candidate to shared staging through the installed rollout
-   authority and complete [staging validation](staging-launch.md).
+2. Deploy the exact candidate to Nebius staging through the Nebius deployment
+   procedure and complete [staging validation](staging-launch.md).
 3. Build the structured release manifest required by
    `scripts/ops/release_gate.py`, including image digests, frontend route
    evidence, `prod_staging_isolation`, `raw_delivery_export_status`, rollback
@@ -470,9 +285,11 @@ an arbitrary branch or tag.
    `main-promotion-gate` is the only merge authority for `main`.
    If `dev` advances, select and validate the new head rather than reusing stale
    evidence.
-6. Dispatch `.github/workflows/deploy-environment.yml` from `main` with
-   `environment=production`, the same `candidate_sha` and `image_tag`, and the
-   successful `release_gate_run_id`.
+6. For `environment=production`, verify the same `candidate_sha` and `image_tag`
+   with the successful `release_gate_run_id` using
+   `scripts/ops/verify_production_release_gate.sh` from `main`. Retain Production
+   Environment approval and reviewed native target evidence before following the
+   Nebius deployment procedure. The retired workflow cannot deploy this release.
 7. Put the recorded immutable `prod_tag` on the merged `main` commit. Never
    reuse or force-move a published production tag.
 
@@ -504,8 +321,7 @@ but is not dispatched by this CLI.
 
 ## Credential rotation
 
-For worker tokens, overlap old and new credentials until every in-cluster and
-remote worker has re-registered with the new token:
+For worker tokens, overlap old and new credentials until every local development worker has re-registered with the new token:
 
 ```text
 loom admin tokens worker rotate --help
@@ -538,7 +354,7 @@ recent rollouts, queue/worker inventory, and dependency metrics.
 | Control Plane | `LoomStatePatchTimeouts`, `LoomControlPlaneDown` | `/healthz`, pod logs, Postgres/PgBouncer, rollout state |
 | Gateway | `LoomLLMGatewayDown`, `LoomGatewayProviderErrorRate`, `LoomGatewayCostSpike` | Gateway health, provider connection status, upstream errors and usage attribution |
 | service/API | `LoomServiceDown`, `LoomServiceHighErrorRate`, `LoomServiceAuthFailureSpike`, `LoomServiceSubmissionRejectSpike` | `/api/v1/health`, ingress, auth audit events, rejection reasons |
-| workers | `LoomWorkerProcessDown`, `LoomWorkerHeartbeatFailing`, `LoomWorkerTrialFailureRateHigh`, `LoomWorkerTokenStaleness` | Host/process health, heartbeat age, Docker/Slurm capacity, token generation |
+| workers | `LoomWorkerProcessDown`, `LoomWorkerHeartbeatFailing`, `LoomWorkerTrialFailureRateHigh`, `LoomWorkerTokenStaleness` | Host/process health, heartbeat age, local Docker capacity, token generation |
 | pooling/listen | `LoomPgbouncerClientWaiting`, `LoomPgbouncerScrapeDown`, `LoomListenWatcherPollFallback` | Pool saturation, exporter health, database reachability and LISTEN fallback |
 | object storage | `LoomMinioPVCUsageHigh`, `LoomMinioPVCUsageCritical`, `LoomMinioWriteLatencyHigh`, `LoomMinioRequestErrorRateHigh`, `LoomMinioNodeOffline` | PVC and bucket usage, node/quorum state, write latency, lifecycle rules |
 | Pipelines | `LoomPipelineStageQueueStuck`, `LoomPipelineStageDeadlineOverrun`, `LoomPipelineControllerReconcileErrors`, `LoomPipelineForcedCancellation`, `LoomPipelineCheckpointStale`, `LoomPipelineArtifactCommitFailures`, `LoomPipelineGpuAllocatedIdle` | Pipeline list/show/watch, Pipeline panels, scoped controller/worker logs, authority boundary |
@@ -597,7 +413,7 @@ been verified.
 
 ### Pipeline GPU allocated idle
 
-`loom_pipeline_gpu_allocated_idle_seconds` measures a leased local GPU Attempt whose expected process group is absent or cleanup is pending; low utilization is intentionally excluded. More than 300 seconds for 10 minutes is critical. Inspect the closed cluster/reason series, `loom pipeline list/show/watch`, and scoped worker/Slurm logs. Drain or cancel only under worker/cluster authority; do not kill an unidentified process from metric labels.
+`loom_pipeline_gpu_allocated_idle_seconds` measures a leased local GPU Attempt whose expected process group is absent or cleanup is pending; low utilization is intentionally excluded. More than 300 seconds for 10 minutes is critical. Inspect the reason series, `loom pipeline list/show/watch`, and local worker logs. Drain or cancel only under appropriate operational authority; do not kill an unidentified process from metric labels.
 
 ## Incident handoff
 

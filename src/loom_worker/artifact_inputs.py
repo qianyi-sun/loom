@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 
@@ -22,8 +22,6 @@ from loom.pipeline.keys import canonical_document, canonical_identity, digest_by
 from loom.pipeline.spec import BindingItemV1, BindingSetV1
 from loom.pipeline.work_protocol import (
     ExecutionAttemptClaimV1,
-    PipelineInputMaterializationEvidenceRefV1,
-    PipelineInputMaterializationEvidenceReportV1,
     StageRequestGrantV1,
 )
 from loom_worker.artifact_input_journal import (
@@ -178,7 +176,6 @@ class MaterializedInputSet:
     counters: MaterializationCounters = field(default_factory=MaterializationCounters)
     _entered: bool = False
     _closed: bool = False
-    _evidence_reported: bool = False
 
     async def __aenter__(self) -> MaterializedInputSet:
         if self._entered or self._closed:
@@ -195,60 +192,6 @@ class MaterializedInputSet:
             return
         self._closed = True
         await self.materializer._release(self)
-
-    def acceptance_evidence_report(
-        self, *, worker_id: UUID
-    ) -> PipelineInputMaterializationEvidenceReportV1:
-        if not self._entered or self._closed or self.input_view_digest is None:
-            raise ArtifactInputError("materialization_evidence_phase")
-        grant = self.claim.acceptance_preflight
-        if grant is None:
-            raise ArtifactInputError("materialization_evidence_not_applicable")
-        manifests = [
-            item.manifest_sha256
-            for binding in self.claim.input_bindings
-            for item in binding.items
-        ]
-        return PipelineInputMaterializationEvidenceReportV1(
-            schema_version="loom.pipeline-input-materialization-evidence-report.v1",
-            execution_attempt_id=self.claim.execution_attempt_id,
-            worker_id=worker_id,
-            lease_epoch=self.claim.lease_epoch,
-            cache_expectation=grant.cache_expectation,
-            ordered_manifest_sha256s=manifests,
-            manifest_open_count=self.counters.manifest_open_count,
-            file_open_count=self.counters.file_open_count,
-            file_bytes=self.counters.file_bytes,
-            archive_extraction_count=self.counters.archive_extraction_count,
-            cas_rename_count=self.counters.cas_rename_count,
-            input_view_sha256=self.input_view_digest,
-        )
-
-    async def report_acceptance_evidence(
-        self,
-        *,
-        control_plane: HttpControlPlaneClient,
-        worker_id: UUID,
-        request_id: UUID,
-    ) -> PipelineInputMaterializationEvidenceRefV1:
-        if self._evidence_reported:
-            raise ArtifactInputError("materialization_evidence_already_reported")
-        report = self.acceptance_evidence_report(worker_id=worker_id)
-        response = await control_plane.report_input_materialization_evidence(
-            attempt_id=self.claim.execution_attempt_id,
-            claim=ArtifactInputReadClient._headers(self.claim),
-            request_id=request_id,
-            payload=report.model_dump(mode="json"),
-        )
-        reference = PipelineInputMaterializationEvidenceRefV1.model_validate(response)
-        if (
-            reference.attempt_id != self.claim.execution_attempt_id
-            or reference.worker_id != worker_id
-            or reference.lease_epoch != self.claim.lease_epoch
-        ):
-            raise ArtifactInputError("materialization_evidence_response_drift")
-        self._evidence_reported = True
-        return reference
 
 
 @dataclass
@@ -456,53 +399,12 @@ class ArtifactInputMaterializer:
         view_records: list[dict[str, str]] = []
         try:
             bindings = self._claim_bindings(claim)
-            prefetched: dict[tuple[str, str], ArtifactManifestV1] = {}
-            if claim.acceptance_preflight is not None:
-                if [binding.binding_name for binding in bindings] != [
-                    "task_set",
-                    "task_instances",
-                    "dataset",
-                    "policy",
-                    "mop_bank",
-                ] or any(len(binding.items) != 1 for binding in bindings):
-                    raise ArtifactInputError("input_descriptor_drift")
-                acceptance_manifests = [
-                    binding.items[0].manifest_sha256 for binding in bindings
-                ]
-                if len(set(acceptance_manifests)) != 5:
-                    raise ArtifactInputError("input_descriptor_drift")
-                for binding in bindings:
-                    item = binding.items[0]
-                    prefetched[(binding.binding_name, item.item_key)] = (
-                        await self.read_client.read_manifest(
-                            claim=claim,
-                            binding_name=binding.binding_name,
-                            item=item,
-                            artifact_type=binding.artifact_type,
-                            cancellation=result.cancellation,
-                        )
-                    )
-                    result.counters = result.counters.add(manifest_open_count=1)
-                expectation = claim.acceptance_preflight.cache_expectation
-                entries = [
-                    self.journal.get_entry(binding.items[0].manifest_sha256)
-                    for binding in bindings
-                ]
-                if expectation == "cold_after_eviction" and any(
-                    entry is not None for entry in entries
-                ):
-                    raise ArtifactInputError("cold_cache_not_absent")
-                if expectation == "warm_reuse_only" and any(
-                    entry is None or entry.state != "ready" for entry in entries
-                ):
-                    raise ArtifactInputError("warm_cache_not_ready")
             for binding in bindings:
                 if binding.binding_name == "stage-request.json":
                     raise ArtifactInputError("reserved_input_binding_name")
                 record, counters = await self._materialize_binding(
                     result=result,
                     binding=binding,
-                    prefetched=prefetched,
                 )
                 view_records.append(record)
                 result.counters = result.counters.add(
@@ -567,32 +469,25 @@ class ArtifactInputMaterializer:
         *,
         result: MaterializedInputSet,
         binding: BindingSetV1,
-        prefetched: dict[tuple[str, str], ArtifactManifestV1],
     ) -> tuple[dict[str, str], MaterializationCounters]:
         assert result.root is not None
         ready: list[_ReadyArtifact] = []
         counters = MaterializationCounters()
         for item in binding.items:
-            manifest = prefetched.get((binding.binding_name, item.item_key))
-            if manifest is None:
-                manifest = await self.read_client.read_manifest(
-                    claim=result.claim,
-                    binding_name=binding.binding_name,
-                    item=item,
-                    artifact_type=binding.artifact_type,
-                    cancellation=result.cancellation,
-                )
-                counters = counters.add(manifest_open_count=1)
+            manifest = await self.read_client.read_manifest(
+                claim=result.claim,
+                binding_name=binding.binding_name,
+                item=item,
+                artifact_type=binding.artifact_type,
+                cancellation=result.cancellation,
+            )
+            counters = counters.add(manifest_open_count=1)
             artifact, delta = await self._ready_artifact(
                 claim=result.claim,
                 binding=binding,
                 item=item,
                 manifest=manifest,
                 cancellation=result.cancellation,
-                warm_only=(
-                    result.claim.acceptance_preflight is not None
-                    and result.claim.acceptance_preflight.cache_expectation == "warm_reuse_only"
-                ),
             )
             ready.append(artifact)
             counters = counters.add(
@@ -665,7 +560,6 @@ class ArtifactInputMaterializer:
         item: BindingItemV1,
         manifest: ArtifactManifestV1,
         cancellation: CancellationSignal,
-        warm_only: bool,
     ) -> tuple[_ReadyArtifact, MaterializationCounters]:
         lock = self._manifest_locks.setdefault(item.manifest_sha256, asyncio.Lock())
         async with lock:
@@ -675,7 +569,6 @@ class ArtifactInputMaterializer:
                 item=item,
                 manifest=manifest,
                 cancellation=cancellation,
-                warm_only=warm_only,
             )
 
     async def _ready_artifact_locked(
@@ -686,7 +579,6 @@ class ArtifactInputMaterializer:
         item: BindingItemV1,
         manifest: ArtifactManifestV1,
         cancellation: CancellationSignal,
-        warm_only: bool,
     ) -> tuple[_ReadyArtifact, MaterializationCounters]:
         if (
             item.file_count > MAX_EXTRACTED_FILES
@@ -707,18 +599,10 @@ class ArtifactInputMaterializer:
                 owner_attempt_id=claim.execution_attempt_id,
             )
         except ArtifactInputJournalError as exc:
-            if warm_only and exc.reason != "input_descriptor_drift":
-                raise ArtifactInputError("warm_cache_not_ready") from exc
             raise ArtifactInputError(exc.reason) from exc
         if hit is not None:
             self._verify_ready(hit, manifest)
             return _ReadyArtifact(hit, manifest), MaterializationCounters()
-        if warm_only:
-            self.journal.abandon_materialization(
-                manifest_sha256=item.manifest_sha256,
-                owner_attempt_id=claim.execution_attempt_id,
-            )
-            raise ArtifactInputError("warm_cache_not_ready")
         partial = self.journal.cas_root / ".partial" / str(uuid4())
         downloads = partial / ".downloads"
         payload = partial / "payload"

@@ -206,22 +206,7 @@ def test_retained_v2_plan_rejects_manifest_identity_collapse(corruption):
 
 
 @pytest.mark.parametrize("strong", [False, True])
-def test_stored_claim_and_registry_readers_preserve_versioned_plan(strong):
-    from loom_task_image_authority.materializations import _stored_attempt_claim_plan
-    from loom_task_image_authority.registry_credentials import _stored_claim_component
-
-    row, attempt, plan = strong_fixture() if strong else fixture()
-    authorization = _authorization(grant_id=plan.grant_id, session_id=plan.session_id, session_generation=plan.session_generation)
-    assert _stored_attempt_claim_plan(attempt, authorization=authorization, materialization_id=row.id) == plan
-    assert _stored_claim_component(attempt, row, authorization=authorization, component="task") == plan
-    row.bundle_content_manifest_sha256 = "7" * 64
-    with pytest.raises(RuntimeError):
-        _stored_claim_component(attempt, row, authorization=authorization, component="task")
-
-
-@pytest.mark.parametrize("strong", [False, True])
-def test_registry_and_retention_read_valid_large_unicode_receipts(strong):
-    from loom_task_image_authority.registry_credentials import _stored_claim_component
+def test_retention_reads_valid_large_unicode_receipts(strong):
 
     row, attempt, plan = strong_fixture() if strong else fixture()
     plan = plan.model_copy(update={"components": tuple(
@@ -234,8 +219,6 @@ def test_registry_and_retention_read_valid_large_unicode_receipts(strong):
     attempt.claim_plan_json = plan.model_dump(mode="json")
     attempt.claim_plan_sha256 = hashlib.sha256(rfc8785.dumps(attempt.claim_plan_json)).hexdigest()
     assert len(plan.model_dump_json().encode()) < 64 * 1024 < len(json.dumps(attempt.claim_plan_json))
-    authorization = _authorization(grant_id=plan.grant_id, session_id=plan.session_id, session_generation=plan.session_generation)
-    assert _stored_claim_component(attempt, row, authorization=authorization, component="task") == plan
     assert derive(row, attempt, [credential_row(plan)]).repositories[0].component == "task"
 
 

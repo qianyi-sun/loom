@@ -260,7 +260,8 @@ def test_build_rejects_pr_before_any_process_or_output(
     with pytest.raises(ValueError, match="fixed protected Nebius workflow"):
         candidate.build(
             argparse.Namespace(
-                output=output, registry_prefix="cr.eu-north1.nebius.cloud/e00example"
+                output=output, registry_prefix="cr.eu-north1.nebius.cloud/e00example",
+                upload_timeout_seconds=900,
             )
         )
     assert not output.exists()
@@ -362,6 +363,11 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         return ""
 
     monkeypatch.setattr(candidate, "_run", run)
+    def copy_image(archive, tag, *, timeout_seconds):
+        assert timeout_seconds == 1200
+        run("skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}")
+
+    monkeypatch.setattr(candidate, "_copy_image", copy_image)
     monkeypatch.setattr(candidate, "install_trivy", lambda *args, **kwargs: Path("scanner"))
     validation_options = []
     monkeypatch.setattr(
@@ -371,7 +377,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     monkeypatch.setattr(candidate, "refresh_registry_auth", lambda *args: None)
     output = tmp_path / "publication"
     candidate.build(argparse.Namespace(
-        mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
+        upload_timeout_seconds=1200, mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
         registry_prefix=document["registry_prefix"], signing_key=private,
         signing_key_id="publisher", trusted_keyring=trust,
     ))
@@ -485,6 +491,78 @@ def test_builder_diagnostics_bound_output_and_remove_credentials(monkeypatch):
 
 def test_builder_diagnostics_remain_bounded_after_redaction_expands_lines():
     assert len(candidate.sanitize_diagnostic("password\n" * 3000)) <= 16_384
+
+
+@pytest.mark.parametrize("outcome", [
+    "success", "failure", "timeout", "retry_success", "retry_failure", "retry_timeout", "denied",
+])
+def test_registry_copy_streams_redacted_progress_and_bounds_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, outcome: str,
+) -> None:
+    import builtins
+    import time
+
+    acknowledged = tmp_path / "progress-seen"
+    attempt_count = tmp_path / "attempt-count"
+    executable = tmp_path / "skopeo"
+    executable.write_text(
+        f"#!{Path(sys.executable).resolve()}\n"
+        "import os, sys, time\nfrom pathlib import Path\n"
+        "assert sys.argv[1:3] == ['copy', '--preserve-digests']\n"
+        f"count = Path({str(attempt_count)!r})\n"
+        "attempt = int(count.read_text()) + 1 if count.exists() else 1\n"
+        "count.write_text(str(attempt))\n"
+        "print('upload progress ' + os.environ['TEST_UPLOAD_TOKEN'], flush=True)\n"
+        f"ack = Path({str(acknowledged)!r})\n"
+        "deadline = time.monotonic() + 1\n"
+        "while not ack.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+        "if not ack.exists(): sys.exit(19)\n"
+        "print('registry response https://registry.invalid/path?token=hidden', file=sys.stderr, flush=True)\n"
+        f"outcome = {outcome!r}\n"
+        "if outcome == 'denied':\n"
+        " print('unauthorized: connection reset by peer', file=sys.stderr, flush=True); sys.exit(7)\n"
+        "if outcome.startswith('retry') and (attempt == 1 or outcome == 'retry_failure'):\n"
+        " print('connection reset by peer', file=sys.stderr, flush=True); sys.exit(7)\n"
+        "if outcome in ('timeout', 'retry_timeout'): time.sleep(60)\n"
+        "sys.exit(7 if outcome == 'failure' else 0)\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("TEST_UPLOAD_TOKEN", "upload-secret-123")
+    monkeypatch.setattr(candidate, "_diagnostic_dir", tmp_path)
+
+    def progress(*args, **kwargs):
+        if args and "upload progress" in str(args[0]):
+            acknowledged.touch()
+        builtins.print(*args, **kwargs)
+
+    monkeypatch.setattr(candidate, "print", progress, raising=False)
+    started = time.monotonic()
+    if outcome in ("success", "retry_success"):
+        candidate._copy_image(tmp_path / "image.tar", "registry.invalid/test", timeout_seconds=2)
+        assert not (tmp_path / "failed-command.json").exists()
+    else:
+        timeout = outcome in ("timeout", "retry_timeout")
+        reason = "timed out" if timeout else "exit code 7"
+        with pytest.raises(ValueError, match=reason):
+            candidate._copy_image(tmp_path / "image.tar", "registry.invalid/test", timeout_seconds=2)
+        evidence = json.loads((tmp_path / "failed-command.json").read_text())
+        assert evidence["timed_out"] is timeout
+        assert evidence["timeout_seconds"] == 2
+        assert evidence["returncode"] == (-9 if timeout else 7)
+        assert evidence["attempts"] == int(attempt_count.read_text())
+        if outcome == "retry_timeout":
+            assert evidence["elapsed_seconds"] < 2.75, "retry must not reset the total budget"
+        assert "registry response [url]" in evidence["diagnostic"]
+        assert len(evidence["diagnostic"]) <= 16_384
+        assert "upload-secret-123" not in json.dumps(evidence)
+    assert time.monotonic() - started < 5
+    assert int(attempt_count.read_text()) == (2 if outcome.startswith("retry") else 1)
+    assert acknowledged.exists(), "progress must be visible before the subprocess exits"
+    output = capsys.readouterr().out
+    assert "upload progress [redacted]" in output
+    assert "registry.invalid" not in output
+    assert "upload-secret-123" not in output
 
 
 def test_oci_scan_layout_reuses_native_archive_and_cleans_up(tmp_path: Path) -> None:

@@ -15,10 +15,6 @@ import scripts.component_ownership as component_ownership
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("path", ["src/loom_control_plane/__init__.py", "src/loom_control_plane/slurm_job_cgroup.py"])
-def test_native_worker_cgroup_utility_changes_select_executor_image(path: str) -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    assert "capacity-executor" in {owner.id for owner in manifest.component_owners_for_path(path)}
 
 
 def test_component_ownership_authority_files_exist() -> None:
@@ -351,12 +347,9 @@ def test_neutral_bundle_checksum_rebuilds_every_consuming_image() -> None:
     }
 
     assert owners == {
-        "capacity-executor",
-        "capacity-manager",
         "control-plane",
         "family-orchestrator",
         "llm-gateway",
-        "personal-dev-activation-agent",
         "pipeline-orchestrator",
         "service",
         "worker",
@@ -554,27 +547,6 @@ def test_repository_manifest_owns_every_dockerfile_and_test() -> None:
     } == payload_dockerfiles
 
 
-def test_phase2c_rootless_runtime_recipe_is_owned_without_release_publication() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    dockerfile = "deploy/task-image-builder/Dockerfile.rootless-runtime-v2"
-
-    owners = manifest.component_owners_for_path(dockerfile)
-
-    assert len(owners) == 1
-    owner = owners[0]
-    assert owner.id == "task-image-builder-rootless-runtime-v2"
-    assert owner.kind == "runtime-payload-image"
-    assert owner.build_context == "deploy/task-image-builder"
-    assert owner.release_digest is None
-    assert owner.runtime_policy == "runtime-payload"
-    assert (
-        component_ownership.select_release_image_matrix(
-            manifest,
-            changed_paths=(dockerfile,),
-            force_all=False,
-        )
-        == ()
-    )
 
 
 def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
@@ -1003,7 +975,7 @@ def test_rollout_release_images_have_exact_manifest_owner() -> None:
         )
         == []
     )
-    assert len(rollout_images) == 12
+    assert len(rollout_images) == 10
 
 
 def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
@@ -1020,7 +992,7 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     primary_names = {entry["image_name"] for entry in primary}
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
-    assert len(primary) == 12
+    assert len(primary) == 10
     assert len(auxiliary) == 2
     assert not primary_names & auxiliary_names
     assert auxiliary_names == {
@@ -1039,45 +1011,13 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 21
+    assert len(matrix) == 15
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
     assert all(entry["context"] == "." for entry in matrix)
 
 
-def test_capacity_manager_image_has_narrow_ownership_and_primary_rollout_role() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    component = next(
-        component
-        for component in manifest.release_components()
-        if component.id == "capacity-manager"
-    )
-
-    assert component.dockerfile == "deploy/Dockerfile.capacity-manager"
-    assert component.release_digest == "loom-capacity-manager"
-    assert component.runtime_policy == "start"
-    assert component.rollout_role == "primary"
-    assert {
-        ".dockerignore",
-        "README.md",
-        "deploy/Dockerfile.capacity-manager",
-        "capacity_migrations/**",
-        "pyproject.toml",
-        "src/loom_capacity_manager/**",
-    } <= set(component.source_paths)
-    assert component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("deploy/Dockerfile.capacity-manager",),
-        force_all=False,
-    ) == (
-        {
-            "image": "capacity-manager",
-            "image_name": "loom-capacity-manager",
-            "dockerfile": "deploy/Dockerfile.capacity-manager",
-            "context": ".",
-        },
-    )
 
 
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
@@ -1093,38 +1033,6 @@ def test_execution_actuator_image_owns_capacity_collector_source() -> None:
     assert any(item["image"] == "execution-actuator" for item in selected)
 
 
-def test_native_builder_agent_image_has_authority_minimal_release_ownership() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    component = next(
-        component
-        for component in manifest.release_components()
-        if component.id == "personal-dev-native-builder-agent"
-    )
-
-    assert component.dockerfile == "deploy/Dockerfile.personal-dev-native-builder-agent"
-    assert component.release_digest == "loom-personal-dev-native-builder-agent"
-    assert component.runtime_policy == "conformance"
-    assert component.rollout_role == "none"
-    assert set(component.source_paths) == {
-        ".dockerignore",
-        "deploy/Dockerfile.personal-dev-native-builder-agent",
-        "deploy/personal-dev-native-builder-agent-requirements.txt",
-        "src/loom/__init__.py",
-        "src/loom/personal_dev_native_builder_agent.py",
-        "src/loom/personal_dev_native_builder_protocol.py",
-        "src/loom_personal_dev_native_builder_agent/**",
-    }
-    selected = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("src/loom/personal_dev_native_builder_agent.py",),
-        force_all=False,
-    )
-    assert {
-        "image": "personal-dev-native-builder-agent",
-        "image_name": "loom-personal-dev-native-builder-agent",
-        "dockerfile": "deploy/Dockerfile.personal-dev-native-builder-agent",
-        "context": ".",
-    } in selected
 
 
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
@@ -1350,7 +1258,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
         lane="runtime-payload",
     )
 
-    assert len(lane_paths) == 12
+    assert len(lane_paths) == 10
     policy_paths = {
         path
         for policy in manifest.execution_policies
@@ -1360,7 +1268,7 @@ def test_runtime_payload_lane_paths_are_exactly_policy_owned() -> None:
             policy=policy.id,
         )
     }
-    assert len(policy_paths) == 12
+    assert len(policy_paths) == 10
     assert policy_paths == set(lane_paths)
     assert all(
         manifest.test_owner_for_path(path).execution_policy is not None for path in policy_paths

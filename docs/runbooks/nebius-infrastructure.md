@@ -1,8 +1,11 @@
 # Nebius infrastructure operations
 
 This runbook provisions and accepts one shared Kubernetes execution cluster
-with the three isolated environment bindings defined by
-`config/service-execution-topology.json`. It is intentionally separate from
+using the fixed installation bindings in `config/service-execution-topology.json`.
+That file is not a developer roster or a maximum environment count. Dynamic
+child identities and their currently execution-disabled renderer are described
+in the [managed environment contract](../architecture/nebius-primary-platform.md#managed-environment-identity-and-rendering);
+this runbook does not yet enroll those children. It is intentionally separate from
 Kubernetes workload bootstrap: Terraform establishes the cloud foundation; a
 later, independently reviewed step installs environment-local Loom resources
 and exercises them. For the optional execution-only regional extension of the
@@ -654,12 +657,12 @@ resources as part of this rollback.
 
 #### Canonical render configuration
 
-The canonical render profile is
-`deploy/environments/staging.multinode.cluster.toml`, selected by
-`deploy/environments/staging.toml`. Its checked-in default remains disabled.
-An explicitly approved candidate may add the following complete table to that
-profile. The revision below and documentation-only IP addresses are examples,
-not live credentials, routes or acceptance evidence:
+The former shared staging profiles have been retired. The generic renderer
+retains this disabled-by-default attachment contract for disposable compatibility
+validation; synthetic inputs live under `tests/fixtures/cluster-render/`.
+Hosted deployments use the [Nebius deployment procedure](nebius-deployment.md).
+The following table documents the compatibility contract, not a hosted rollout
+input. Its revision and documentation-only addresses are examples:
 
 ```toml
 [nebius_execution]

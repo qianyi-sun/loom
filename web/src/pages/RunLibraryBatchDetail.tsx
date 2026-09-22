@@ -9,6 +9,8 @@ import {
   type RunLibraryArtifact,
   type RunLibraryBatchDetail,
 } from "../api/client";
+import { useAuth } from "../auth/useAuth";
+import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -60,7 +62,7 @@ function formatBytes(size: number): string {
 }
 
 function artifactName(artifact: RunLibraryArtifact): string {
-  return artifact.key.replace(/\/+$/, "");
+  return (artifact.relative_path ?? artifact.key).replace(/\/+$/, "");
 }
 
 function artifactDownloadName(artifact: RunLibraryArtifact): string {
@@ -92,10 +94,13 @@ function artifactHashText(artifact: RunLibraryArtifact): string | null {
 function artifactActionsAllowed(artifact: RunLibraryArtifact): boolean {
   const safety = artifact.safety_state ?? "safe";
   const redaction = artifact.redaction_state ?? "not_required";
-  return (
+  const canReuse = artifact.can_reuse ?? (
     artifact.share_status === "shared" &&
     safety === "safe" &&
-    (redaction === "not_required" || redaction === "redacted") &&
+    (redaction === "not_required" || redaction === "redacted")
+  );
+  return (
+    canReuse &&
     Boolean(artifact.trial_id) &&
     Boolean(artifact.download_url) &&
     !artifact.key.startsWith("redacted-artifact:")
@@ -197,7 +202,7 @@ function ArtifactRow({
             <>
               <Button
                 size="sm"
-                title="Download this shared artifact through the Loom API."
+                title="Download this artifact through the Loom API."
                 onClick={() =>
                   artifact.trial_id
                     ? void api.downloadRunLibraryArtifact(
@@ -310,6 +315,7 @@ function CombinationSummarySection({
 
 export default function RunLibraryBatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
+  const auth = useAuth();
   const [providerConnectionId, setProviderConnectionId] = useState("");
 
   const query = useQuery({
@@ -591,6 +597,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
         />
         <Card.Body className="space-y-5">
+          {(auth.isAdmin || auth.currentTeamId === batch.team_id) ? (
+            <BatchDeliveryExport batchId={batch.id} state={batch.state} />
+          ) : null}
           {trialBundles.length > 0 ? (
             <section className="space-y-2">
               <div>

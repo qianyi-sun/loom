@@ -20,8 +20,6 @@ from scripts import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_PAYLOAD_PATHS = {
-    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py",
-    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py",
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
     "tb2-task-chess-best-move/tests/test_best_move.py",
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
@@ -39,10 +37,6 @@ EXPECTED_PAYLOAD_PATHS = {
 SAMPLE_PAYLOAD = "tests/fixtures/tasks/healthcheck-flaky/tests/test_ok.py"
 
 EXPECTED_CASE_FIXTURES = {
-    "deploy/catalog/gb10-smoke/tasks/gb10-direct-completion-hello-world/tests/test_answer.py": {
-        "answer.txt"
-    },
-    "deploy/catalog/gb10-smoke/tasks/gb10-oracle-hello-world/tests/test_result.py": {"result.txt"},
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
     "tb2-task-chess-best-move/tests/test_best_move.py": {"best_move.txt"},
     "packages/loom-benchmark-terminal-bench-2/tests/fixtures/"
@@ -269,6 +263,5 @@ def test_scoped_payload_execution_omits_only_legacy_cases(monkeypatch, scope):
     evidence = conformance.run(repo_root=REPO_ROOT,
                                manifest_path=REPO_ROOT / "config/component-ownership.toml",
                                test_scope=scope)
-    expected = {p for p in EXPECTED_PAYLOAD_PATHS
-                if scope == "all" or not p.startswith("deploy/catalog/gb10-smoke/")}
+    expected = EXPECTED_PAYLOAD_PATHS
     assert {e["path"] for e in evidence} == set(executed) == expected

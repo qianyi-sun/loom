@@ -18,7 +18,6 @@ from uuid import UUID
 from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from loom.models.worker_capabilities import (
-    SlurmGpuAllocationEvidenceV1,
     WorkerCapabilitySnapshotV1,
 )
 from loom.pipeline.checkpoint import ExecutionCheckpointV1
@@ -137,67 +136,6 @@ class StageRequestGrantV1(PipelineModel):
         return self
 
 
-class AcceptancePreflightGrantV1(PipelineModel):
-    authorization_id: UUID
-    authorization_snapshot_sha256: Digest
-    action: Literal["matrix"]
-    candidate_sha256: Digest
-    preflight_input_set_id: Literal["S02"]
-    prerequisite_pipeline_run_id: UUID
-    exclusive_fence_id: UUID
-    node_key: str
-    backend_variant_id: Literal["oldlab-rtx5080-2gpu", "gb10-shared-1gpu"]
-    cache_expectation: Literal["cold_after_eviction", "warm_reuse_only"]
-    sealed_input_descriptor_set_sha256: Digest
-    policy_id: Literal["behavior-gpu-oldlab", "behavior-gpu-gb10"]
-    policy_config_sha256: Digest
-    policy_activation_epoch: PositiveSafeInt
-    slurm_cluster_id: Literal["oldlab", "gb10"]
-    slurm_cluster_config_sha256: Digest
-    slurm_allocation_id: str
-    image_runtime_contract_digest: Digest
-    resource_profile_digest: Digest
-    network_profile: Literal["none"]
-    renderer_digest: Digest
-
-    @field_validator("node_key", "slurm_allocation_id")
-    @classmethod
-    def normalize_text(cls, value: str) -> str:
-        value = _nfc(value)
-        if not value or len(value.encode("utf-8")) > 256 or "\x00" in value:
-            raise ValueError("acceptance preflight identity is invalid")
-        return value
-
-    @model_validator(mode="after")
-    def variant_authorities_are_exact(self) -> AcceptancePreflightGrantV1:
-        expected = {
-            "oldlab-rtx5080-2gpu": ("behavior-gpu-oldlab", "oldlab"),
-            "gb10-shared-1gpu": ("behavior-gpu-gb10", "gb10"),
-        }[self.backend_variant_id]
-        if (self.policy_id, self.slurm_cluster_id) != expected:
-            raise ValueError("acceptance preflight variant/policy/cluster drift")
-        phase = "cold" if self.cache_expectation == "cold_after_eviction" else "warm"
-        if self.node_key != f"{self.backend_variant_id}_acceptance_preflight_{phase}":
-            raise ValueError("acceptance preflight node/cache phase drift")
-        return self
-
-
-class Stage1SmokeGrantV1(PipelineModel):
-    """Server-owned proof that this claim consumes the one Stage 1 authority."""
-
-    authorization_id: UUID
-    pipeline_run_id: UUID
-    candidate_sha256: Digest
-    authorization_sha256: Digest
-    preflight_sha256: Digest
-    policy_activation_epoch: PositiveSafeInt
-    recipe_digest: Digest
-    platform_child_digest: Digest
-    image_runtime_contract_digest: Digest
-    resolved_input_bindings_digest: Digest
-    renderer_digest: Digest
-
-
 class TerminalTaskValidationGrantV1(PipelineModel):
     """Worker-owned dynamic-validation authority for one immutable task bundle."""
 
@@ -265,6 +203,7 @@ class ResourceExecutionVariantV1(PipelineModel):
     memory_accounting_kind: Literal["separate", "unified_shared"]
     container_memory_bytes_override: NonNegativeSafeInt | None
     same_gpu_model_required: bool
+    # Historical snapshots retain these pool identifiers; new GPU claims are disabled.
     pool_class: Literal[
         "behavior-cpu-data",
         "behavior-gpu-oldlab",
@@ -509,16 +448,12 @@ class ExecutionAttemptClaimV1(PipelineModel):
     image_runtime_contract_digest: Digest
     worker_capability_snapshot: WorkerCapabilitySnapshotV1
     worker_capability_snapshot_digest: Digest
-    slurm_gpu_allocation_evidence: SlurmGpuAllocationEvidenceV1 | None
-    slurm_gpu_allocation_evidence_digest: Digest | None
     input_bindings: Annotated[list[BindingSetV1], Field(max_length=128)]
     outputs: Annotated[list[OutputDeclV1], Field(max_length=64)]
     checkpoint: CheckpointPolicyV1 | None
     fanout_commit: PlatformFanoutCommitV1 | None
     stage_request: StageRequestGrantV1 | None
     control_binding_snapshot: dict[str, object] | None = None
-    acceptance_preflight: AcceptancePreflightGrantV1 | None
-    stage1_smoke: Stage1SmokeGrantV1 | None = None
     terminalgen_authoring: TerminalGenAuthoringGrantV1 | None = None
     provider_connection_ref: UUID | None
     secret_refs: list[_OpaqueReference]
@@ -624,15 +559,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
             self.worker_capability_snapshot
         ):
             raise ValueError("worker capability snapshot/digest drift")
-        if (self.slurm_gpu_allocation_evidence is None) != (
-            self.slurm_gpu_allocation_evidence_digest is None
-        ):
-            raise ValueError("Slurm allocation evidence and digest must be present together")
-        if self.slurm_gpu_allocation_evidence is not None and (
-            self.slurm_gpu_allocation_evidence_digest
-            != canonical_digest(self.slurm_gpu_allocation_evidence)
-        ):
-            raise ValueError("Slurm allocation evidence digest drift")
         variants = {
             item.variant_id: item for item in self.resource_profile_snapshot.execution_variants
         }
@@ -666,22 +592,14 @@ class ExecutionAttemptClaimV1(PipelineModel):
         if variant.gpu_count_exact == 0:
             if (
                 capability.gpu_devices
-                or self.slurm_gpu_allocation_evidence is not None
                 or image_contract.gpu_vendor != "none"
                 or spec.gpu_backend_selection_sha256 is not None
             ):
                 raise ValueError("zero-GPU execution cannot carry GPU allocation evidence")
         else:
-            evidence = self.slurm_gpu_allocation_evidence
             devices = capability.gpu_devices
-            if evidence is None or len(devices) != variant.gpu_count_exact:
-                raise ValueError("GPU execution requires its exact Slurm allocation")
-            if evidence.variant_id != variant.variant_id or {
-                item.allocation_id for item in devices
-            } != {evidence.allocation_id}:
-                raise ValueError("GPU variant and Slurm allocation evidence drift")
-            if [item.device_uuid for item in devices] != evidence.device_uuids:
-                raise ValueError("GPU capability UUIDs and allocation evidence drift")
+            if len(devices) != variant.gpu_count_exact:
+                raise ValueError("GPU execution requires the exact selected device count")
             if any(item.model not in variant.allowed_gpu_models for item in devices):
                 raise ValueError("GPU model is not allowed by the selected variant")
             if variant.same_gpu_model_required and len({item.model for item in devices}) != 1:
@@ -706,11 +624,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
                     raise ValueError("unified GPU memory does not satisfy the variant")
             else:
                 raise ValueError("GPU variant has no closed memory accounting kind")
-            expected_cluster = "gb10" if variant.variant_id == "gb10-shared-1gpu" else "oldlab"
-            if evidence.slurm_cluster_id != expected_cluster:
-                raise ValueError("GPU variant and Slurm cluster drift")
-            if spec.gpu_backend_selection_sha256 is None:
-                raise ValueError("GPU execution requires frozen backend selection evidence")
             if image_contract.gpu_vendor != "nvidia":
                 raise ValueError("GPU variant requires an NVIDIA image runtime contract")
             minimum_driver = image_contract.min_nvidia_driver_version
@@ -729,36 +642,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
         renderer_digest = self.stage_request.renderer_digest if self.stage_request else None
         if renderer_digest != spec.request_renderer_lock_digest:
             raise ValueError("StageRequest renderer lock drift")
-        if self.acceptance_preflight is not None:
-            grant = self.acceptance_preflight
-            if (
-                self.pipeline_run_id != grant.prerequisite_pipeline_run_id
-                or grant.node_key != self.node_key
-                or grant.resource_profile_digest != self.resource_profile_digest
-                or grant.image_runtime_contract_digest != self.image_runtime_contract_digest
-                or grant.renderer_digest != renderer_digest
-                or self.network_profile != "none"
-                or self.provider_connection_ref is not None
-                or self.secret_refs
-            ):
-                raise ValueError("acceptance preflight grant drift")
-        if self.stage1_smoke is not None:
-            stage1_grant = self.stage1_smoke
-            if self.acceptance_preflight is not None or (
-                stage1_grant.pipeline_run_id != self.pipeline_run_id
-                or stage1_grant.recipe_digest != self.recipe_digest
-                or stage1_grant.platform_child_digest != spec.resolved_image_manifest_digest
-                or stage1_grant.image_runtime_contract_digest != self.image_runtime_contract_digest
-                or stage1_grant.resolved_input_bindings_digest
-                != spec.resolved_input_bindings_digest
-                or stage1_grant.renderer_digest != renderer_digest
-                or self.node_key != "rollout"
-                or self.shard_key != "singleton"
-                or self.network_profile != "none"
-                or self.provider_connection_ref is not None
-                or self.secret_refs
-            ):
-                raise ValueError("Stage 1 smoke grant drift")
         is_terminalgen_profile = self.resource_profile_snapshot.name.startswith("terminalgen-")
         if is_terminalgen_profile != (self.terminalgen_authoring is not None):
             raise ValueError("TerminalGen ResourceProfiles require their authoring grant")
@@ -775,8 +658,6 @@ class ExecutionAttemptClaimV1(PipelineModel):
                 != self.image_runtime_contract_digest
                 or terminalgen_grant.resolved_input_bindings_digest
                 != spec.resolved_input_bindings_digest
-                or self.stage1_smoke is not None
-                or self.acceptance_preflight is not None
             ):
                 raise ValueError("TerminalGen authoring grant drift")
             validation = terminalgen_grant.validation
@@ -905,21 +786,6 @@ class ExecutionEventsV1(PipelineModel):
         return self
 
 
-class PipelineInputMaterializationEvidenceReportV1(PipelineModel):
-    schema_version: Literal["loom.pipeline-input-materialization-evidence-report.v1"]
-    execution_attempt_id: UUID
-    worker_id: UUID
-    lease_epoch: PositiveSafeInt
-    cache_expectation: Literal["cold_after_eviction", "warm_reuse_only"]
-    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
-    manifest_open_count: NonNegativeSafeInt
-    file_open_count: NonNegativeSafeInt
-    file_bytes: NonNegativeSafeInt
-    archive_extraction_count: NonNegativeSafeInt
-    cas_rename_count: NonNegativeSafeInt
-    input_view_sha256: Digest
-
-
 class PipelineInputMaterializationEvidenceV1(PipelineModel):
     schema_version: Literal["loom.pipeline-input-materialization-evidence.v1"]
     execution_attempt_id: UUID
@@ -943,88 +809,6 @@ class PipelineInputMaterializationEvidenceRefV1(PipelineModel):
     worker_id: UUID
     lease_epoch: PositiveSafeInt
     evidence_sha256: Digest
-
-
-class AcceptanceEvictionGrantV1(PipelineModel):
-    schema_version: Literal["loom.acceptance-eviction-grant.v1"]
-    command_id: UUID
-    authorization_id: UUID
-    candidate_sha256: Digest
-    worker_id: UUID
-    worker_lease_epoch: PositiveSafeInt
-    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
-    pipeline_run_id: UUID
-    exclusive_fence_id: UUID
-    authorization_snapshot_sha256: Digest
-    backend_variant_id: Literal["oldlab-rtx5080-2gpu", "gb10-shared-1gpu"]
-    policy_id: Literal["behavior-gpu-oldlab", "behavior-gpu-gb10"]
-    policy_config_sha256: Digest
-    policy_activation_epoch: PositiveSafeInt
-    slurm_cluster_id: Literal["oldlab", "gb10"]
-    slurm_cluster_config_sha256: Digest
-    slurm_allocation_id: _BoundedText
-    worker_capability_snapshot_digest: Digest
-    action: Literal["matrix"]
-
-    @field_validator("ordered_manifest_sha256s")
-    @classmethod
-    def manifests_are_canonical(cls, values: list[str]) -> list[str]:
-        return _ordered_unique_strings(values, "acceptance eviction manifests")
-
-    @model_validator(mode="after")
-    def backend_authorities_are_exact(self) -> AcceptanceEvictionGrantV1:
-        expected = {
-            "oldlab-rtx5080-2gpu": ("behavior-gpu-oldlab", "oldlab"),
-            "gb10-shared-1gpu": ("behavior-gpu-gb10", "gb10"),
-        }[self.backend_variant_id]
-        if (self.policy_id, self.slurm_cluster_id) != expected:
-            raise ValueError("acceptance eviction backend authority drift")
-        return self
-
-
-class AcceptanceEvictionEntryV1(PipelineModel):
-    manifest_sha256: Digest
-    pre_state: Literal["ready", "absent"]
-    freed_bytes: NonNegativeSafeInt
-
-    @model_validator(mode="after")
-    def absent_frees_nothing(self) -> AcceptanceEvictionEntryV1:
-        if self.pre_state == "absent" and self.freed_bytes != 0:
-            raise ValueError("absent acceptance entry cannot free bytes")
-        return self
-
-
-class AcceptanceEvictionResultV1(PipelineModel):
-    schema_version: Literal["loom.acceptance-eviction-result.v1"]
-    authorization_id: UUID
-    candidate_sha256: Digest
-    worker_id: UUID
-    ordered_manifest_sha256s: Annotated[list[Digest], Field(min_length=5, max_length=5)]
-    entries: Annotated[list[AcceptanceEvictionEntryV1], Field(min_length=5, max_length=5)]
-    evicted_count: Annotated[int, Field(strict=True, ge=0, le=5)]
-    status: Literal["already_absent", "evicted"]
-    absence_verified: Literal[True]
-    finished_at: datetime
-
-    _finished_is_aware = field_validator("finished_at")(_aware)
-
-    @model_validator(mode="after")
-    def result_is_exact(self) -> AcceptanceEvictionResultV1:
-        manifests = _ordered_unique_strings(
-            self.ordered_manifest_sha256s, "acceptance eviction manifests"
-        )
-        entry_manifests = [entry.manifest_sha256 for entry in self.entries]
-        if entry_manifests != sorted(entry_manifests, key=str.encode):
-            raise ValueError("acceptance eviction entries must be bytewise sorted")
-        if set(entry_manifests) != set(manifests):
-            raise ValueError("acceptance eviction entries must cover the request exactly")
-        evicted = sum(entry.pre_state == "ready" for entry in self.entries)
-        if self.evicted_count != evicted:
-            raise ValueError("acceptance eviction count drift")
-        expected_status = "already_absent" if evicted == 0 else "evicted"
-        if self.status != expected_status:
-            raise ValueError("acceptance eviction status drift")
-        return self
 
 
 class ExecutionStartedV1(PipelineModel):
@@ -1246,23 +1030,8 @@ class ExecutionCancelAckV1(PipelineModel):
 
 class WorkerLostCleanupAckV1(PipelineModel):
     schema_version: Literal["loom.worker-lost-cleanup-ack.v1"]
-    observer_kind: Literal["worker_journal", "slurm_node_reaper"]
+    observer_kind: Literal["worker_journal"]
     observed_at: datetime
-    allocation_id: str | None
-    allocation_terminal: Literal[True] | None
     resources: WorkerCleanupProofV1
 
     _observed_is_aware = field_validator("observed_at")(_aware)
-
-    @model_validator(mode="after")
-    def observer_allocation_fields_are_exact(self) -> WorkerLostCleanupAckV1:
-        if self.observer_kind == "worker_journal":
-            if self.allocation_id is not None or self.allocation_terminal is not None:
-                raise ValueError("worker journal cleanup cannot assert allocation state")
-        elif (
-            self.allocation_id is None
-            or not self.allocation_id.strip()
-            or self.allocation_terminal is not True
-        ):
-            raise ValueError("Slurm reaper cleanup requires a terminal allocation identity")
-        return self

@@ -436,7 +436,7 @@ describe("BatchDetail run plan", () => {
     renderBatchDetail();
 
     expect(await screen.findByText("Delivery bundle")).toBeInTheDocument();
-    expect(screen.getByText("ready")).toBeInTheDocument();
+    expect(await screen.findByText("ready")).toBeInTheDocument();
     expect(await screen.findByText(/5003 trials/)).toBeInTheDocument();
     expect(
       screen.getByText(/fa54bda50a85eeec607d172588e1e600db0f2182ebd7cc601e7ebdb39689cd03/),
