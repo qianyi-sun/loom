@@ -207,6 +207,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from loom_cli.service_cmd import add_service_subparser
     add_service_subparser(sub)
 
+    from loom_cli.dev_cmd import add_dev_subparser
+    add_dev_subparser(sub)
+
     # `loom models {list,test}` — inspect provider config + sanity-check
     # local LLM servers (vLLM, ollama, llama.cpp, lm-studio).
     from loom_cli.models_cmd import add_models_subparser

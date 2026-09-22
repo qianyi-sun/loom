@@ -28,7 +28,11 @@ from loom.db.nebius_environment_schema import (
     NebiusPlatformBudget,
     NebiusPlatformReservation,
 )
-from loom.nebius_environment_contract import EnvironmentOperationV1, EnvironmentRegistrationV1
+from loom.nebius_environment_contract import (
+    EnvironmentOperationV1,
+    EnvironmentRegistrationV1,
+    EnvironmentStatusV1,
+)
 from loom.nebius_environment_render import RenderedEnvironment
 from loom_service.environment_management.steps import ProvisioningStep, StepKind, creation_steps
 
@@ -42,7 +46,7 @@ class ManagementError(ValueError):
 
 
 def owner_identity(principal: AuthContext, *, mutation: bool = False) -> tuple[UUID, UUID]:
-    if principal.user_id is None or principal.team_id is None or principal.type not in {"team", "admin"}:
+    if principal.user_id is None or principal.team_id is None or principal.type not in {"user", "team", "admin"}:
         raise ManagementError("user_identity_required", 403)
     if ("submit" if mutation else "read:own") not in principal.scopes and not is_admin(principal):
         raise ManagementError("environment_scope_required", 403)
@@ -169,6 +173,24 @@ class EnvironmentRegistry:
                 NebiusEnvironment.purged_at.is_(None),
             ).order_by(NebiusEnvironment.created_at, NebiusEnvironment.environment_id).limit(1000))).scalars()
             return [registration_view(row) for row in rows]
+
+    async def status(self, environment_id: UUID, *, principal: AuthContext) -> EnvironmentStatusV1:
+        owner, team = owner_identity(principal)
+        async with self.session_factory() as session:
+            row = (await session.execute(select(NebiusEnvironment).where(
+                NebiusEnvironment.environment_id == environment_id,
+                NebiusEnvironment.owner_user_id == owner, NebiusEnvironment.owner_team_id == team,
+            ))).scalar_one_or_none()
+            if row is None:
+                raise ManagementError("environment_forbidden", 403)
+            operation = (await session.execute(select(NebiusEnvironmentOperation).where(
+                NebiusEnvironmentOperation.environment_id == row.environment_id,
+                NebiusEnvironmentOperation.deployment_generation == row.deployment_generation,
+            ))).scalar_one_or_none()
+            return EnvironmentStatusV1(
+                registration=registration_view(row),
+                operation=operation_view(operation) if operation is not None else None,
+            )
 
     async def _locked_operation(
         self, session: AsyncSession, operation_id: UUID,

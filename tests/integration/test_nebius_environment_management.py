@@ -37,7 +37,7 @@ async def environment_registry(isolated_migration_postgres_url, platform_inputs)
             memory_mib=1000000, storage_mib=1000000, ephemeral_storage_mib=1000000,
         ))
     principals = [AuthContext(
-        token_hash=b"", type="team", scopes=["read:own", "submit"], team_id=team,
+        token_hash=b"", type="user", scopes=["read:own", "submit"], team_id=team,
         expires_at=None, user_id=user, auth_kind="session",
     ) for user in (alice, bob)]
 
@@ -222,7 +222,9 @@ async def test_real_management_api_derives_owner_and_rejects_other_users(
     from loom_service.app import create_app
     from loom_service.config import LoomServiceSettings
     from loom_service.environment_management.manager import (
-        CandidateBundle, EnvironmentManager, EnvironmentPlanFactory,
+        CandidateBundle,
+        EnvironmentManager,
+        EnvironmentPlanFactory,
     )
     from loom_service.password_auth import hash_password
 
