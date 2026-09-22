@@ -39,6 +39,7 @@ from loom_service.auth_guards import (
 from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.delivery_export import (
+    CanonicalTrialBundleFile,
     DeliveryExportError,
     canonical_bundle_from_artifact,
 )
@@ -337,6 +338,43 @@ def _artifact_content_allowed(
     )
 
 
+def _artifact_reuse_allowed(
+    ctx: Any,
+    artifact: Artifact,
+    *,
+    batch: Batch | None = None,
+    trial: Trial | None = None,
+) -> bool:
+    # Internal verification permits reuse within the producing team; it does
+    # not certify the content for cross-team sharing or bypass blocked content.
+    if artifact.blocked_reason:
+        return False
+    if (
+        ctx.team_id == artifact.team_id
+        and artifact.safety_state in {"safe", "verified_internal"}
+        and artifact.share_status in {"pending_scan", "shared"}
+        and artifact.redaction_state in {"pending", "not_required", "redacted"}
+    ):
+        return True
+    return _artifact_content_allowed(artifact, batch=batch, trial=trial)
+
+
+def _canonical_artifact_files(
+    artifact: Artifact, trial: Trial | None,
+) -> tuple[CanonicalTrialBundleFile, ...]:
+    if trial is None:
+        return ()
+    try:
+        bundle = canonical_bundle_from_artifact(artifact, trial=trial)
+    except DeliveryExportError:
+        return ()
+    # Raw source evidence remains available through the canonical bundle
+    # download; only canonical output files are offered as reusable inputs.
+    if bundle is None:
+        return ()
+    return tuple(item for item in bundle.files if item.relative_path.startswith("files/"))
+
+
 def _artifact_metadata_visible(
     ctx: Any,
     artifact: Artifact,
@@ -514,8 +552,9 @@ def _serialize_typed_artifact(
     batch: Batch | None = None,
     trial: Trial | None = None,
     parents: list[dict[str, Any]] | None = None,
+    bundle_file: CanonicalTrialBundleFile | None = None,
 ) -> dict[str, Any] | None:
-    key = _artifact_storage_key(artifact)
+    key = bundle_file.ref.key if bundle_file else _artifact_storage_key(artifact)
     if key is None:
         return None
     role = _artifact_group_for_type(artifact.artifact_type)
@@ -526,6 +565,9 @@ def _serialize_typed_artifact(
         trial=trial,
     )
     full_metadata = owner_or_admin or content_allowed
+    reuse_allowed = _artifact_reuse_allowed(
+        ctx, artifact, batch=batch, trial=trial,
+    )
     can_download = (
         artifact.trial_id is not None
         and request is not None
@@ -535,7 +577,10 @@ def _serialize_typed_artifact(
         "id": str(artifact.id),
         "trial_id": str(artifact.trial_id) if artifact.trial_id else None,
         "key": key if full_metadata else f"redacted-artifact:{artifact.id}",
-        "size": _artifact_storage_size(artifact) if full_metadata else 0,
+        "size": (
+            (bundle_file.size_bytes if bundle_file else _artifact_storage_size(artifact))
+            if full_metadata else 0
+        ),
         "role": role,
         "artifact_type": artifact.artifact_type,
         "artifact_type_label": _artifact_type_label(artifact.artifact_type),
@@ -545,19 +590,25 @@ def _serialize_typed_artifact(
         "share_status": artifact.share_status,
         "safety_state": artifact.safety_state,
         "redaction_state": artifact.redaction_state,
-        "blocked_reason": (
-            _safe_artifact_blocked_reason(artifact)
-            if artifact.safety_state != "safe"
-            or artifact.redaction_state not in _DOWNLOAD_REDACTION_STATES
-            or artifact.share_status != "shared"
-            else None
-        ),
+        "can_reuse": artifact.trial_id is not None and reuse_allowed,
+        "blocked_reason": None if reuse_allowed else _safe_artifact_blocked_reason(artifact),
         "content_hash": artifact.content_hash if full_metadata else None,
         "storage": artifact.storage if full_metadata else None,
         "provenance": artifact.provenance if full_metadata else {},
         "metadata": artifact.artifact_metadata if full_metadata else {},
         "parents": (parents or []) if full_metadata else [],
     }
+    if bundle_file is not None and full_metadata:
+        entry.update({
+            "relative_path": bundle_file.relative_path,
+            "content_hash": bundle_file.sha256,
+            "storage": {
+                "bucket": bundle_file.ref.bucket,
+                "key": bundle_file.ref.key,
+                "media_type": bundle_file.media_type,
+                "size_bytes": bundle_file.size_bytes,
+            },
+        })
     if can_download and request is not None:
         entry["download_url"] = str(
             public_url_for(
@@ -569,6 +620,33 @@ def _serialize_typed_artifact(
     else:
         entry["download_url"] = None
     return entry
+
+
+def _serialize_typed_artifacts(
+    request: Request | None,
+    artifact: Artifact,
+    owner_team: Team,
+    *,
+    ctx: Any,
+    batch: Batch | None,
+    trial: Trial | None,
+    parents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not _artifact_metadata_visible(ctx, artifact, batch=batch, trial=trial):
+        return []
+    files: Sequence[CanonicalTrialBundleFile | None] = (
+        _canonical_artifact_files(artifact, trial)
+        if _artifact_storage_key(artifact) is None else (None,)
+    )
+    entries = []
+    for item in files:
+        entry = _serialize_typed_artifact(
+            request, artifact, owner_team, ctx=ctx, batch=batch, trial=trial,
+            parents=parents, bundle_file=item,
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
 
 
 def _legacy_artifact_type(item: dict[str, Any]) -> str:
@@ -822,7 +900,7 @@ def _artifact_inventory(
         typed = typed_by_trial.get(trial.id) or []
         if typed:
             for artifact in typed:
-                entry = _serialize_typed_artifact(
+                entries = _serialize_typed_artifacts(
                     request,
                     artifact,
                     owner_team,
@@ -831,13 +909,13 @@ def _artifact_inventory(
                     trial=trial,
                     parents=parents_by_artifact.get(artifact.id, []),
                 )
-                if entry is not None:
+                for entry in entries:
                     grouped[entry["role"]].append(entry)
             continue
         for item in _artifact_items(getattr(trial, "trajectory_index", None)):
-            entry = _serialize_legacy_artifact(request, trial, owner_team, item)
-            if entry is not None:
-                grouped[entry["role"]].append(entry)
+            legacy_entry = _serialize_legacy_artifact(request, trial, owner_team, item)
+            if legacy_entry is not None:
+                grouped[legacy_entry["role"]].append(legacy_entry)
     return grouped
 
 
@@ -1628,16 +1706,16 @@ async def _load_trial_with_batch(
 
 async def _typed_artifact_for_trial_key(
     session: Any,
-    trial_id: UUID,
+    trial: Trial,
     key: str,
-) -> Artifact | None:
+) -> tuple[Artifact, CanonicalTrialBundleFile | None] | None:
     rows = cast(
         list[Artifact],
         list(
             (
                 await session.execute(
                     select(Artifact)
-                    .where(Artifact.trial_id == trial_id)
+                    .where(Artifact.trial_id == trial.id)
                     .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
                 )
             )
@@ -1647,7 +1725,10 @@ async def _typed_artifact_for_trial_key(
     )
     for artifact in rows:
         if _artifact_storage_key(artifact) == key:
-            return artifact
+            return artifact, None
+        for item in _canonical_artifact_files(artifact, trial):
+            if item.ref.key == key:
+                return artifact, item
     return None
 
 
@@ -1906,7 +1987,7 @@ async def _artifact_rows_for_library(
             )
         }
     for artifact, owner_team, batch, trial in selected:
-        item = _serialize_typed_artifact(
+        items = _serialize_typed_artifacts(
             request,
             artifact,
             owner_team,
@@ -1915,7 +1996,7 @@ async def _artifact_rows_for_library(
             trial=trial,
             parents=parents_by_artifact.get(artifact.id, []),
         )
-        if item is not None:
+        for item in items:
             pipeline_run = pipeline_runs.get(artifact.pipeline_run_id)
             if artifact_filters.get("producer_kind") == "pipeline" and pipeline_run is not None:
                 item["pipeline"] = {
@@ -2311,8 +2392,9 @@ async def download_run_library_artifact(
     trial, batch = await _load_trial_with_batch(session, trial_id)
     if not _can_read_trial(ctx, trial, batch):
         raise HTTPException(status_code=403, detail="trial is not shared")
-    typed_artifact = await _typed_artifact_for_trial_key(session, trial.id, key)
-    if typed_artifact is not None:
+    match = await _typed_artifact_for_trial_key(session, trial, key)
+    if match is not None:
+        typed_artifact, bundle_file = match
         if not (
             _is_owner_or_admin(ctx, typed_artifact.team_id)
             or _artifact_content_allowed(
@@ -2327,10 +2409,9 @@ async def download_run_library_artifact(
             )
         return stream_object_response(
             client=request.app.state.minio_client,
-            bucket=_artifact_storage_bucket(
-                typed_artifact,
-                settings.artifacts_bucket,
-            ),
+            bucket=(bundle_file.ref.bucket if bundle_file else _artifact_storage_bucket(
+                typed_artifact, settings.artifacts_bucket,
+            )),
             key=key,
             filename=_artifact_filename(key),
             artifact_kind="artifact",
@@ -2368,16 +2449,13 @@ async def reuse_run_library_artifact(
         batch.backend if batch is not None else None,
         action="reusing its artifact",
     )
-    typed_artifact = await _typed_artifact_for_trial_key(
-        session,
-        trial.id,
-        payload.key,
-    )
+    match = await _typed_artifact_for_trial_key(session, trial, payload.key)
+    typed_artifact, bundle_file = match if match else (None, None)
     artifact = _find_artifact(trial.trajectory_index, payload.key)
     if typed_artifact is None and artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
-    if typed_artifact is not None and not _artifact_content_allowed(
-        typed_artifact,
+    if typed_artifact is not None and not _artifact_reuse_allowed(
+        ctx, typed_artifact,
         batch=batch,
         trial=trial,
     ):
@@ -2423,6 +2501,11 @@ async def reuse_run_library_artifact(
                 "source_redaction_state": typed_artifact.redaction_state,
             }
         )
+    if bundle_file is not None:
+        provenance_item.update({
+            "source_artifact_relative_path": bundle_file.relative_path,
+            "source_file_sha256": bundle_file.sha256,
+        })
     provenance = [provenance_item]
     task_filter = (
         dict(batch.task_filter)
