@@ -14,7 +14,11 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
+from loom.dockerfile_instructions import (
+    DockerfileInstruction,
+    DockerfileParseError,
+    dockerfile_instructions,
+)
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
@@ -23,6 +27,7 @@ from loom.nebius_terminus_ingest import (
     adapt_bundle_for_nebius_terminus,
     preflight_nebius_terminus_admission,
 )
+from loom.sandbox_identity import resolve_sandbox_identity
 from loom.service_execution_materialization import prepare_service_execution_input_manifest
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
 
@@ -56,6 +61,7 @@ def render_compatibility_payload(reports: tuple[TaskCompatibilityReport, ...]) -
         "limitations": [
             "Static local checks only; no image build, registry lookup, model calls or runtime execution.",
             "Undeclared requirements in instructions and scripts require task-author review.",
+            "Inherited registry-image startup and user settings are not inspected by source-only checks.",
             "Passing admission does not establish equivalent task semantics or trajectory delivery.",
         ],
     }
@@ -109,6 +115,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         if not report.diagnostics:
             report.status = "schema_valid"
         return
+    _dockerfile_runtime_requirements(path.parent, task, report)
     _dropped_environment_requirements(raw, normalized, report)
     _dropped_runtime_requirements(raw, normalized, report)
     try:
@@ -150,8 +157,20 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                    f"Preserve the requirement and qualify support through #{issue} before submission.",
                    source=f"{report.source_location}#{key}")
 
+    def readiness(code: str, key: str, reason: str, flag: str) -> None:
+        report.add("runtime_capability", code, reason,
+                   f"Qualify the selected deployment with {flag}=true before submission; "
+                   "this static report cannot verify runtime readiness.",
+                   source=f"{report.source_location}#{key}")
+
     if "user" in env and env["user"] != "agent":
-        add("task_identity", "environment.user", f"Task declares user {env['user']!r}; profile uses 'agent'.", 2049)
+        readiness("task_identity", "environment.user",
+                  f"Task user {env['user']!r} is preserved; execution requires a qualified task identity runtime.",
+                  "supports_task_identity")
+    elif "HOME" in _section(env, "environment"):
+        readiness("task_identity", "environment.environment.HOME",
+                  "Declared HOME is preserved and requires a qualified task identity runtime.",
+                  "supports_task_identity")
     if agent.get("user") is not None:
         add("agent_identity", "agent.user", "Custom agent identity is not admitted by this profile.", 2049)
     if agent.get("continue_until_timeout") is not None:
@@ -160,7 +179,9 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                    "Retain this task as blocked until the agent completion policy is supported; do not drop the declaration.",
                    source=f"{report.source_location}#agent.continue_until_timeout")
     if verifier.get("user") is not None:
-        add("verifier_identity", "verifier.user", "Profile removes the declared verifier identity.", 2049)
+        readiness("verifier_identity", "verifier.user",
+                  "The verifier identity declaration is preserved; execution requires a qualified task identity runtime.",
+                  "supports_task_identity")
     if "workdir" in env and env["workdir"] not in ("/app", "/workspace"):
         add("workspace_path", "environment.workdir", "Profile would replace the declared workdir with /app.", 2047)
     if "mutable_paths" in env and "mutable_paths" not in EnvironmentConfig.model_fields:
@@ -168,15 +189,26 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
     if env.get("services") or env.get("sidecars"):
         add("services", "environment.services" if env.get("services") else "environment.sidecars",
             "Declared services need runtime initialization and verifier lifecycle support.", 2050)
-    if env.get("allow_internet") is True:
-        add("runtime_egress", "environment.allow_internet", "Internet access is declared; profile forces gateway-only egress.", 2048)
+    if env.get("service_lifecycle") is not None:
+        readiness("service_lifecycle", "environment.service_lifecycle",
+                  "The service lifecycle declaration is preserved and requires qualified startup, snapshot and verifier cleanup support.",
+                  "service_lifecycle_ready")
+    policy = env.get("baseline_network_policy")
+    preserved_web = isinstance(policy, dict) and policy.get("kind") == "web-allowlist" and env.get("allow_internet") is not False
+    if env.get("allow_internet") is True and not preserved_web:
+        add("runtime_egress", "environment.allow_internet",
+            "Unrestricted internet access is declared; this preparation path only retains an explicit web-allowlist or Gateway networking.", 2048)
     if env.get("allow_internet") is False:
         add("network_policy_change", "environment.allow_internet", "No-network is declared; profile enables Gateway networking.", 2048)
-    policy = env.get("baseline_network_policy")
-    if isinstance(policy, dict) and policy.get("kind") != "gateway-only":
-        add("runtime_egress", "environment.baseline_network_policy", "Declared network policy differs from gateway-only.", 2048)
+    if preserved_web:
+        readiness("runtime_egress", "environment.baseline_network_policy",
+                  "The exact HTTP/HTTPS destination allowlist is preserved; runtime enforcement needs deployment qualification.",
+                  "supports_task_web_egress")
+    elif isinstance(policy, dict) and policy.get("kind") != "gateway-only":
+        add("runtime_egress", "environment.baseline_network_policy",
+            "This network policy has no supported preparation mapping; adaptation would replace it with Gateway networking.", 2048)
     policies = env.get("network_policies_supported")
-    if isinstance(policies, list) and policies != ["gateway-only"]:
+    if isinstance(policies, list) and policies != ["gateway-only"] and not preserved_web:
         add("network_policy_change", "environment.network_policies_supported", "Profile replaces the declared supported policies.", 2048)
     if env.get("cpu_arch", env.get("architecture", "x86_64")) not in ("x86_64", "amd64", "any"):
         add("architecture", "environment.cpu_arch", "Declared architecture differs from this x86_64 execution profile.", 2051)
@@ -191,6 +223,82 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                    f"Profile would replace the declared verifier entrypoint {script!r}.",
                    "Provide a reviewed equivalent verifier bridge that preserves the original entrypoint.",
                    source=f"{report.source_location}#verifier.args.script_path")
+
+
+def _dockerfile_runtime_requirements(bundle: Path, task: TaskConfig, report: TaskCompatibilityReport) -> None:
+    """Report effective source metadata that preparation/runtime would override.
+
+    Follow local stage inheritance, but never infer registry image metadata or
+    execute unreviewed startup scripts. Build-context checks own parse failures.
+    """
+    if task.environment.dockerfile is None:
+        return
+    # Preparation accepts its own derived path by returning to this original.
+    dockerfile = bundle / str(task.environment.dockerfile).removesuffix(".loom-nebius")
+    if not dockerfile.resolve().is_relative_to(bundle.resolve()):
+        return
+    try:
+        instructions = dockerfile_instructions(dockerfile.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return
+    stages: dict[str, dict[str, DockerfileInstruction]] = {}
+    current: dict[str, DockerfileInstruction] = {}
+    local_cmd = False
+    for instruction in instructions:
+        if instruction.keyword == "FROM":
+            words = instruction.arguments.split()
+            while words and words[0].startswith("--"):
+                words.pop(0)
+            if not words:
+                return  # Preparation reports malformed FROM instructions.
+            current = dict(stages.get(words[0].lower(), {}))
+            local_cmd = False
+            if len(words) == 3 and words[1].upper() == "AS":
+                stages[words[2].lower()] = current
+        elif instruction.keyword in {"ENTRYPOINT", "CMD", "USER"}:
+            if instruction.keyword == "ENTRYPOINT" and not local_cmd:
+                # An authored ENTRYPOINT clears CMD inherited from its base.
+                current.pop("CMD", None)
+            if instruction.keyword == "CMD":
+                local_cmd = True
+            current[instruction.keyword] = instruction
+
+    lifecycle = task.environment.service_lifecycle
+    for key in ("ENTRYPOINT", "CMD", "USER"):
+        effective = current.get(key)
+        if effective is None:
+            continue
+        value = effective.arguments.strip()
+        if key != "USER":
+            if not value or re.fullmatch(r"\[\s*\]", value):
+                continue
+            if lifecycle is not None and lifecycle.startup_command:
+                continue  # The declaration records the author's reviewed initializer.
+            report.add("unsupported_conversion", "dockerfile_startup_overridden",
+                       f"Final image {key} {value} is bypassed by the native sandbox runtime; no returning initializer is declared.",
+                       "Review the original startup semantics and declare an equivalent returning "
+                       "environment.service_lifecycle.startup_command and readiness check when initialization is needed; "
+                       "do not execute or drop unreviewed startup behavior.",
+                       source=f"{dockerfile}:{effective.line}")
+        elif not _prepared_user_matches(value, task):
+            report.add("unsupported_conversion", "dockerfile_user_overridden",
+                       f"Final image USER {value} is not established by the task identity declaration; preparation selects environment.user instead.",
+                       "Review the original image identity and declare its supported environment.user and HOME explicitly; "
+                       "named users or UID-only identities may require image metadata inspection. Do not infer a replacement identity.",
+                       source=f"{dockerfile}:{effective.line}")
+
+
+def _prepared_user_matches(source_user: str, task: TaskConfig) -> bool:
+    try:
+        identity = resolve_sandbox_identity(task.environment.user, task.environment.environment.get("HOME"))
+    except ValueError:
+        return False
+    uid, gid = (identity.run_as_user, identity.run_as_group) if identity else (65532, 65532)
+    if source_user in {"root", "0", "0:0"}:
+        return (uid, gid) == (0, 0)
+    if re.fullmatch(r"[0-9]+:[0-9]+", source_user):
+        return tuple(map(int, source_user.split(":"))) == (uid, gid)
+    return False  # Named users and implicit primary groups require image inspection.
 
 
 def _build_context_diagnostics(bundle: Path, task: TaskConfig, report: TaskCompatibilityReport) -> None:

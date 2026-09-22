@@ -629,6 +629,18 @@ can coexist with a blocked disposition when the profile changes declared task
 requirements. The report does not build images, submit model work, upload files
 or modify the input tree; ordinary publication validation remains unchanged.
 
+Explicit task/verifier identities, exact web allowlists and service lifecycle
+declarations remain in the adapted configuration. The report names their
+required runtime readiness flags; it cannot establish that a selected deployment
+has qualified those capabilities. Effective Dockerfile `ENTRYPOINT`, `CMD` and
+`USER` settings are checked through local stage inheritance. Startup defaults
+without an explicit returning initializer, and users that the task identity
+does not establish, require review instead of being labeled equivalent. This
+includes declarations in the original source behind a prepared Dockerfile.
+Empty startup resets and unused build stages do not introduce requirements.
+Registry base-image metadata, named-user resolution and script behavior remain
+outside these source-only checks; no startup command or user is inferred.
+
 Literal local `COPY`/`ADD` sources are checked against their declared build
 context. Dockerfile heredoc bodies and `COPY --from` references are not mistaken
 for local files. Build-argument expansion, remote sources, `.dockerignore`
