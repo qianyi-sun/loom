@@ -76,9 +76,12 @@ class FakeS3:
         self.objects = objects
         self.listing = listing
         self.gets: list[str] = []
+        self.heads: list[str] = []
+        self.deletes: list[str] = []
         self.bodies: list[io.BytesIO] = []
         self.uploads: list[tuple[str, str, bytes]] = []
         self.closed = False
+        self._now = __import__("datetime").datetime.now(__import__("datetime").UTC)
 
     def get_paginator(self, name: str) -> FakeS3:
         assert name == "list_objects_v2"
@@ -86,15 +89,19 @@ class FakeS3:
 
     def paginate(self, **kwargs):
         prefix = kwargs["Prefix"]
-        yield {
-            "Contents": self.listing
-            if self.listing is not None
-            else [
-                {"Key": key, "Size": len(body)}
+        if self.listing is not None:
+            contents = [row for row in self.listing if row["Key"].startswith(prefix)]
+        else:
+            contents = [
+                {
+                    "Key": key,
+                    "Size": len(body),
+                    "LastModified": self._now,
+                }
                 for key, body in self.objects.items()
                 if key.startswith(prefix)
             ]
-        }
+        yield {"Contents": contents}
 
     def get_object(self, **kwargs):
         key = kwargs["Key"]
@@ -105,6 +112,18 @@ class FakeS3:
         self.bodies.append(body)
         return {"Body": body, "ContentLength": len(self.objects[key])}
 
+    def head_object(self, **kwargs):
+        key = kwargs["Key"]
+        self.heads.append(key)
+        if key not in self.objects:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {"ContentLength": len(self.objects[key])}
+
+    def delete_object(self, **kwargs):
+        key = kwargs["Key"]
+        self.deletes.append(key)
+        self.objects.pop(key, None)
+
     def close(self) -> None:
         self.closed = True
 
@@ -112,7 +131,9 @@ class FakeS3:
         self.objects[kwargs["Key"]] = kwargs["Body"]
 
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
-        self.uploads.append((bucket, key, Path(filename).read_bytes()))
+        body = Path(filename).read_bytes()
+        self.objects[key] = body
+        self.uploads.append((bucket, key, body))
 
 
 @pytest.fixture
@@ -372,7 +393,10 @@ def test_prepare_accepts_missing_cache_and_closes_both_clients(
     (tmp_path / "secrets/cache").mkdir(parents=True)
     runtime.prepare(claim, work, tmp_path / "secrets")
     assert (work / "context/run.sh").is_file() and (work / "oci").is_dir()
-    assert cache.gets == ["task-build-cache/" + claim["materialization_key"] + "/0.tar"]
+    assert cache.gets == [
+        f"task-build-cache/v2/{claim['materialization_key']}/0/manifest.json",
+        "task-build-cache/" + claim["materialization_key"] + "/0.tar",
+    ]
     assert source.closed and cache.closed
 
 
@@ -471,7 +495,9 @@ def test_prepare_imports_compatible_revision_cache_after_exact_miss(
     runtime.prepare(claim, work, tmp_path / "secrets")
     assert (work / "cache-in/0/index.json").is_file()
     assert cache.gets == [
+        f"task-build-cache/v2/{claim['materialization_key']}/0/manifest.json",
         f"task-build-cache/{claim['materialization_key']}/0.tar",
+        f"task-build-cache/v2/{donor}/0/manifest.json",
         f"task-build-cache/{donor}/0.tar",
     ]
     events = [
@@ -663,11 +689,16 @@ def test_publisher_records_registry_digest_with_optional_cache(
     if not cache_enabled:
         assert cache.uploads == [] and not cache.closed
         return
-    assert len(cache.uploads) == 1 and cache.closed
-    bucket, key, body = cache.uploads[0]
-    assert (bucket, key) == ("cache", "task-build-cache/" + claim["materialization_key"] + "/0.tar")
-    with tarfile.open(fileobj=io.BytesIO(body)) as packed:
-        assert packed.extractfile("blobs/layer").read() == b"cached layer"
+    # Default cache_transfer=blobs: content-addressed upload under current mat key.
+    assert cache.closed
+    manifest_key = f"task-build-cache/v2/{claim['materialization_key']}/0/manifest.json"
+    assert manifest_key in cache.objects
+    manifest = json.loads(cache.objects[manifest_key])
+    assert manifest["version"] == 1
+    assert {row["path"] for row in manifest["files"]} == {"blobs/layer"}
+    digest = manifest["files"][0]["sha256"]
+    assert cache.objects[f"task-build-cache/v2/blobs/{digest}"] == b"cached layer"
+    assert any(key.endswith(f"/blobs/{digest}") for _, key, _ in cache.uploads)
 
 
 @pytest.mark.parametrize("linked_directory", ["oci", "cache-out"])
@@ -749,3 +780,252 @@ def test_native_publisher_mints_auth_outside_task_volume_and_removes_it(
     assert len(minted) == 1
     assert calls[0][calls[0].index("--authfile") + 1] == str(minted[0])
     assert not minted[0].exists()
+
+
+def _v2_cache_objects(materialization_key: str, index: int, files: dict[str, bytes]) -> dict[str, bytes]:
+    entries = []
+    objects: dict[str, bytes] = {}
+    for path, body in sorted(files.items()):
+        digest = hashlib.sha256(body).hexdigest()
+        entries.append({"path": path, "sha256": digest, "size": len(body)})
+        objects[f"task-build-cache/v2/blobs/{digest}"] = body
+    manifest = json.dumps({"version": 1, "files": entries}, separators=(",", ":"), sort_keys=True).encode()
+    objects[f"task-build-cache/v2/{materialization_key}/{index}/manifest.json"] = manifest
+    return objects
+
+
+def test_prepare_imports_v2_blobs_and_skips_legacy_tar(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    objects = _v2_cache_objects(
+        claim["materialization_key"], 0, {"index.json": b'{"schemaVersion":2}'}
+    )
+    cache = FakeS3(objects)
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").read_bytes() == b'{"schemaVersion":2}'
+    assert cache.gets[0].endswith("/manifest.json")
+    assert not any(key.endswith(".tar") for key in cache.gets)
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert any(
+        row.get("event") == "hit" and row.get("format") == "blobs" for row in events
+    )
+
+
+def test_prepare_dual_reads_legacy_tar_after_blob_miss(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    cache_root = tmp_path / "legacy"
+    cache_root.mkdir()
+    (cache_root / "index.json").write_bytes(b'{"schemaVersion":2}')
+    archive = tmp_path / "legacy.tar"
+    runtime.pack_cache(cache_root, archive)
+    cache = FakeS3({f"task-build-cache/{claim['materialization_key']}/0.tar": archive.read_bytes()})
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").is_file()
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert any(row.get("format") == "blobs" and row.get("event") == "miss" for row in events)
+    assert any(row.get("format") == "tar" and row.get("event") == "hit" for row in events)
+
+
+def test_prepare_tar_mode_skips_blob_path(source_bundle, tmp_path, monkeypatch) -> None:
+    claim, source = source_bundle
+    claim = {**claim, "cache_transfer": "tar"}
+    cache_root = tmp_path / "legacy"
+    cache_root.mkdir()
+    (cache_root / "index.json").write_bytes(b'{"schemaVersion":2}')
+    archive = tmp_path / "legacy.tar"
+    runtime.pack_cache(cache_root, archive)
+    cache = FakeS3({f"task-build-cache/{claim['materialization_key']}/0.tar": archive.read_bytes()})
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    runtime.prepare(claim, tmp_path / "work", tmp_path / "secrets")
+    assert cache.gets == [f"task-build-cache/{claim['materialization_key']}/0.tar"]
+
+
+def test_prepare_invalid_blob_digest_falls_back_to_tar(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    digest = "a" * 64
+    manifest = json.dumps(
+        {"version": 1, "files": [{"path": "index.json", "sha256": digest, "size": 4}]},
+        separators=(",", ":"),
+    ).encode()
+    cache = FakeS3(
+        {
+            f"task-build-cache/v2/{claim['materialization_key']}/0/manifest.json": manifest,
+            f"task-build-cache/v2/blobs/{digest}": b"nope",
+        }
+    )
+    cache_root = tmp_path / "legacy"
+    cache_root.mkdir()
+    (cache_root / "index.json").write_bytes(b'{"ok":true}')
+    archive = tmp_path / "legacy.tar"
+    runtime.pack_cache(cache_root, archive)
+    cache.objects[f"task-build-cache/{claim['materialization_key']}/0.tar"] = archive.read_bytes()
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").read_bytes() == b'{"ok":true}'
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert any(row.get("reason") == "invalid_blobs" for row in events)
+
+
+def test_prepare_compatible_revision_hits_donor_blobs(
+    source_bundle, tmp_path, monkeypatch, capsys
+) -> None:
+    claim, source = source_bundle
+    donor = "c" * 64
+    claim = {**claim, "cache_import_materialization_key": donor}
+    objects = _v2_cache_objects(donor, 0, {"index.json": b'{"schemaVersion":2}'})
+    cache = FakeS3(objects)
+    monkeypatch.setattr(
+        runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache
+    )
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").is_file()
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+    assert any(
+        row.get("source") == "compatible" and row.get("format") == "blobs" and row.get("event") == "hit"
+        for row in events
+    )
+
+
+def test_publish_blobs_skips_existing_digest(source_bundle, tmp_path, publisher) -> None:
+    claim, _ = source_bundle
+    cache, _calls = publisher
+    body = b"cached layer"
+    digest = hashlib.sha256(body).hexdigest()
+    cache.objects[f"task-build-cache/v2/blobs/{digest}"] = body
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    (work / "cache-out/0").mkdir(parents=True)
+    (work / "cache-out/0/blobs").mkdir()
+    (work / "cache-out/0/blobs/layer").write_bytes(body)
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert cache.uploads == []
+    manifest_key = f"task-build-cache/v2/{claim['materialization_key']}/0/manifest.json"
+    assert manifest_key in cache.objects
+
+
+def test_publish_tar_mode_writes_legacy_archive(source_bundle, tmp_path, publisher) -> None:
+    claim, _ = source_bundle
+    claim = {**claim, "cache_transfer": "tar"}
+    cache, _calls = publisher
+    work = tmp_path / "work"
+    (work / "oci").mkdir(parents=True)
+    _write_native_oci(work / "oci/0000.tar")
+    (work / "cache-out/0/blobs").mkdir(parents=True)
+    (work / "cache-out/0/blobs/layer").write_bytes(b"cached layer")
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    assert len(cache.uploads) == 1
+    assert cache.uploads[0][1] == f"task-build-cache/{claim['materialization_key']}/0.tar"
+
+
+def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime.now(UTC) - timedelta(days=10)
+    recent = datetime.now(UTC) - timedelta(days=1)
+    orphan = "f" * 64
+    live = "e" * 64
+    manifest = json.dumps(
+        {"version": 1, "files": [{"path": "index.json", "sha256": live, "size": 2}]},
+        separators=(",", ":"),
+    ).encode()
+    objects = {
+        f"task-build-cache/v2/blobs/{orphan}": b"xx",
+        f"task-build-cache/v2/blobs/{live}": b"ok",
+        f"task-build-cache/v2/{'a' * 64}/0/manifest.json": manifest,
+    }
+    listing = [
+        {"Key": f"task-build-cache/v2/blobs/{orphan}", "Size": 2, "LastModified": old},
+        {"Key": f"task-build-cache/v2/blobs/{live}", "Size": 2, "LastModified": old},
+        {
+            "Key": f"task-build-cache/v2/{'a' * 64}/0/manifest.json",
+            "Size": len(manifest),
+            "LastModified": recent,
+        },
+    ]
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert f"task-build-cache/v2/blobs/{orphan}" not in cache.objects
+    assert f"task-build-cache/v2/blobs/{live}" in cache.objects
+    assert f"task-build-cache/v2/{'a' * 64}/0/manifest.json" in cache.objects
+
+
+def test_publish_directory_oci_uses_skopeo_oci_transport(
+    source_bundle, tmp_path, publisher
+) -> None:
+    from loom_execution_actuator import task_image_oci as oci
+
+    claim, _ = source_bundle
+    claim = {**claim, "oci_export_format": "directory", "cache_transfer": "tar"}
+    cache, calls = publisher
+    work = tmp_path / "work"
+    layout_dir = work / "oci/0000"
+    files = {
+        "blobs/sha256/" + "c" * 64: json.dumps(
+            {"architecture": "amd64", "os": "linux", "rootfs": {"type": "layers", "diff_ids": []}}
+        ).encode(),
+        "blobs/sha256/" + "d" * 64: b"",
+        "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+    }
+    # Build a valid directory via archive round-trip helpers from oci tests pattern.
+    config = files["blobs/sha256/" + "c" * 64]
+    manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:" + "c" * 64,
+                "size": len(config),
+            },
+            "layers": [],
+        }
+    ).encode()
+    files["blobs/sha256/" + "d" * 64] = manifest
+    files["index.json"] = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+                {
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": "sha256:" + "d" * 64,
+                    "size": len(manifest),
+                    "platform": {"architecture": "amd64", "os": "linux"},
+                }
+            ],
+        }
+    ).encode()
+    for name, body in files.items():
+        path = layout_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+    oci.validate_native_oci_directory(layout_dir)
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt.json")
+    source = next(arg for arg in calls[0] if arg.startswith("oci:"))
+    assert source == f"oci:{layout_dir}"
+    assert cache.uploads == []

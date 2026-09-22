@@ -299,6 +299,27 @@ def test_task_image_job_config_rejects_unknown_export_cache_mode() -> None:
         )
 
 
+def test_oci_export_directory_rewrites_dest_and_claim(inputs) -> None:
+    inputs["config"] = replace(inputs["config"], oci_export_format="directory")
+    configmap, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    assert "tar=false" in script
+    assert "type=oci,dest=/loom/build/oci/0000,tar=false" in script
+    assert "/loom/build/oci/0000.tar" not in script
+    claim = json.loads(configmap["data"]["claim.json"])
+    assert claim["components"][0]["oci_output_path"] == "oci/0000"
+
+
+def test_task_image_job_config_rejects_unknown_oci_export_format() -> None:
+    with pytest.raises(ValueError, match="oci_export_format"):
+        TaskImageJobConfig(
+            service_image="registry.example/service@sha256:" + "a" * 64,
+            source_secret_name="loom-task-build-source",
+            registry_secret_name="loom-task-build-registry",
+            oci_export_format="squashfs",  # type: ignore[arg-type]
+        )
+
+
 def test_dockerfile_paths_cannot_inject_shell_commands(inputs) -> None:
     path = "nested/space ' ;$(touch BAD)/Dockerfile"
     inputs["components"] = (

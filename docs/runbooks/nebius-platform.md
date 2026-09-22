@@ -888,7 +888,9 @@ configuration; omission leaves native building disabled:
   "active_deadline_seconds": 1800,
   "snapshotter": "overlayfs",
   "compatible_revision_cache": "off",
-  "export_cache_mode": "max"
+  "export_cache_mode": "max",
+  "cache_transfer": "blobs",
+  "oci_export_format": "archive"
 }
 ```
 
@@ -907,12 +909,35 @@ When enabled, Job logs show `cache_import` hits with `"source":"compatible"`.
 `export_cache_mode` selects BuildKit `--export-cache` `mode=max` (default) or
 `mode=min`. Keep `max` until Nebius stage timings justify flipping the default.
 
+`cache_transfer` selects how disposable BuildKit cache is stored in the cache
+bucket:
+
+| Value | Behavior |
+| --- | --- |
+| `blobs` (default) | Content-addressed `task-build-cache/v2/{mat}/{index}/manifest.json` plus shared `task-build-cache/v2/blobs/{sha256}`. Prepare dual-reads legacy `…/{mat}/{index}.tar` on blob miss so mixed rollouts stay warm. Publish uploads only missing digests under the **current** materialization key. |
+| `tar` | Whole-archive path only (instant rollback to pre-blob behavior). |
+
+Trim/GC still runs in-process on publish: oldest manifests and legacy tars are
+evicted under the 4 GiB / 7‑day budget; unreferenced v2 blobs older than 7 days
+are deleted afterward. Cache errors never mark a materialization ready.
+
+`oci_export_format` selects BuildKit OCI output shape for measure gates:
+
+| Value | Behavior |
+| --- | --- |
+| `archive` (default) | `type=oci,dest=oci/NNNN.tar` → skopeo `oci-archive:` (unchanged). |
+| `directory` | Job rewrites dest to `oci/NNNN` with `tar=false` → skopeo `oci:`. Opt-in for Nebius timing compares; flip the default only after Job-log evidence.
+
+Warm/persistent BuildKit capacity is **not** implemented here: keep
+`cpu_millis` at 1000 and existing Job quotas. Daemon pools are deferred.
+
 Prepare, BuildKit, and publish containers emit one JSON object per line with
 `loom_task_image_stage` set to `prepare`, `cache_import`, `solve`, `oci_export`,
 `cleanup`, `publish`, or `cache_export`, plus `event` (`start` / `end` / `hit` /
 `miss`) and `duration_ms` on timed `end` events. `solve` includes writing the
-OCI archive (`--output type=oci`); `oci_export` only records the resulting byte
-size. Grep Job logs for `loom_task_image_stage` when comparing cold builds.
+OCI output (`--output type=oci`); `oci_export` records resulting bytes (archive
+size or directory file-byte sum). Grep Job logs for `loom_task_image_stage`
+when comparing cold builds.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.

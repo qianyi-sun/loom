@@ -884,6 +884,8 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "snapshotter",
         "compatible_revision_cache",
         "export_cache_mode",
+        "cache_transfer",
+        "oci_export_format",
     }
     if (
         not isinstance(supplied, dict)

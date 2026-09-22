@@ -222,3 +222,25 @@ def test_rejects_compressed_or_truncated_tar_and_archive_symlink(layout, tmp_pat
     linked.symlink_to(image)
     with pytest.raises(oci.NativeOCIArchiveError, match="regular file"):
         oci.validate_native_oci_archive(linked)
+
+
+def _write_directory(path: Path, files: dict[str, bytes]) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "blobs/sha256").mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+    return path
+
+
+def test_directory_accepts_same_layout_as_archive(layout, tmp_path) -> None:
+    directory = _write_directory(tmp_path / "image", layout)
+    oci.validate_native_oci_directory(directory)
+
+
+def test_directory_rejects_symlink_member(layout, tmp_path) -> None:
+    directory = _write_directory(tmp_path / "image", layout)
+    (directory / "blobs/sha256" / ("e" * 64)).symlink_to(directory / "index.json")
+    with pytest.raises(oci.NativeOCIArchiveError, match="link"):
+        oci.validate_native_oci_directory(directory)

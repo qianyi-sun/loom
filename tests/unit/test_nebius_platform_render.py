@@ -206,6 +206,8 @@ def test_native_build_configuration_accepts_phase3_cache_policy(
         "snapshotter": "overlayfs",
         "compatible_revision_cache": "same_task",
         "export_cache_mode": "min",
+        "cache_transfer": "tar",
+        "oci_export_format": "directory",
     }
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     actuator = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "Deployment")
@@ -217,6 +219,8 @@ def test_native_build_configuration_accepts_phase3_cache_policy(
     assert settings["compatible_revision_cache"] == "same_task"
     assert settings["export_cache_mode"] == "min"
     assert settings["snapshotter"] == "overlayfs"
+    assert settings["cache_transfer"] == "tar"
+    assert settings["oci_export_format"] == "directory"
 
 
 @pytest.fixture
