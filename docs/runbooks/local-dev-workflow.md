@@ -44,6 +44,14 @@ docker compose --env-file .env -f deploy/docker-compose.dev.yml logs --tail=200
 Use `loom service up --help` and `loom service status --help` for the exact
 options supported by the installed candidate.
 
+No target, or `--environment local`, selects this local workflow explicitly.
+`--environment dev-<slug> --candidate <approved-candidate-uuid>` instead sends a
+request to the logged-in management server; it never falls back to Compose and
+cannot be combined with local-only flags. The
+[managed request layer](../architecture/nebius-primary-platform.md#managed-provisioning-requests)
+currently journals requests but does not yet provision personal stacks. Its
+`loom dev create/list/status/wait` commands are not installed-readiness evidence.
+
 ## Non-default local ports
 
 The Compose file binds services to loopback addresses by default. If another
