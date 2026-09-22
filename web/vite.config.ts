@@ -23,6 +23,16 @@ export default defineConfig(({ command }) => ({
     __LOOM_BROWSER_TEST_BUILD__: JSON.stringify(
       process.env.VITE_BROWSER_TEST_BUILD === "true",
     ),
+    // #2009: baked into the bundle at build time from deploy/Dockerfile.web's
+    // build args (reused from the release publisher's existing candidate
+    // SHA/source ref — see scripts/ops/nebius_candidate.py). This is the
+    // "loaded bundle" identity: frozen in the JS an already-open tab is
+    // running, unaffected by anything fetched later. Empty string (not
+    // undefined) for a plain local `npm run build`/`vite dev`, so the UI can
+    // show an honest "local/unknown" instead of crashing on a missing value.
+    __LOOM_BUILD_REVISION__: JSON.stringify(process.env.VITE_BUILD_REVISION ?? ""),
+    __LOOM_BUILD_SOURCE_REF__: JSON.stringify(process.env.VITE_BUILD_SOURCE_REF ?? ""),
+    __LOOM_BUILD_TIME__: JSON.stringify(process.env.VITE_BUILD_TIME ?? ""),
   },
   // Production builds keep relative assets. The Vite 8.0.16 dev server with
   // `base: "./"` does not match `/api` proxy rules, so `/api/v1/auth/me`

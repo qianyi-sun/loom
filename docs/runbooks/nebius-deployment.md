@@ -127,3 +127,15 @@ that a database restore or schema downgrade is safe.
 HTTPS health and frontend routing smoke are deployment checks only. User login,
 real workload execution, result integrity and fault-recovery acceptance remain the
 separate pure-Nebius E2E milestone.
+
+**Verifying the deployed version (#2009):** confirm the rendered candidate SHA
+actually reached the cluster by comparing it against what the running app
+reports, not just this deployment's own logs. Open the target URL, click the
+version entry at the bottom of the sidebar, and check the frontend commit
+matches the candidate; separately curl `<target>/api/v1/version` (or open it
+in the details) for the backend's own commit, keeping in mind one response is
+evidence for the responding instance only — for a multi-replica rollout, check
+more than one before declaring the rollout complete. Record this comparison
+(URL, expected candidate, observed frontend/backend commits) as deployment
+evidence; a green deploy script run or merged PR is not by itself live
+version acceptance.
