@@ -20,7 +20,7 @@ and onboarding behavior is documented in [Authentication and Teams](auth-and-tea
 | Public browser and API | Authentication and scope checks run before privileged handlers. Unknown reset usernames receive the same public response as known users. |
 | Team data | A normal principal can act only for its current or token-bound team and allowed role. Shared completed results use explicit Run Library visibility checks. |
 | Singleton operator secret | The high-entropy file-backed secret is mode-restricted, excluded from the database token table, and never implicitly displayed. |
-| Browser session | The session secret is HttpOnly and hash-only at rest. Unsafe requests require the matching in-memory CSRF token. |
+| Browser session | Hosted cookies are host-only Secure/HttpOnly `__Host-` cookies and hash-only at rest. Unsafe requests require the matching in-memory CSRF token and reject foreign browser origins, including sibling hosts. |
 | User API token | The raw token is revealed once, stored only as a hash, and bound to one user and team. |
 | Provider connection | Raw upstream credentials remain in trusted service and Gateway code and are redacted from errors, logs, audit rows, and artifacts. |
 | CI and deployment | Untrusted pull-request code does not receive deployment, provider, object-store, publishing, or signing credentials. |

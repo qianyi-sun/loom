@@ -49,6 +49,7 @@ from loom_cli.server_client import (
     authed_client,
     persist_session_credentials_from_response,
     require_logged_in,
+    response_session_cookie,
 )
 
 
@@ -88,6 +89,7 @@ def _save_bearer_login(*, server_url: str, token: str) -> None:
     cfg.server_url = server_url
     cfg.auth_token = token
     cfg.auth_session_cookie = None
+    cfg.auth_session_cookie_name = SESSION_COOKIE_NAME
     cfg.auth_csrf_token = None
     save_config(cfg)
 
@@ -96,12 +98,14 @@ def _save_session_login(
     *,
     server_url: str,
     session_cookie: str,
+    cookie_name: str,
     csrf_token: str,
 ) -> None:
     cfg = load_config()
     cfg.server_url = server_url
     cfg.auth_token = None
     cfg.auth_session_cookie = session_cookie
+    cfg.auth_session_cookie_name = cookie_name
     cfg.auth_csrf_token = csrf_token
     save_config(cfg)
 
@@ -135,20 +139,21 @@ def _login_with_password(args: argparse.Namespace, *, server_url: str) -> int:
         sys.stderr.write(f"error: could not reach {server_url}: {e}\n")
         return 2
 
-    session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
+    cookie = response_session_cookie(response)
     csrf_token = data.get("csrf_token") if isinstance(data, dict) else None
-    if not session_cookie or not isinstance(csrf_token, str) or not csrf_token:
+    if not cookie or not isinstance(csrf_token, str) or not csrf_token:
         sys.stderr.write("error: login response did not include session credentials\n")
         return 1
     _save_session_login(
         server_url=server_url,
-        session_cookie=session_cookie,
+        session_cookie=cookie[1],
+        cookie_name=cookie[0],
         csrf_token=csrf_token,
     )
     user = data.get("user") if isinstance(data, dict) else None
     username = user.get("username") if isinstance(user, dict) else args.username
     print(f"Logged in to {server_url} as {username}")
-    print(f"Session stored in {config_path()} ({SESSION_COOKIE_NAME} + {CSRF_HEADER_NAME})")
+    print(f"Session stored in {config_path()} ({cookie[0]} + {CSRF_HEADER_NAME})")
     return 0
 
 

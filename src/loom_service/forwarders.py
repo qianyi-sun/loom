@@ -50,7 +50,7 @@ async def forward(
         # public names to the existing cookie/CSRF contract on the internal hop;
         # the CP independently verifies both and applies the caller's team scope.
         settings = cancellation_request.app.state.settings
-        cookie = cancellation_request.cookies.get(settings.auth_session_cookie_name)
+        cookie = cancellation_request.cookies.get(settings.session_cookie_name)
         csrf = cancellation_request.headers.get(settings.auth_csrf_header_name)
         if cookie:
             headers["Cookie"] = f"loom_session={cookie}"

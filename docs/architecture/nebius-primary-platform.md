@@ -75,7 +75,7 @@ acceptance**. The managed format keeps the scheduler and capacity policy disable
 renders no actuator/collector Pods, grants only observer RBAC, and sets zero-Pod
 quotas in execution/build namespaces. The standalone deploy helper rejects this
 format. Candidate publication verification, management authentication/provisioning,
-shared admission/write enforcement, hosted cookie isolation and installed
+shared admission/write enforcement and installed
 concurrent-owner execution are not established by rendering these resources.
 
 ## Supported workload boundary

@@ -156,6 +156,26 @@ async def test_cancel_crosses_real_service_cp_boundary(
         assert other is not None and other.state == "queued"
 
 
+async def test_hosted_cookie_cancellation_keeps_identity_across_internal_http(cancel_stack):
+    stack = cancel_stack
+    stack.service.state.settings.auth_local_http = False
+    async with stack.sessions() as session:
+        await session.execute(update(Trial).where(Trial.id == stack.trial_id).values(batch_id=None))
+        await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service),
+                                 base_url="https://alice.dev.example.com") as client:
+        response = await client.post(f"/api/v1/trials/{stack.trial_id}/cancel", headers={
+            "Cookie": f"__Host-test_session={stack.session_cookie}",
+            "X-Test-CSRF": stack.csrf,
+            "Origin": "https://alice.dev.example.com",
+        })
+    assert response.status_code == 200, response.text
+    async with stack.sessions() as session:
+        trial = await session.get(Trial, stack.trial_id)
+        assert trial.state == "cancelled"
+        assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
+
+
 @pytest.mark.parametrize("resource", ["trials", "batches"])
 @pytest.mark.parametrize("denial", ["cross-team", "missing-csrf", "invalid-csrf"])
 async def test_service_rejects_cookie_cancellation_before_forward(

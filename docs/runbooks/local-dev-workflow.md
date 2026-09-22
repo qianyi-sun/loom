@@ -3,6 +3,10 @@
 Local development uses Docker Compose through `loom service`. Kubernetes is
 reserved for shared cluster targets and protected rollout workflows.
 
+The local Compose service explicitly sets `LOOM_SVC_AUTH_LOCAL_HTTP=true` for
+HTTP browser login through Vite. The service defaults to Secure `__Host-` cookies
+elsewhere; do not enable the HTTP compatibility setting in hosted development.
+
 ## Prerequisites
 
 - Docker with the Compose plugin (`docker compose version`)

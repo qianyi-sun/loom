@@ -9,15 +9,17 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, TypedDict
+from urllib.parse import SplitResult, urlsplit
 from uuid import UUID
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext, role_scopes
 from loom.db.schema import LoginChallenge, Team, TeamMembership, User, UserSession
 from loom_service.config import LoomServiceSettings
+from loom_service.public_links import configured_public_base_url
 
 SessionSecretPrefix = Literal["loom_session", "loom_session_staging_admin"]
 
@@ -62,10 +64,6 @@ def _raw_secret(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
-def cookie_secure() -> bool:
-    return os.environ.get("LOOM_ENV", "").lower() == "production"
-
-
 def session_cookie_options(
     settings: LoomServiceSettings,
     *,
@@ -76,13 +74,42 @@ def session_cookie_options(
     if max_age is not None and max_age <= 0:
         raise ValueError("session cookie max_age must be positive")
     return {
-        "key": settings.auth_session_cookie_name,
+        "key": settings.session_cookie_name,
         "httponly": True,
-        "secure": cookie_secure() or force_secure,
+        "secure": settings.hosted_session_cookie or force_secure,
         "samesite": "lax",
         "max_age": settings.auth_session_ttl_sec if max_age is None else max_age,
         "path": "/",
     }
+
+
+def browser_origin_allowed(request: Request, settings: LoomServiceSettings) -> bool:
+    """Reject cross-origin browser writes, including unauthenticated login.
+
+    SameSite does not isolate sibling subdomains. Do not trust forwarded Host
+    headers as the public origin. Non-browser clients without Origin/Fetch
+    Metadata still require the normal authentication and session CSRF token.
+    """
+    if not settings.hosted_session_cookie or request.method.upper() in _STAGING_ADMIN_SAFE_METHODS:
+        return True
+    origin = request.headers.get("origin")
+    if origin is None:
+        return request.headers.get("sec-fetch-site", "none") in {"none", "same-origin"}
+    if origin.strip() != origin or any(ord(char) < 32 for char in origin):
+        return False
+    try:
+        supplied = urlsplit(origin)
+        expected = urlsplit(configured_public_base_url(settings.public_base_url) or str(request.base_url))
+        if (supplied.scheme not in {"http", "https"} or not supplied.hostname
+                or supplied.username is not None or supplied.password is not None
+                or supplied.path or supplied.query or supplied.fragment):
+            return False
+        def identity(url: SplitResult) -> tuple[str, str | None, int]:
+            port = url.port if url.port is not None else (443 if url.scheme == "https" else 80)
+            return url.scheme, url.hostname, port
+        return identity(supplied) == identity(expected)
+    except ValueError:
+        return False
 
 
 def is_staging_admin_browser_session(raw_cookie: str | None) -> bool:

@@ -56,7 +56,7 @@ def _request_auth_kind(request: Request, authorization: str | None) -> str:
         return "bearer"
     settings = getattr(request.app.state, "settings", None)
     if settings is not None and request.cookies.get(
-        settings.auth_session_cookie_name,
+        settings.session_cookie_name,
     ):
         return "session"
     return "anonymous"
@@ -109,7 +109,7 @@ async def authed_session(
             if settings is not None:
                 ctx_optional = await verify_session_cookie(
                     session,
-                    request.cookies.get(settings.auth_session_cookie_name),
+                    request.cookies.get(settings.session_cookie_name),
                 )
         try:
             ctx = require_human_or_admin(ctx_optional)

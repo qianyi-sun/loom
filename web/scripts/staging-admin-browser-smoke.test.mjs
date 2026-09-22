@@ -504,13 +504,13 @@ describe("sanitized evidence contract", () => {
     expect(JSON.stringify(report)).not.toContain(RAW_ADMIN_TOKEN);
   });
 
-  it("requires one short Secure HttpOnly SameSite=Lax cookie", () => {
+  it.each(["loom_session", "__Host-loom_session"])("requires one short Secure HttpOnly SameSite=Lax cookie (%s)", (cookieName) => {
     const now = 1_800_000_000;
     expect(
       validateBootstrapCookie(
         [
           {
-            name: "loom_session",
+            name: cookieName,
             value: "loom_session_staging_admin_example",
             httpOnly: true,
             secure: true,

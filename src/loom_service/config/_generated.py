@@ -24,6 +24,7 @@ class LoomServiceSettings(BaseSettings):
     artifacts_bucket: str = "artifacts"
     auth_csrf_cookie_name: str = "loom_csrf"
     auth_csrf_header_name: str = "X-Loom-CSRF"
+    auth_local_http: bool = False
     auth_login_challenge_ttl_sec: int = 900
     auth_return_login_token: bool = False
     auth_session_cookie_name: str = "loom_session"

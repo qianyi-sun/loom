@@ -25,6 +25,7 @@ LOGIN_HINT = (
     "`loom auth login --server URL --token env:LOOM_API_TOKEN`."
 )
 SESSION_COOKIE_NAME = "loom_session"
+HOST_SESSION_COOKIE_NAME = "__Host-loom_session"
 CSRF_HEADER_NAME = "X-Loom-CSRF"
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
@@ -32,6 +33,30 @@ _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 class NotLoggedInError(Exception):
     """The persisted config doesn't have a (server_url, auth_token)
     pair. Caller prints a helpful message + exits non-zero."""
+
+
+def response_session_cookie(
+    response: httpx.Response, *, current_name: str | None = None,
+) -> tuple[str, str] | None:
+    """Read the two supported cookie contracts; never downgrade a hosted session."""
+    names = (HOST_SESSION_COOKIE_NAME,) if current_name == HOST_SESSION_COOKIE_NAME else (
+        HOST_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME,
+    )
+    for name in names:
+        matches = [cookie for cookie in response.cookies.jar if cookie.name == name]
+        if not matches:
+            continue
+        if len(matches) != 1:
+            return None
+        cookie = matches[0]
+        if name == HOST_SESSION_COOKIE_NAME and (
+            response.request.url.scheme != "https" or not cookie.secure
+            or cookie.domain_specified or cookie.path != "/"
+        ):
+            return None
+        if cookie.value:
+            return name, cookie.value
+    return None
 
 
 def require_logged_in() -> LoomConfig:
@@ -75,12 +100,17 @@ def authed_client(
             **kwargs,
         )
     assert cfg.auth_session_cookie is not None
+    if cfg.auth_session_cookie_name not in (SESSION_COOKIE_NAME, HOST_SESSION_COOKIE_NAME):
+        raise ValueError("unsupported session cookie name")
+    if (cfg.auth_session_cookie_name == HOST_SESSION_COOKIE_NAME
+            and httpx.URL(cfg.server_url).scheme != "https"):
+        raise ValueError("hosted session requires an HTTPS origin")
     headers = {}
     if cfg.auth_csrf_token is not None:
         headers[CSRF_HEADER_NAME] = cfg.auth_csrf_token
     return _SessionAuthClient(
         cfg,
-        cookies={SESSION_COOKIE_NAME: cfg.auth_session_cookie},
+        cookies={cfg.auth_session_cookie_name: cfg.auth_session_cookie},
         headers=headers,
         **kwargs,
     )
@@ -96,9 +126,9 @@ def persist_session_credentials_from_response(
     if cfg.auth_session_cookie is None:
         return False
     changed = False
-    session_cookie = response.cookies.get(SESSION_COOKIE_NAME)
-    if session_cookie and session_cookie != cfg.auth_session_cookie:
-        cfg.auth_session_cookie = session_cookie
+    cookie = response_session_cookie(response, current_name=cfg.auth_session_cookie_name)
+    if cookie and (cookie[1] != cfg.auth_session_cookie or cookie[0] != cfg.auth_session_cookie_name):
+        cfg.auth_session_cookie_name, cfg.auth_session_cookie = cookie
         changed = True
     body = data
     if body is None:
@@ -129,6 +159,37 @@ class _SessionAuthClient(httpx.Client):
         self._loom_cfg = cfg
         self._loom_csrf_refreshed = False
         super().__init__(*args, **kwargs)
+        self._loom_login_origin = (self.base_url.scheme, self.base_url.host, self.base_url.port)
+        auth_base_path = self.base_url.path.rstrip("/") + "/api/v1/auth/"
+        self._loom_credential_paths = {
+            auth_base_path + suffix for suffix in ("me", "refresh", "team", "login", "login/complete")
+        }
+        self.event_hooks["request"].append(self._assert_session_origin)
+        self.event_hooks["response"].append(self._accept_session_response)
+
+    def _assert_session_origin(self, request: httpx.Request) -> None:
+        """Runs on redirects too, before any session/CSRF secret leaves the CLI."""
+        if (request.url.scheme, request.url.host, request.url.port) != self._loom_login_origin:
+            raise ValueError("session request must use the authenticated origin")
+        # httpx's cookie jar does not enforce the browser's __Host- rules.
+        # Only credentials accepted by our response validator may be sent.
+        name = self._loom_cfg.auth_session_cookie_name
+        request.headers["Cookie"] = f"{name}={self._loom_cfg.auth_session_cookie}"
+
+    def _accept_session_response(self, response: httpx.Response) -> None:
+        if response.status_code // 100 != 2:
+            return
+        # Consume only small auth JSON; artifact streams must remain streaming.
+        # Other routes may rotate a cookie, but their bodies cannot set CSRF.
+        body: dict[str, Any] | None = {}
+        if response.request.url.path in self._loom_credential_paths:
+            response.read()
+            body = None
+        if persist_session_credentials_from_response(self._loom_cfg, response, data=body):
+            self.cookies.clear()
+            self.cookies.set(self._loom_cfg.auth_session_cookie_name, self._loom_cfg.auth_session_cookie or "")
+            if self._loom_cfg.auth_csrf_token is not None:
+                self.headers[CSRF_HEADER_NAME] = self._loom_cfg.auth_csrf_token
 
     def request(self, method: str, url: httpx.URL | str, **kwargs: Any) -> httpx.Response:
         unsafe = method.upper() in _UNSAFE_METHODS
@@ -144,24 +205,7 @@ class _SessionAuthClient(httpx.Client):
         if self._loom_csrf_refreshed and not force:
             return
         self._loom_csrf_refreshed = True
-        response = super().request("GET", "/api/v1/auth/me")
-        if response.status_code // 100 != 2:
-            return
-        try:
-            data = response.json()
-        except Exception:
-            data = None
-        body = data if isinstance(data, dict) else None
-        if persist_session_credentials_from_response(
-            self._loom_cfg,
-            response,
-            data=body,
-        ):
-            if self._loom_cfg.auth_session_cookie is not None:
-                self.cookies.clear()
-                self.cookies.set(SESSION_COOKIE_NAME, self._loom_cfg.auth_session_cookie)
-            if self._loom_cfg.auth_csrf_token is not None:
-                self.headers[CSRF_HEADER_NAME] = self._loom_cfg.auth_csrf_token
+        super().request("GET", "/api/v1/auth/me")
 
 
 class HttpStatusError(Exception):
