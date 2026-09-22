@@ -250,3 +250,47 @@ async def test_api_empty_list_omission_preserves_default_deny_readback():
         provider = KubernetesEnvironmentProvider(http)
         ctx.identities["k8s:Namespace:-:loom-dev-alice"] = await provider.apply(ctx, namespace())
         assert await provider.apply(ctx, ProvisioningStep("policy", "kubernetes", doc)) == "uid-default-deny"
+
+
+@pytest.mark.parametrize("kind,spec,change", [
+    ("NetworkPolicy", {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []},
+     {"podSelector": {"matchLabels": {"app": "unrelated"}}}),
+    ("NetworkPolicy", {"podSelector": {"matchLabels": {"app": "loom"}}, "policyTypes": ["Ingress"]},
+     {"podSelector": {"matchLabels": {"app": "loom", "foreign": "true"}}}),
+    ("NetworkPolicy", {"podSelector": {}, "policyTypes": ["Ingress"]},
+     {"ingress": [{}]}),
+    ("NetworkPolicy", {"podSelector": {}, "policyTypes": ["Ingress"], "ingress": [{"from": [{"namespaceSelector": {}}]}]},
+     {"ingress": [{"from": [{"namespaceSelector": {}, "podSelector": {"matchLabels": {"app": "unrelated"}}}]}]}),
+    ("ResourceQuota", {"hard": {"pods": "0"}}, {"scopes": ["Terminating"]}),
+    ("ResourceQuota", {"hard": {"pods": "0"}},
+     {"scopeSelector": {"matchExpressions": [{"scopeName": "Terminating", "operator": "Exists"}]}}),
+    ("Service", {"selector": {"app": "loom"}, "ports": [{"port": 80}]},
+     {"selector": {"app": "loom", "foreign": "true"}}),
+])
+async def test_readback_rejects_authority_changing_policy_quota_and_selector_additions(kind, spec, change):
+    from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    ctx, stored = context(), {}
+
+    def api(request):
+        path = request.url.path
+        if request.method == "POST":
+            obj = json.loads(request.content)
+            obj["metadata"]["uid"] = "uid-" + obj["metadata"]["name"]
+            stored[path + "/" + obj["metadata"]["name"]] = obj
+            return httpx.Response(201, json=obj)
+        return httpx.Response(200, json=stored[path]) if path in stored else httpx.Response(404)
+
+    doc = {"apiVersion": "networking.k8s.io/v1" if kind == "NetworkPolicy" else "v1", "kind": kind,
+           "metadata": {"namespace": "loom-dev-alice", "name": "fence"}, "spec": spec}
+    step = ProvisioningStep("fence", "kubernetes", doc)
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api)) as http:
+        provider = KubernetesEnvironmentProvider(http)
+        ctx.identities["k8s:Namespace:-:loom-dev-alice"] = await provider.apply(ctx, namespace())
+        ctx.identities[step.key] = await provider.apply(ctx, step)
+        _, path = provider._path(ctx, doc)
+        stored[path]["spec"].update(change)
+        stored[path]["status"] = {"hard": {"pods": "0"}, "used": {"pods": "0"}}
+        with pytest.raises(ProviderBlockedError, match="kubernetes_resource_identity_conflict"):
+            await provider.apply(ctx, step)
