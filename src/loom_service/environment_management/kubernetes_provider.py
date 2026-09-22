@@ -37,17 +37,43 @@ _RESOURCES = {
 _NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?")
 
 
-def _contains(actual: Any, expected: Any, path: tuple[str, ...] = ()) -> bool:
-    """Allow server defaults, but never drop/change/reorder a frozen field."""
+def _contains(
+    actual: Any, expected: Any, path: tuple[str, ...] = (), *,
+    kind: str | None = None, exact: bool = False,
+) -> bool:
+    """Allow API decoration, not additions inside frozen policy/selector maps.
+
+    Empty selectors mean *all*, so an extra key is a changed security boundary,
+    not a default. Quota scopes likewise narrow which Pods consume the quota.
+    Keep those complete subtrees closed while tolerating metadata/status and
+    normal controller defaulting outside them. Cloud callers have no K8s kind.
+    """
     if isinstance(expected, dict):
+        if not path and isinstance(expected.get("kind"), str):
+            kind = expected["kind"]
+        exact = exact or (kind in _RESOURCES and (
+            (path == ("spec",) and kind in {"NetworkPolicy", "ResourceQuota"})
+            or (bool(path) and path[-1] in {"selector", "podSelector", "namespaceSelector"})
+        ))
+        if not isinstance(actual, dict):
+            return False
+        if exact and any(
+            # NetworkPolicyPort defaults to TCP; no other rule addition is an
+            # API default. In particular, from/to peers and empty selectors
+            # cannot silently acquire another selector or expression.
+            not (kind == "NetworkPolicy" and path[-2:] == ("ports", "*")
+                 and key == "protocol" and actual[key] == "TCP")
+            for key in actual.keys() - expected.keys()
+        ):
+            return False
         if (path[-2:] == ("env", "*") and "value" in expected and "valueFrom" not in expected
-                and isinstance(actual, dict) and "valueFrom" in actual):
+                and "valueFrom" in actual):
             return False
         # Kubernetes omits zero-length optional lists (e.g. default-deny
         # ingress/egress rules). Scalar false/zero MUST NOT be treated as absent:
         # their defaults can grant authority or start replicas.
-        return isinstance(actual, dict) and all(
-            (_contains(actual[key], value, (*path, key)) if key in actual else (
+        return all(
+            (_contains(actual[key], value, (*path, key), kind=kind, exact=exact) if key in actual else (
                 value == [] or (path[-2:] == ("env", "*") and key == "value"
                                 and value == "" and "valueFrom" not in actual)
             ))
@@ -55,7 +81,8 @@ def _contains(actual: Any, expected: Any, path: tuple[str, ...] = ()) -> bool:
         )
     if isinstance(expected, list):
         return (isinstance(actual, list) and len(actual) == len(expected)
-                and all(_contains(a, b, (*path, "*")) for a, b in zip(actual, expected, strict=True)))
+                and all(_contains(a, b, (*path, "*"), kind=kind, exact=exact)
+                        for a, b in zip(actual, expected, strict=True)))
     return type(actual) is type(expected) and actual == expected
 
 

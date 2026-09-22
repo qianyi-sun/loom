@@ -199,7 +199,11 @@ host. The child loads its protected identity from
 admin identity without copying a password. Management-issued proof is consumed by
 the child's existing `/api/v1/auth/login/complete` route, creating a new child
 session. Proof expiry is checked after database locks; concurrent replay cannot
-create two sessions. The CLI/browser context-selection UX is not yet implemented.
+create two sessions. Login requires a mutation-capable management user session;
+an attributed bearer must also carry every child-owner scope (`read:own`, `submit`,
+`tokens:manage`, `providers:manage`, `team:manage`). Read-only or attenuated bearer
+credentials cannot be exchanged for owner authority. The CLI/browser context-
+selection UX is not yet implemented.
 
 Retained destroy advances the desired generation immediately, fencing earlier
 workers and management login issuance. It revokes the ready child's owner/team
@@ -212,6 +216,8 @@ UID before their cleanup. Completion requires stopped-controller readback, compl
 Pod inventory and enforced zero-Pod quota usage. Only then are CPU/RAM/ephemeral
 reservations released. Namespaces, PVCs, buckets, storage reservations and name claims
 remain; there is no data purge, slug reuse or automatic result-expiry policy.
+Quota scopes and selectors must match the frozen intent, not merely contain its
+fields: a scoped zero-Pod quota is not evidence that all Pod admission is closed.
 
 After logging in to the selected management origin, the request/status commands are:
 

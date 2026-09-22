@@ -268,7 +268,9 @@ async def test_api_empty_list_omission_preserves_default_deny_readback():
      {"selector": {"app": "loom", "foreign": "true"}}),
 ])
 async def test_readback_rejects_authority_changing_policy_quota_and_selector_additions(kind, spec, change):
-    from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
+    from loom_service.environment_management.kubernetes_provider import (
+        KubernetesEnvironmentProvider,
+    )
     from loom_service.environment_management.provider import ProviderBlockedError
 
     ctx, stored = context(), {}
