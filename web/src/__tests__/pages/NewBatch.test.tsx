@@ -1233,6 +1233,9 @@ describe("NewBatch", () => {
     expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
     expect(screen.queryByText(/^TaskSets$/i)).not.toBeInTheDocument();
     expect(
+      screen.queryByRole("link", { name: "Manage TaskSets" }),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByRole("checkbox", {
         name: /Select TaskSet ts\/team-uuid\/sample-tasks/i,
       }),
@@ -1247,6 +1250,9 @@ describe("NewBatch", () => {
       screen.getByRole("radio", { name: /Trajectory generation/i }),
     );
     expect(screen.getByText(/^TaskSets$/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage TaskSets" }),
+    ).toHaveAttribute("href", "/task-sets");
     expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
     expect(
       screen.getByText(/^Official benchmarks$/i).parentElement,

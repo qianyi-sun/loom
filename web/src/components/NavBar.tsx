@@ -20,7 +20,6 @@ const NAV_ITEMS = [
   { to: "/pipelines", label: "Pipelines" },
   { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
-  { to: "/task-sets", label: "Task Sets" },
 ];
 
 const TEAM_ADMIN_NAV_ITEM = { to: "/admin/access", label: "Team access" };
