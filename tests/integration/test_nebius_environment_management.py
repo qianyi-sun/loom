@@ -171,6 +171,38 @@ async def test_two_owners_cannot_overbook_last_platform_capacity(environment_reg
         assert await session.scalar(select(func.count()).select_from(NebiusEnvironment)) == 1
 
 
+@pytest.mark.parametrize("dimension", ["memory_mib", "storage_mib", "ephemeral_storage_mib"])
+async def test_platform_admission_checks_non_cpu_dimensions(environment_registry, dimension):
+    from sqlalchemy import update
+
+    from loom.db.nebius_environment_schema import NebiusEnvironment, NebiusPlatformBudget
+    from loom_service.environment_management.registry import ManagementError
+
+    registry, factory, (alice, _), prepare = environment_registry
+    async with factory.begin() as session:
+        await session.execute(update(NebiusPlatformBudget).values(**{dimension: 0}))
+    with pytest.raises(ManagementError, match="platform_capacity_exhausted") as caught:
+        await registry.create(principal=alice, idempotency_key="no-space", prepared=prepare())
+    assert caught.value.details["available"][dimension] == 0
+    assert caught.value.details["needed"][dimension] > 0
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusEnvironment)) == 0
+
+
+@pytest.mark.parametrize("changes,code", [
+    ({"scopes": ["read:own"]}, "environment_scope_required"),
+    ({"type": "worker"}, "user_identity_required"),
+    ({"type": "step_session"}, "user_identity_required"),
+    ({"team_id": None}, "user_identity_required"),
+])
+async def test_unprivileged_principal_cannot_reserve_platform_capacity(environment_registry, changes, code):
+    from loom_service.environment_management.registry import ManagementError
+
+    registry, _, (alice, _), prepare = environment_registry
+    with pytest.raises(ManagementError, match=code):
+        await registry.create(principal=replace(alice, **changes), idempotency_key="forbidden", prepared=prepare())
+
+
 async def test_resource_namespace_collision_rolls_back_every_claim(environment_registry):
     from loom.db.nebius_environment_schema import NebiusEnvironment, NebiusEnvironmentNamespace
     from loom_service.environment_management.registry import ManagementError
@@ -309,3 +341,80 @@ async def test_real_management_api_derives_owner_and_rejects_other_users(
             a.headers.pop("X-Loom-CSRF")
             assert (await a.post("/api/v1/environments", json=request,
                                  headers={"Idempotency-Key": "no-csrf"})).status_code == 403
+
+
+async def test_same_login_can_poll_while_publication_waits_without_pool_deadlock(
+    environment_registry, isolated_migration_postgres_url, platform_inputs, monkeypatch,
+):
+    import httpx
+
+    from loom.db.schema import TeamMembership
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+    from loom_service.environment_management.manager import (
+        CandidateBundle,
+        EnvironmentManager,
+        EnvironmentPlanFactory,
+    )
+    from loom_service.environment_management.registry import EnvironmentRegistry
+    from loom_service.password_auth import hash_password
+
+    _, factory, (alice, _), _ = environment_registry
+    async with factory.begin() as session:
+        user = await session.get(User, alice.user_id)
+        user.password_hash = hash_password("owner-passphrase")
+        session.add(TeamMembership(user_id=alice.user_id, team_id=alice.team_id, role="owner"))
+    # Use a small REAL pool to reproduce the same resource cycle as many
+    # concurrent requests on the default pool. No registry/auth method is mocked.
+    def engine(url, **kwargs):
+        return create_async_engine(url, pool_size=2, max_overflow=0, pool_timeout=0.5, **kwargs)
+
+    monkeypatch.setattr("loom_service.app.create_async_engine", engine)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class SlowPublicationApi:
+        async def resolve(self, identity):
+            entered.set()
+            await release.wait()
+            return CandidateBundle(identity, platform_inputs[1], platform_inputs[2])
+
+    app = create_app(LoomServiceSettings(
+        _env_file=None, service_mode="management", db_url=isolated_migration_postgres_url,
+        public_base_url="https://management.example.com", auth_local_http=False,
+    ))
+    async with app.router.lifespan_context(app):
+        app.state.environment_manager = EnvironmentManager(
+            EnvironmentRegistry(app.state.session_factory), EnvironmentPlanFactory(
+                foundation_from(platform_inputs[0]), SlowPublicationApi(), keyring={}, repo_root=ROOT,
+            ),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="https://management.example.com",
+        ) as client:
+            login = await client.post("/api/v1/auth/login", json={"username": "alice", "password": "owner-passphrase"})
+            assert login.status_code == 200
+            client.headers["X-Loom-CSRF"] = login.json()["csrf_token"]
+            create = asyncio.create_task(client.post("/api/v1/environments", json={
+                "slug": "alice", "candidate_id": str(uuid4()),
+            }, headers={"Idempotency-Key": "concurrent"}))
+            poll = None
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=3)
+                poll = asyncio.create_task(client.get("/api/v1/environments"))
+                async with asyncio.timeout(3):
+                    # Before the fix: auth holds one connection and the poll
+                    # blocks on its session row with the second. After the fix:
+                    # the poll can complete while publication remains paused.
+                    while not poll.done() and app.state._owned_service_engine.pool.checkedout() < 2:
+                        await asyncio.sleep(0.01)
+                release.set()
+                first, second = await asyncio.wait_for(asyncio.gather(create, poll), timeout=5)
+                assert first.status_code == 202, first.text
+                assert second.status_code == 200, second.text
+            finally:
+                release.set()
+                for task in (create, poll):
+                    if task is not None and not task.done():
+                        task.cancel()
+                await asyncio.gather(*(task for task in (create, poll) if task is not None), return_exceptions=True)
