@@ -436,7 +436,9 @@ def _materialize_bundle_upload(
                 try:
                     with task_toml.open("rb") as f:
                         raw_cfg: dict[str, Any] = tomllib.load(f)
-                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+                    relative = bundle_dir.relative_to(task_root)
+                    contextual_id = slug if relative == Path(".") else relative.as_posix()
+                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=contextual_id)
                     task_config = normalize_steps(TaskConfig.model_validate(raw_cfg))
                     execution_cpu_arch(task_config.environment.cpu_arch)
                     rendered_task_id = task_config.task.id

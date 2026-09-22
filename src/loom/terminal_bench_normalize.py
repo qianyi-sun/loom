@@ -40,7 +40,12 @@ def is_terminal_bench_shape(raw: dict[str, Any]) -> bool:
 
 def _is_harbor_native_task(raw: dict[str, Any]) -> bool:
     task = raw.get("task")
-    if not isinstance(task, dict) or "id" in task:
+    if not isinstance(task, dict):
+        return False
+    if "id" in task and not (
+        isinstance(raw.get("metadata"), dict)
+        and (raw.get("version") == "1.0" or raw.get("schema_version") == "1.1")
+    ):
         return False
     name = task.get("name")
     return isinstance(name, str) and bool(name)
@@ -64,7 +69,7 @@ def normalize_terminal_bench_task_toml(
 
     metadata = payload.pop("metadata")
     payload.pop("version", None)
-    payload.setdefault("schema_version", "1")
+    payload["schema_version"] = "1"
 
     task_section: dict[str, Any] = {}
     if "id" in metadata:
@@ -166,7 +171,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
     if not isinstance(source_name, str) or not source_name:
         return payload
 
-    task: dict[str, Any] = {"id": source_name, "name": source_name}
+    task: dict[str, Any] = {"id": source_task.get("id", source_name), "name": source_name}
     description = source_task.get("description")
     if isinstance(description, str):
         task["description"] = description
