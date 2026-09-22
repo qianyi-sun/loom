@@ -80,6 +80,7 @@ class EnvironmentConfig(BaseModel):
     tmpfs: list[str] = []
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
+    mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
     user: str | int = "agent"
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
@@ -97,6 +98,13 @@ class EnvironmentConfig(BaseModel):
     storage_mb: int | None = Field(default=None, gt=0)
     gpus: int = Field(default=0, ge=0)
     sidecars: list[TaskSidecarConfig] = []
+
+    @model_validator(mode="after")
+    def _validate_mutable_paths(self) -> EnvironmentConfig:
+        from loom.mutable_paths import validate_mutable_paths
+
+        validate_mutable_paths(self.mutable_paths, workdir=self.workdir)
+        return self
 
     @model_validator(mode="after")
     def _docker_build_options_require_dockerfile(self) -> EnvironmentConfig:

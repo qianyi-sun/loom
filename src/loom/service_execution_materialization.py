@@ -263,6 +263,8 @@ def automatic_service_execution_rejections(
         reasons.append("linux_x86_64_required")
     if env.gpu_vendor != "none" or env.gpus:
         reasons.append("gpu_unsupported")
+    if env.mutable_paths and not terminus:
+        reasons.append("mutable_paths_require_terminus")
     if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (
         env.dockerfile is not None
         or env.docker_image is None
@@ -683,6 +685,12 @@ def _compile_terminus_plan(
             source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,
         ))
     published_refs: set[str | None] = {agent_image, profile.runtime_image_ref}
+    if env.mutable_paths:
+        for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
+            outputs.append(RuntimeOutputDeclarationV1(
+                source_path=f".loom/mutable-paths/{name}",
+                relative_path=f"artifacts/mutable-paths/{name}", kind="task_artifact", required=True,
+            ))
     if task_image_materialization_id is None:
         published_refs.add(env.docker_image)
     return ExecutionRuntimePlanV1(
