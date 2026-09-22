@@ -137,27 +137,34 @@ async def test_collection_wins_attachment_waits_then_rejects_missing(factory):
         retired, _ = await seed(session, retired=OLD, deleted=True)
         active, _ = await seed(session)
     async with factory() as collector, factory() as writer:
+        collector_pid = await collector.scalar(text("SELECT pg_backend_pid()"))
+        writer_pid = await writer.scalar(text("SELECT pg_backend_pid()"))
         assert await collect_provider_secrets(collector) == 1
-        attachment = asyncio.create_task(writer.execute(update(ProviderConnection).where(
-            ProviderConnection.encrypted_api_key_ref == active,
-        ).values(encrypted_api_key_ref=retired)))
-        # Observe the actual PostgreSQL lock wait, not a scheduling assumption.
         async with factory() as observer:
-            for _ in range(100):
-                waiting = await observer.scalar(text("""
-                    SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-                    WHERE datname = current_database() AND wait_event_type = 'Lock'
-                    AND query LIKE 'UPDATE provider_connections%')
-                """))
-                if waiting:
-                    break
-                await asyncio.sleep(0.01)
-            assert waiting
-        assert not attachment.done()
-        await collector.commit()
-        with pytest.raises(IntegrityError, match="local provider secret does not exist"):
-            await asyncio.wait_for(attachment, timeout=3)
-        await writer.rollback()
+            # Force an activity snapshot before the writer reaches its lock wait.
+            # pg_blocking_pids reads live lock state even with this stale snapshot.
+            await observer.scalar(text("SELECT count(*) FROM pg_stat_activity"))
+            attachment = asyncio.create_task(writer.execute(update(ProviderConnection).where(
+                ProviderConnection.encrypted_api_key_ref == active,
+            ).values(encrypted_api_key_ref=retired)))
+            try:
+                async with asyncio.timeout(5):
+                    while not await observer.scalar(text(
+                        "SELECT :collector = ANY(pg_blocking_pids(:writer))",
+                    ), {"collector": collector_pid, "writer": writer_pid}):
+                        assert not attachment.done()
+                        await asyncio.sleep(0.01)
+                assert not attachment.done()
+                await collector.commit()
+                with pytest.raises(IntegrityError, match="local provider secret does not exist"):
+                    await asyncio.wait_for(attachment, timeout=3)
+            finally:
+                # Release the blocker before unwinding a still-running writer.
+                await collector.rollback()
+                if not attachment.done():
+                    attachment.cancel()
+                await asyncio.gather(attachment, return_exceptions=True)
+                await writer.rollback()
 
 
 @pytest.mark.asyncio
