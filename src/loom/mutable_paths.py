@@ -7,6 +7,7 @@ MAX_MUTABLE_BYTES = 256 * 1024 * 1024
 MAX_MUTABLE_ENTRIES = 100_000
 _PROTECTED = tuple(PurePosixPath(path) for path in (
     "/proc", "/sys", "/dev", "/run", "/var/run", "/loom", "/tests", "/verifier", "/solution",
+    "/opt/verifier", "/opt/verifier-python", "/opt/verifier-assets",
 ))
 
 

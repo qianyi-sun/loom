@@ -78,6 +78,26 @@ def _check_totals(records: list[dict[str, int | str]]) -> None:
             raise WorkspaceSnapshotError("declared mutable paths exceed aggregate snapshot limits")
 
 
+async def _check_cross_root_hardlinks(driver: Driver, roots: tuple[PurePosixPath, ...]) -> None:
+    # Each archive preserves links within its root. Links between archives
+    # cannot be restored faithfully, including links into the workdir archive.
+    seen: set[bytes] = set()
+    for root in roots:
+        result = await driver.exec(
+            f"find {shlex.quote(str(root))} -type f -links +1 "
+            "-exec stat -c '%d:%i' -- {} +",
+        )
+        identities = set(result.stdout.splitlines())
+        if (result.return_code or result.stderr or result.truncated
+                or any(len(parts := value.split(b":")) != 2
+                       or not all(part.isdigit() for part in parts)
+                       for value in identities)):
+            raise WorkspaceSnapshotError(f"cannot inspect mutable path hardlinks: {root}")
+        if seen & identities:
+            raise WorkspaceSnapshotError("hardlinks across declared roots or workdir cannot be preserved")
+        seen.update(identities)
+
+
 async def export_mutable_paths(
     driver: Driver, paths: tuple[PurePosixPath, ...], directory: Path, *, workdir: PurePosixPath,
 ) -> None:
@@ -87,8 +107,11 @@ async def export_mutable_paths(
     # Never leave an old manifest certifying an incomplete newer export.
     manifest = directory / "manifest.json"
     manifest.unlink(missing_ok=True)
-    for index, root in enumerate(paths):
+    for root in paths:
         await _check_root(driver, root)
+    if paths:
+        await _check_cross_root_hardlinks(driver, (workdir, *paths))
+    for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
         await _export_workspace_archive(driver, root, archive)
         evidence = await asyncio.to_thread(_archive_evidence, archive)
