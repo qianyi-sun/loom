@@ -89,7 +89,11 @@ def dockerfile_instructions(text: str) -> tuple[DockerfileInstruction, ...]:
     Line numbers refer to the original source. Preserve exact heredoc delimiter
     matching, including quotes and the tab-only stripping rule for ``<<-``.
     """
-    lines = text.splitlines()
+    # Dockerfile physical lines end at LF (optionally preceded by CR), not
+    # Unicode line separators that can occur inside copied files or scripts.
+    lines = [line.removesuffix("\r") for line in text.split("\n")]
+    if text.endswith("\n"):
+        lines.pop()
     instructions: list[DockerfileInstruction] = []
     position = 0
     escape = "\\"
