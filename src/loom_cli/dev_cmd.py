@@ -1,0 +1,74 @@
+"""Personal environments on the explicitly selected management server."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from uuid import UUID, uuid4
+
+import httpx
+
+from loom.nebius_environment_contract import EnvironmentCreateRequestV1
+from loom_cli.environment_client import EnvironmentClient
+from loom_cli.server_client import HttpStatusError, NotLoggedInError
+
+
+def create_environment(slug: str, candidate: str, *, idempotency_key: str | None = None) -> int:
+    return _run(argparse.Namespace(dev_command="create", slug=slug, candidate=candidate,
+                                   idempotency_key=idempotency_key))
+
+
+def _run(args: argparse.Namespace) -> int:
+    try:
+        create_request = None
+        key = ""
+        if args.dev_command == "create":
+            create_request = EnvironmentCreateRequestV1(slug=args.slug, candidate_id=UUID(args.candidate))
+            key = args.idempotency_key or str(uuid4())
+            if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", key) is None:
+                raise ValueError("invalid idempotency key")
+            # Print before any request so a lost response can be retried without
+            # a duplicate create. A CLI timeout never cancels server-side work.
+            print(f"Idempotency-Key: {key}", file=sys.stderr)
+        with EnvironmentClient() as client:
+            if create_request is not None:
+                print(client.create(create_request, idempotency_key=key).model_dump_json())
+            elif args.dev_command == "list":
+                print(json.dumps({"items": [row.model_dump(mode="json") for row in client.list()]}))
+            elif args.dev_command == "status":
+                print(client.status(UUID(args.environment_id)).model_dump_json())
+            elif args.dev_command == "wait":
+                operation, terminal = client.wait(UUID(args.operation_id), timeout=args.timeout)
+                print(operation.model_dump_json())
+                if not terminal:
+                    print(f"Wait timed out; operation {operation.operation_id} continues. Run loom dev wait again.", file=sys.stderr)
+                    return 2
+                if operation.phase == "blocked":
+                    print(f"Operation {operation.operation_id} is blocked: {operation.error_code}", file=sys.stderr)
+                    return 1
+        return 0
+    except (NotLoggedInError, HttpStatusError) as exc:
+        print(str(exc), file=sys.stderr)
+    except httpx.RequestError as exc:
+        print(f"Management request failed ({type(exc).__name__}); retry with the same Idempotency-Key.", file=sys.stderr)
+    except (ValueError, KeyError):
+        print("Invalid management arguments or response; no local deployment was attempted.", file=sys.stderr)
+    return 1
+
+
+def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    parser = sub.add_parser("dev", help="Manage personal Nebius environments on your logged-in management server")
+    commands = parser.add_subparsers(dest="dev_command", required=True)
+    create = commands.add_parser("create", help="Request an isolated personal environment from an approved candidate")
+    create.add_argument("slug")
+    create.add_argument("--candidate", required=True, help="Approved candidate UUID from the management installation")
+    create.add_argument("--idempotency-key", help="Reuse this key when retrying the same create")
+    commands.add_parser("list", help="List your retained environment identities")
+    status = commands.add_parser("status", help="Read desired state and current provisioning operation")
+    status.add_argument("environment_id")
+    wait = commands.add_parser("wait", help="Wait for an operation; timeout does not cancel it")
+    wait.add_argument("operation_id")
+    wait.add_argument("--timeout", type=float, default=300)
+    parser.set_defaults(handler=_run)

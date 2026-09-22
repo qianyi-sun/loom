@@ -41,6 +41,16 @@ def test_unknown_service_mode_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize("mode,token", [("application", "token"), ("management", None)])
+def test_provisioning_configuration_requires_management_mode_and_publication_credential(mode, token):
+    with pytest.raises(ValidationError, match="environment management"):
+        LoomServiceSettings(
+            _env_file=None, service_mode=mode, db_url="postgresql+psycopg://u:p@localhost/db",
+            minio_access_key="access", minio_secret_key="secret",
+            environment_management_config_file="/protected/install.json", environment_management_github_token=token,
+        )
+
+
 def test_management_ignores_unused_workload_execution_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     # A local execution flag or a stale workload profile cannot enable workload
     # APIs in the separately configured management service.
@@ -60,6 +70,7 @@ def test_management_ignores_unused_workload_execution_contract(monkeypatch: pyte
         assert path.startswith((
             "/api/v1/auth/", "/api/v1/admin/", "/api/v1/invites",
             "/api/v1/tokens", "/api/v1/teams", "/api/v1/team-registrations", "/api/v1/health",
+            "/api/v1/environments", "/api/v1/environment-operations",
         )), path
 
 

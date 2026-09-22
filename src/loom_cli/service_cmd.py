@@ -556,6 +556,23 @@ def _populate_local_defaults(args: argparse.Namespace) -> None:
 
 
 def _up(args: argparse.Namespace) -> int:
+    environment = getattr(args, "environment", None)
+    candidate = getattr(args, "candidate", None)
+    idempotency_key = getattr(args, "idempotency_key", None)
+    if environment is not None:
+        if not environment.startswith("dev-") or not candidate or any(
+            getattr(args, name, None) is not None
+            for name in ("compose_file", "env_file", "db_url", "admin_secret_file", "cp_url")
+        ):
+            print("Managed up requires --environment dev-<name> --candidate <id> and no local Compose options.", file=sys.stderr)
+            return 1
+        from loom_cli.dev_cmd import create_environment
+
+        return create_environment(environment[4:], candidate, idempotency_key=idempotency_key)
+    if candidate is not None or idempotency_key is not None:
+        print("--candidate and --idempotency-key require an explicit --environment dev-<name>.", file=sys.stderr)
+        return 1
+    print("Target: disposable local Docker Compose.")
     _populate_local_defaults(args)
     return _up_local(args)
 
@@ -755,9 +772,9 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     """Register `loom service {up,down,status}` on the top-level argparse."""
     p_service = sub.add_parser(
         "service",
-        help="Manage the disposable local Compose stack",
+        help="Manage local Compose or explicitly target personal Nebius development",
         description=(
-            "Manage the disposable local Docker Compose stack."
+            "Without an explicit target, service up manages disposable local Docker Compose."
         ),
     )
     service_sub = p_service.add_subparsers(dest="service_cmd", required=True)
@@ -787,6 +804,9 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         "up",
         help="Start the disposable local development stack",
     )
+    p_up.add_argument("--environment", help="Explicit personal target dev-<name>; never falls back to local")
+    p_up.add_argument("--candidate", help="Approved candidate UUID; required for a personal target")
+    p_up.add_argument("--idempotency-key", help="Reuse the same key when retrying a managed create")
     local_options = p_up.add_argument_group("local Compose options")
     local_options.add_argument(
         "--compose-file",

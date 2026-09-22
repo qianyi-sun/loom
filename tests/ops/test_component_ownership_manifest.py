@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1892,3 +1893,11 @@ include_paths = ["tests/unit/**/*.py"]
     assert "smoke owner has no component: unused-smoke" in errors
     assert "scan owner has no component: unused-scan" in errors
     assert "attestation owner has no component: unused-attestation" in errors
+
+
+@pytest.mark.parametrize("script", ["component_ownership.py", "plan_ci_validations.py"])
+def test_ci_planners_start_before_package_installation(script):
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = subprocess.run([sys.executable, "-S", "scripts/" + script, "--help"],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

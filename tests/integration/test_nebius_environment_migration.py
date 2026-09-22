@@ -45,12 +45,39 @@ def registration(connection, slug="alice", **changes):
 
 def test_new_registration_tables_are_in_migration_and_orm(environment_database):
     tables = set(inspect(environment_database).get_table_names())
-    assert {"nebius_environments", "nebius_environment_namespaces"} <= tables
-    from loom.db.nebius_environment_schema import NebiusEnvironment, NebiusEnvironmentNamespace
+    assert {"nebius_environments", "nebius_environment_namespaces", "nebius_environment_operations",
+            "nebius_environment_resources", "nebius_platform_budgets", "nebius_platform_reservations"} <= tables
+    from loom.db.nebius_environment_schema import (
+        NebiusEnvironment,
+        NebiusEnvironmentNamespace,
+        NebiusEnvironmentOperation,
+        NebiusEnvironmentResource,
+        NebiusPlatformBudget,
+        NebiusPlatformReservation,
+    )
 
-    for model in (NebiusEnvironment, NebiusEnvironmentNamespace):
+    for model in (NebiusEnvironment, NebiusEnvironmentNamespace, NebiusEnvironmentOperation,
+                  NebiusEnvironmentResource, NebiusPlatformBudget, NebiusPlatformReservation):
         actual = {c["name"] for c in inspect(environment_database).get_columns(model.__tablename__)}
         assert actual == set(model.__table__.columns.keys())
+
+
+def test_provisioning_downgrade_refuses_to_discard_platform_budget(environment_database):
+    from sqlalchemy.exc import DBAPIError
+
+    from loom.db.nebius_environment_schema import NebiusPlatformBudget
+
+    with environment_database.begin() as connection:
+        connection.execute(insert(NebiusPlatformBudget).values(
+            cluster_id="cluster", cpu_millis=1000, memory_mib=1000, storage_mib=1000, ephemeral_storage_mib=1000,
+        ))
+    cfg = Config("migrations/alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", environment_database.url.render_as_string(hide_password=False).replace("%", "%%"))
+    with pytest.raises(DBAPIError, match="cannot remove managed provisioning or platform budget history"):
+        command.downgrade(cfg, "0154")
+    with environment_database.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0155"
+        assert connection.execute(select(NebiusPlatformBudget.cpu_millis)).scalar_one() == 1000
 
 
 @pytest.mark.parametrize("collision", ["slug", "public_host", "target_id", "incarnation"])
