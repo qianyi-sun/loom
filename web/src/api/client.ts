@@ -1008,6 +1008,8 @@ export interface RunLibraryOwnerTeam {
 }
 
 export interface RunLibraryArtifact {
+  can_reuse?: boolean;
+  relative_path?: string;
   id?: string;
   trial_id: string | null;
   key: string;

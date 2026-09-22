@@ -2576,7 +2576,7 @@ async def test_library_costs_match_batch_accounting_without_inventing_zero(run_l
         assert row["llm_calls_count"] == 1
 
 
-@pytest.mark.parametrize("route", ["clone", "reuse"])
+@pytest.mark.parametrize("route", ["clone", "reuse", "native_reuse"])
 async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_admission(
     run_library_setup, route,
 ):
@@ -2598,14 +2598,85 @@ async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_adm
         source.n_per_task = 2
         source.service_execution_runtime_profile = stale_profile
         s.commit()
+    native = route == "native_reuse"
+    destination = "a" if native else "b"
+    file_path = "artifacts/verifier/ctrf.json"
+    file_key = f"native/{f['trial_shared']}/{file_path}"
+    if native:
+        # Real native storage: no top-level key and no legacy trajectory inventory.
+        content = b'{"results": {"tests": []}}\n'
+        native_bucket = f"native-{f['trial_shared']}"
+        storage = {
+            "schema_version": "loom.canonical-trial-bundle-storage.v1",
+            "attempt": 1,
+            "files": [{"relative_path": file_path, "key": file_key,
+                       "bucket": native_bucket,
+                       "size_bytes": len(content), "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                       "media_type": "application/json"}],
+            "source_evidence": [{"relative_path": "source/_manifest.json",
+                                 "bucket": app.state.settings.artifacts_bucket,
+                                 "key": f"native/{f['trial_shared']}/_manifest.json",
+                                 "size_bytes": 2, "sha256": "sha256:" + "a" * 64,
+                                 "media_type": "application/json"}],
+        }
+        storage["files"].append({
+            **storage["files"][0], "relative_path": "result.json", "key": file_key + ".result",
+        })
+        with sessions() as s:
+            artifact = s.get(Artifact, f["safe_artifact_id"])
+            artifact.artifact_type = "loom.trial-artifact-bundle.v1"
+            artifact.storage = storage
+            artifact.content_hash = "sha256:" + "b" * 64
+            artifact.visibility = "team"
+            artifact.share_status = "pending_scan"
+            artifact.safety_state = "verified_internal"
+            artifact.redaction_state = "pending"
+            source_trial = s.get(Trial, f["trial_shared"])
+            source_trial.attempt_count = 1
+            source_trial.trajectory_index = {"artifacts": []}
+            s.commit()
+        app.state.minio_client.create_bucket(Bucket=native_bucket)
+        for item in storage["files"]:
+            app.state.minio_client.put_object(Bucket=native_bucket, Key=item["key"], Body=content)
     url = (f"/api/v1/run-library/batches/{f['batch_shared']}/clone-config" if route == "clone"
            else f"/api/v1/run-library/trials/{f['trial_shared']}/artifacts/reuse")
-    payload = {"name": "derived native", "provider_connection_id": str(f["conn_b"])}
-    if route == "reuse":
-        payload["key"] = f["safe_key"]
-    headers = {"Authorization": f"Bearer {f['raw_b']}"}
+    provider_id = f[f"conn_{destination}"]
+    payload = {"name": "derived native", "provider_connection_id": str(provider_id)}
+    if route != "clone":
+        payload["key"] = file_key if native else f["safe_key"]
+    headers = {"Authorization": f"Bearer {f[f'raw_{destination}']}"}
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            if native:
+                detail = await c.get(
+                    f"/api/v1/run-library/batches/{f['batch_shared']}", headers=headers,
+                )
+                assert detail.status_code == 200, detail.text
+                items = [item for group in detail.json()["artifact_inventory"].values() for item in group]
+                selected = next((item for item in items if item["key"] == file_key), None)
+                assert selected is not None, "native bundle file missing from Run Library"
+                assert selected["can_reuse"] is True
+                assert selected["relative_path"] == "files/" + file_path
+                assert {item["key"] for item in items if item["id"] == str(f["safe_artifact_id"])} == {
+                    file_key, file_key + ".result",
+                }
+                listing = await c.get("/api/v1/run-library/artifacts", headers=headers)
+                assert any(item["key"] == file_key for item in listing.json()["items"])
+                download = await c.get(selected["download_url"], headers=headers)
+                assert download.status_code == 200 and download.content == content
+                foreign_headers = {"Authorization": f"Bearer {f['raw_b']}"}
+                foreign_payload = {**payload, "provider_connection_id": str(f["conn_b"])}
+                denied = await c.post(url, json=foreign_payload, headers=foreign_headers)
+                assert denied.status_code == 403, denied.text
+                denied_download = await c.get(selected["download_url"], headers=foreign_headers)
+                assert denied_download.status_code == 403
+                foreign_detail = await c.get(
+                    f"/api/v1/run-library/batches/{f['batch_shared']}", headers=foreign_headers,
+                )
+                assert all(
+                    item["id"] != str(f["safe_artifact_id"])
+                    for group in foreign_detail.json()["artifact_inventory"].values() for item in group
+                )
             response = await c.post(url, json=payload, headers=headers)
             assert response.status_code == 201, response.text
             derived_id = UUID(response.json()["batch_id"])
@@ -2613,7 +2684,7 @@ async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_adm
             # a 201 from Run Library alone did not detect the original defect.
             submitted = await c.post("/cp/trials", headers=headers, json={
                 "batch_id": str(derived_id), "task_id": f["task_id"], "config": config,
-                "provider_connection_id": str(f["conn_b"]),
+                "provider_connection_id": str(provider_id),
             })
             assert submitted.status_code == 201, submitted.text
             with sessions() as s:
@@ -2626,12 +2697,36 @@ async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_adm
                     "task_revision_sha256": "sha256:" + "1" * 64,
                     "requests": _NEBIUS_DEFAULT_REQUESTS,
                 }}
-                assert derived.team_id == f["team_b"] and derived.provider_connection_id == f["conn_b"]
+                assert derived.team_id == f[f"team_{destination}"] and derived.provider_connection_id == provider_id
                 assert derived.combinations == combinations and derived.expected_trial_count == 4
                 assert derived.source_provenance[0]["source_batch_id"] == str(f["batch_shared"])
                 assert s.get(Batch, f["batch_shared"]).service_execution_runtime_profile == stale_profile
                 admitted = s.get(Trial, UUID(submitted.json()["trial_id"]))
                 assert admitted.requires_caps["worker_pool"] == "nebius-cpu"
+            if native:
+                with sessions() as s:
+                    derived = s.get(Batch, derived_id)
+                    provenance = derived.source_provenance[0]
+                    assert provenance["source_artifact_id"] == str(f["safe_artifact_id"])
+                    assert provenance["source_artifact_relative_path"] == "files/" + file_path
+                    assert provenance["source_file_sha256"] == "sha256:" + hashlib.sha256(content).hexdigest()
+                    original = s.get(Artifact, f["safe_artifact_id"])
+                    assert original.storage == storage
+                    assert original.share_status == "pending_scan"
+                    assert original.safety_state == "verified_internal"
+                    original.share_status = "blocked"
+                    original.safety_state = "unsafe"
+                    original.blocked_reason = "secret-like content detected"
+                    s.commit()
+                denied = await c.post(url, json=payload, headers=headers)
+                assert denied.status_code == 403
+                assert denied.json()["detail"] == "secret-like content detected"
+                with sessions() as s:
+                    original = s.get(Artifact, f["safe_artifact_id"])
+                    original.share_status = "pending_scan"
+                    original.safety_state = "verified_internal"
+                    original.blocked_reason = None
+                    s.commit()
             # No profile means reject before persisting another derived batch.
             app.state.settings = app.state.settings.model_copy(update={
                 "service_execution_runtime_profile_json": "{}",

@@ -811,6 +811,34 @@ describe("RunLibraryBatchDetail", () => {
     expect((await screen.findAllByText(/terminus-2@harbor-v2/)).length).toBeGreaterThan(0);
   });
 
+  it("uses server reuse permission for verified internal bundle files", async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockRunLibrary({ detailOverride: {
+      ...detailBatch,
+      artifact_inventory: {
+        ...detailBatch.artifact_inventory,
+        reports: [{
+          ...detailBatch.artifact_inventory.reports[0],
+          relative_path: "files/artifacts/verifier/ctrf.json",
+          share_status: "pending_scan",
+          safety_state: "verified_internal",
+          redaction_state: "pending",
+          can_reuse: true,
+        }],
+      },
+    } });
+    renderWithProviders(
+      <Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>,
+      { route: "/library/batches/batch-alpha" },
+    );
+    await user.click(await screen.findByRole("button", { name: "Reuse files/artifacts/verifier/ctrf.json" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/v1/run-library/trials/trial-alpha/artifacts/reuse"),
+      expect.objectContaining({ method: "POST", body: expect.stringContaining('"key":"team-alpha/trial-alpha/main/report.json"') }),
+    );
+    expect(screen.queryByRole("button", { name: /Reuse.*debug.log/ })).not.toBeInTheDocument();
+  });
+
   it("groups artifacts and exposes clone, download, and reuse actions", async () => {
     const fetchMock = mockRunLibrary();
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:report");

@@ -62,7 +62,7 @@ function formatBytes(size: number): string {
 }
 
 function artifactName(artifact: RunLibraryArtifact): string {
-  return artifact.key.replace(/\/+$/, "");
+  return (artifact.relative_path ?? artifact.key).replace(/\/+$/, "");
 }
 
 function artifactDownloadName(artifact: RunLibraryArtifact): string {
@@ -94,10 +94,13 @@ function artifactHashText(artifact: RunLibraryArtifact): string | null {
 function artifactActionsAllowed(artifact: RunLibraryArtifact): boolean {
   const safety = artifact.safety_state ?? "safe";
   const redaction = artifact.redaction_state ?? "not_required";
-  return (
+  const canReuse = artifact.can_reuse ?? (
     artifact.share_status === "shared" &&
     safety === "safe" &&
-    (redaction === "not_required" || redaction === "redacted") &&
+    (redaction === "not_required" || redaction === "redacted")
+  );
+  return (
+    canReuse &&
     Boolean(artifact.trial_id) &&
     Boolean(artifact.download_url) &&
     !artifact.key.startsWith("redacted-artifact:")
@@ -199,7 +202,7 @@ function ArtifactRow({
             <>
               <Button
                 size="sm"
-                title="Download this shared artifact through the Loom API."
+                title="Download this artifact through the Loom API."
                 onClick={() =>
                   artifact.trial_id
                     ? void api.downloadRunLibraryArtifact(
