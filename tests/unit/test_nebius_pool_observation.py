@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import pytest
 from kubernetes import client as k8s
 from pydantic import ValidationError
+from urllib3.response import HTTPResponse
 
 from loom_control_plane.execution_placement import PlacementUnavailableError, plan_placement
 from loom_execution_capacity_collector.contracts import (
@@ -349,7 +351,9 @@ async def test_pool_rejects_incomplete_pod_list_instead_of_reporting_empty_capac
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resize", ["legacy_status", "condition", "allocated", "status_requests", "pod_level"])
+@pytest.mark.parametrize("resize", [
+    "legacy_status", "condition", "allocated", "status_requests", "pod_level", "init_allocated",
+])
 async def test_pool_never_frees_capacity_during_unqualified_in_place_resize(resize):
     pod = _pod(1)
     pod.metadata.namespace = "foreign"
@@ -364,10 +368,16 @@ async def test_pool_never_frees_capacity_during_unqualified_in_place_resize(resi
     else:
         values = {"cpu": "3", "memory": "3Gi"}
         status = {"name": "work", "ready": True, "restartCount": 0, "image": "test", "imageID": "test"}
-        status["allocatedResources" if resize == "allocated" else "resources"] = (
-            values if resize == "allocated" else {"requests": values}
+        status["allocatedResources" if resize in {"allocated", "init_allocated"} else "resources"] = (
+            values if resize in {"allocated", "init_allocated"} else {"requests": values}
         )
-        raw["status"]["containerStatuses"] = [status]
+        if resize == "init_allocated":
+            raw["spec"]["initContainers"] = [{
+                "name": "sidecar", "restartPolicy": "Always", "image": "test",
+                "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}},
+            }]
+            status["name"] = "sidecar"
+        raw["status"]["initContainerStatuses" if resize == "init_allocated" else "containerStatuses"] = [status]
     with pytest.raises(KubernetesObservationError, match="resize"):
         await _capture([_node()], [pod], raw_pods=[raw])
 
@@ -399,3 +409,48 @@ async def test_wrong_or_missing_execution_role_cannot_discount_trial_grant(role)
     snapshot = await _capture([_node()], [pod])
     assert snapshot.nodes[0].managed_pods == []
     assert snapshot.nodes[0].requested.cpu_millis == 1000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["complete", "changed_version", "repeated_token"])
+async def test_generated_kubernetes_client_preserves_pool_pagination_and_snapshot_fences(monkeypatch, mode):
+    pod_pages = []
+    with k8s.ApiClient(configuration=k8s.Configuration(host="https://cluster.test")) as api:
+        def request(method, url, **kwargs):
+            assert method == "GET"
+            parsed = urlsplit(url)
+            query = parse_qs(parsed.query)
+            query.update({key: [value] for key, value in kwargs.get("fields", [])})
+            if parsed.path == "/api/v1/nodes":
+                kind, version, items, continuation = "NodeList", "n1", [_node()], None
+            elif parsed.path == "/apis/apps/v1/daemonsets":
+                kind, version, items, continuation = "DaemonSetList", "d1", [], None
+            else:
+                assert parsed.path == "/api/v1/pods"
+                pod_pages.append(query)
+                page = len(pod_pages)
+                assert query.get("continue") == (None if page == 1 else ["page-2"])
+                kind, version, items = "PodList", "p1", [_pod(page)]
+                continuation = "page-2" if page == 1 or mode == "repeated_token" else None
+                if page == 2 and mode == "changed_version":
+                    version = "p2"
+            body = {
+                "apiVersion": "apps/v1" if kind == "DaemonSetList" else "v1", "kind": kind,
+                "metadata": {"resourceVersion": version, **({"continue": continuation} if continuation else {})},
+                "items": api.sanitize_for_serialization(items),
+            }
+            return HTTPResponse(body=json.dumps(body).encode(), status=200,
+                                headers={"Content-Type": "application/json"}, preload_content=False)
+
+        monkeypatch.setattr(api.rest_client.pool_manager, "request", request)
+        reader = InClusterKubernetesCapacityReader(core_api=k8s.CoreV1Api(api), apps_api=k8s.AppsV1Api(api))
+        if mode == "complete":
+            snapshot = await reader.capture_pool(scope=_scope())
+            assert snapshot.active_nodes == 1
+            assert snapshot.requested.cpu_millis == 2000
+            assert len(snapshot.nodes[0].managed_pods) == 2
+        else:
+            reason = "resource version" if mode == "changed_version" else "repeated a token"
+            with pytest.raises(KubernetesObservationError, match=reason):
+                await reader.capture_pool(scope=_scope())
+        assert len(pod_pages) == 2

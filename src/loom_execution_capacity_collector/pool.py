@@ -170,6 +170,9 @@ class PoolPodClassifier:
         else:
             if labels.get("app.kubernetes.io/managed-by") != "loom-execution-actuator":
                 return None
+            role = "attempt" if job.workload_kind == "trial" else "verifier"
+            if annotations.get("loom.openai.com/execution-role") != role:
+                return None
             identity = labels.get("loom.openai.com/lease-id")
             generation = labels.get("loom.openai.com/generation")
         if identity != job.lease_id or generation != str(job.generation):

@@ -95,6 +95,8 @@ def _container_request(container: Any) -> ResourceTotals:
 def _pod_request(pod: Any) -> ResourceTotals:
     """Conservative scheduler accounting, including native init sidecars."""
 
+    if getattr(pod.spec, "_loom_pool_resize_unqualified", False):
+        raise KubernetesObservationError("Kubernetes pool Pod resize accounting is unqualified")
     regular = _add(*[_container_request(row) for row in list(pod.spec.containers or [])])
     restartable = ResourceTotals(cpu_millis=0, memory_mib=0, storage_mib=0)
     init_peaks: list[ResourceTotals] = []
@@ -115,6 +117,43 @@ def _pod_request(pod: Any) -> ResourceTotals:
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
 
 
+def _pool_resize_unqualified(raw: dict[str, Any]) -> bool:
+    """Do not admit against freed spec resources while kubelet still holds them.
+
+    Only used by pool capture. Immutable gateway Jobs do not resize; legitimate
+    foreign resizing remains a fail-closed inventory blocker until converged.
+    Retain both older and newer API fields before the pinned SDK drops them.
+    """
+    status = raw.get("status") or {}
+    if status.get("resize") or any(
+        condition.get("type") in {"PodResizePending", "PodResizeInProgress"}
+        and condition.get("status") == "True" for condition in status.get("conditions") or []
+    ):
+        return True
+
+    def exceeds(allocated: Any, desired: Any) -> bool:
+        if not isinstance(allocated, dict) or not isinstance(desired, dict):
+            raise ValueError("invalid resize resources")
+        actual, requested = _resources(allocated), _resources(desired)
+        return any(getattr(actual, key) > getattr(requested, key)
+                   for key in ("cpu_millis", "memory_mib", "storage_mib"))
+
+    spec = raw["spec"]
+    pod_requests = (spec.get("resources") or {}).get("requests") or {}
+    if (exceeds((status.get("resources") or {}).get("requests") or {}, pod_requests)
+            or exceeds(status.get("allocatedResources") or {}, pod_requests)):
+        return True
+    for containers_key, statuses_key in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
+        desired = {row["name"]: (row.get("resources") or {}).get("requests") or {}
+                   for row in spec.get(containers_key) or []}
+        for container in status.get(statuses_key) or []:
+            requested = desired.get(container.get("name"), {})
+            if (exceeds(container.get("allocatedResources") or {}, requested)
+                    or exceeds((container.get("resources") or {}).get("requests") or {}, requested)):
+                return True
+    return False
+
+
 def _decode_pool_pods(response: Any) -> Any:
     """Preserve PodLevelResources omitted by the pinned Kubernetes SDK model."""
     from kubernetes import client
@@ -130,6 +169,7 @@ def _decode_pool_pods(response: Any) -> Any:
         with client.ApiClient() as api:
             result = api.deserialize(response, "V1PodList")
         for raw, pod in zip(document["items"], result.items, strict=True):
+            pod.spec._loom_pool_resize_unqualified = _pool_resize_unqualified(raw)
             resources = raw["spec"].get("resources")
             if resources is not None:
                 if not isinstance(resources, dict) or not isinstance(resources.get("requests", {}), dict):

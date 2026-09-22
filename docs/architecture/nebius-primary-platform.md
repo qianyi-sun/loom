@@ -322,6 +322,11 @@ Pod UIDs or live Pods for one reservation fail closed, as does registered work
 scheduled outside the pool. The existing resource arithmetic retains Pod slots,
 restartable init sidecars and init peaks. The pool reader preserves Pod-level
 requests from raw API pages because older Kubernetes SDK models omit that field.
+In-place resize is not qualified by this entrypoint: active resize conditions or
+status allocations exceeding requested resources block the affected pool inventory
+until convergence. Equal settled allocations and workloads already assigned to a
+different pool do not cause that block. It never treats a requested downsize as
+proof that kubelet has released the old resources.
 Only the sanitized resource/identity projection leaves the reader; Pod payloads,
 environment values and commands are not evidence. A scope fingerprint binds the
 observation to the registry and gateway receipts used for that capture.
