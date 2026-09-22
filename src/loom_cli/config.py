@@ -20,11 +20,15 @@ All fields are optional — a fresh install has no file and
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import tomli_w
+
+from loom_cli.contexts import current_context
 
 CONFIG_FILENAME = "config.toml"
 
@@ -37,7 +41,9 @@ def _xdg_config_home() -> Path:
 
 
 def config_path() -> Path:
-    return _xdg_config_home() / "loom" / CONFIG_FILENAME
+    root = _xdg_config_home() / "loom"
+    context = current_context()
+    return root / "contexts" / (context + ".toml") if context is not None else root / CONFIG_FILENAME
 
 
 @dataclass
@@ -64,6 +70,9 @@ class LoomConfig:
     auth_session_cookie_name: str = "loom_session"
     auth_csrf_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
+    # Session rotation saves to the config's source, even after a nested context
+    # exits. Not serialized and not part of config value equality.
+    _storage_path: Path | None = field(default=None, repr=False, compare=False)
 
     def to_toml_dict(self) -> dict[str, object]:
         out: dict[str, object] = {}
@@ -94,7 +103,8 @@ class LoomConfig:
 def load_config() -> LoomConfig:
     path = config_path()
     if not path.exists():
-        return LoomConfig()
+        return LoomConfig(_storage_path=path)
+    _check_regular_destination(path)
     raw = tomllib.loads(path.read_text())
     tokens_obj = raw.get("tokens", {})
     if not isinstance(tokens_obj, dict):
@@ -154,17 +164,38 @@ def load_config() -> LoomConfig:
         auth_session_cookie_name=auth_session_cookie_name,
         auth_csrf_token=auth_csrf_token,
         local_providers=local_providers,
+        _storage_path=path,
     )
 
 
+def _check_regular_destination(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        raise ValueError("CLI config must be a regular file, not a symlink")
+
+
 def save_config(cfg: LoomConfig) -> None:
-    path = config_path()
+    path = cfg._storage_path or config_path()
+    if path.parent.is_symlink():
+        raise ValueError("CLI config parent must be a regular directory")
     path.parent.mkdir(parents=True, exist_ok=True)
+    _check_regular_destination(path)
     if os.name != "nt":
         path.parent.chmod(0o700)
-    path.write_text(tomli_w.dumps(cfg.to_toml_dict()))
-    if os.name != "nt":
-        path.chmod(0o600)
+    descriptor, name = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(tomli_w.dumps(cfg.to_toml_dict()))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        cfg._storage_path = path
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def set_local_provider(
