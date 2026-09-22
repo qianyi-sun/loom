@@ -25,6 +25,7 @@ from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.models.capabilities import Capabilities
+from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
@@ -67,14 +68,25 @@ def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
 
 
 def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
+    command_environment = {}
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+        from urllib.parse import urlsplit
+
+        proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
+        url = urlsplit(proxy)
+        if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
+            raise ServiceExecutionTaskError("task_egress_runtime_unavailable")
+        command_environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+        command_environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
     return ServiceSandboxDriver(
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
             os="linux", cpu_arch="x86_64", gpu_vendor="none",
-            network_policies=frozenset({"gateway-only"}), dynamic_network_policy=False,
+            network_policies=frozenset({"gateway-only", "web-allowlist"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
         network_policy=task.environment.baseline_network_policy,
+        command_environment=command_environment,
     )
 
 

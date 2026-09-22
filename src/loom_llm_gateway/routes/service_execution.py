@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.requests import HTTPConnection
 from starlette.responses import Response, StreamingResponse
 
 from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
@@ -35,7 +36,7 @@ ContentSha256Header = Annotated[
 ]
 
 
-def _peer_ip(request: Request) -> str | None:
+def _peer_ip(request: HTTPConnection) -> str | None:
     return request.client.host if request.client else None
 
 
@@ -75,7 +76,7 @@ def _artifact_http(exc: ArtifactCommitError) -> HTTPException:
 
 
 async def _verified_pod(
-    request: Request, identity: ServiceExecutionPeerV1
+    request: HTTPConnection, identity: ServiceExecutionPeerV1
 ) -> VerifiedExecutionPod | None:
     # Release the DB connection before waiting on a regional API or IAM refresh.
     # Final authorization uses a separate transaction and current lease fences.
@@ -105,7 +106,7 @@ async def _verified_pod(
 
 
 async def _authorize(
-    request: Request,
+    request: HTTPConnection,
     identity: ServiceExecutionPeerV1,
     *,
     purpose: Literal["token", "input", "output"] = "output",

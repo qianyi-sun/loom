@@ -23,6 +23,7 @@ from pydantic import (
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_runtime_contract import (
+    TASK_EGRESS_OUTPUT,
     ContainerResourcesV1,
     ExecutionResourceRequestsV1,
     ExecutionRuntimePlanV1,
@@ -33,6 +34,7 @@ from loom.execution_runtime_contract import (
     SidecarContainerV1,
     TaskExecutionResourceRequestsV1,
 )
+from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest
@@ -120,6 +122,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_image_ref: str
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
+    supports_task_web_egress: bool = False
     controller_resources: ControllerComputeResourcesV1 | None = None
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
@@ -139,6 +142,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
         payload: dict[str, Any] = handler(self)
+        if not self.supports_task_web_egress:
+            payload.pop("supports_task_web_egress", None)
         if not self.task_resource_requests:
             payload.pop("task_resource_requests", None)
         if self.default_task_resource_requests is None:
@@ -294,7 +299,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if env.baseline_network_policy.kind != "gateway-only":
+    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist"}:
         reasons.append("gateway_only_network_required")
     if (
         (set(env.environment) - ({"HOME"} if terminus else set()))
@@ -407,6 +412,8 @@ def compile_service_execution_plan(
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     terminus = trial.agent_name == "terminus-2"
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+        raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
     if task_image_grant is not None and selected_agent_image is not None:
@@ -512,7 +519,11 @@ def compile_service_execution_plan(
             required=True,
         ),
     )
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+        output_declarations = (TASK_EGRESS_OUTPUT, *output_declarations)
     return ExecutionRuntimePlanV1(
+        task_egress=(task.environment.baseline_network_policy
+                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
         candidate_sha=profile.candidate_sha,
         task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity,
@@ -622,6 +633,8 @@ def runtime_profile_rejections(
     *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Submission and scheduling share the profile's image/agent compatibility."""
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+        return ("task_egress_runtime_unavailable",)
     if trial.agent_version is not None and (
         trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
     ):
@@ -734,7 +747,11 @@ def _compile_terminus_plan(
             ))
     if task_image_materialization_id is None:
         published_refs.add(env.docker_image)
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+        outputs.insert(0, TASK_EGRESS_OUTPUT)
     return ExecutionRuntimePlanV1(
+        task_egress=(task.environment.baseline_network_policy
+                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=profile.execution_class_id,
         composition="init_payload", task_image_ref=env.docker_image,

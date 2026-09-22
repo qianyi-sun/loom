@@ -82,11 +82,13 @@ class ServiceSandboxDriver:
         capabilities: Capabilities,
         network_policy: NetworkPolicy,
         max_transfer_bytes: int = 256 * 1024 * 1024,
+        command_environment: Mapping[str, str] | None = None,
     ) -> None:
         if max_transfer_bytes <= 0:
             raise ValueError("positive max_transfer_bytes required")
         self.capabilities = capabilities
         self._network_policy = network_policy
+        self._command_environment = dict(command_environment or {})
         self._max_transfer = max_transfer_bytes
         self._socket_path = socket_path
         self._client: httpx.AsyncClient | None = None
@@ -166,7 +168,7 @@ class ServiceSandboxDriver:
                 "argv": ["/bin/sh", "-c", cmd],
                 "user": str(user) if user is not None else None,
                 "cwd": str(cwd) if cwd is not None else "",
-                "env": dict(env or {}),
+                "env": {**self._command_environment, **dict(env or {})},
                 "timeout_sec": timeout_sec or 0,
             },
             timeout=None,  # The server bounds execution and kills its process group.

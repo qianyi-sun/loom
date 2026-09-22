@@ -30,6 +30,8 @@ type workloadIdentity struct {
 }
 
 type workloadBroker struct {
+	phaseContext  context.Context
+	phaseCancel   context.CancelFunc
 	podTokenFile  string
 	root          *url.URL
 	identity      workloadIdentity
@@ -200,6 +202,10 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 func (b *workloadBroker) setPhaseDeadline(deadline time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.phaseCancel != nil {
+		b.phaseCancel()
+	}
+	b.phaseContext, b.phaseCancel = context.WithDeadline(context.Background(), deadline)
 	b.phaseDeadline = deadline
 	b.phaseBound = true
 	b.token = ""

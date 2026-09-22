@@ -117,6 +117,7 @@ type executionResourceRequests struct {
 }
 
 type plan struct {
+	TaskEgress                 *webAllowlist              `json:"task_egress,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
 	TaskRevisionSHA256         string                     `json:"task_revision_sha256"`
@@ -182,6 +183,20 @@ func decodePlan(payload []byte) (plan, error) {
 }
 
 func (p plan) validate() error {
+	if p.TaskEgress != nil {
+		declared := false
+		for _, output := range p.OutputDeclarations {
+			if output == taskEgressOutput {
+				declared = true
+			}
+		}
+		if !declared {
+			return fmt.Errorf("task egress requires its immutable diagnostic output declaration")
+		}
+		if err := p.TaskEgress.validate(); err != nil {
+			return err
+		}
+	}
 	if p.SchemaVersion != "loom.execution-runtime-plan.v1" || !candidate.MatchString(p.CandidateSHA) {
 		return fmt.Errorf("invalid schema version or candidate SHA")
 	}

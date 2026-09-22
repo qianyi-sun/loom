@@ -37,6 +37,57 @@
       ],
       "title": "VerifierTopology",
       "type": "string"
+    },
+    "WebAllowlist": {
+      "additionalProperties": false,
+      "properties": {
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/WebDestination"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Destinations",
+          "type": "array"
+        },
+        "kind": {
+          "const": "web-allowlist",
+          "default": "web-allowlist",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "destinations"
+      ],
+      "title": "WebAllowlist",
+      "type": "object"
+    },
+    "WebDestination": {
+      "additionalProperties": false,
+      "description": "Exact public DNS destination; HTTPS uses CONNECT, HTTP uses forwarding.",
+      "properties": {
+        "host": {
+          "maxLength": 253,
+          "minLength": 3,
+          "title": "Host",
+          "type": "string"
+        },
+        "protocol": {
+          "enum": [
+            "http",
+            "https"
+          ],
+          "title": "Protocol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "protocol"
+      ],
+      "title": "WebDestination",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -183,6 +234,17 @@
       "minimum": 0,
       "title": "Sidecar Count",
       "type": "integer"
+    },
+    "task_egress": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WebAllowlist"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "tmpfs": {
       "title": "Tmpfs",

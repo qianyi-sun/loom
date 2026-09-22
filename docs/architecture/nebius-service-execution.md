@@ -65,7 +65,7 @@ execution unit:
 - GPU vendor/count;
 - positive CPU, RAM, and ephemeral-storage limits;
 - minimum sandbox isolation;
-- network mode;
+- network mode and optional immutable HTTP(S) destination policy;
 - immutable image/runtime identity or an explicit non-admissible build mode;
 - sidecar count and verifier topology;
 - custom DNS, extra hosts, and tmpfs;
@@ -97,6 +97,17 @@ fields that exist in that schema. Dynamic operator and user bundles therefore
 remain `conversion_required` until materialization emits and validates the
 complete new contract; absence from the legacy schema is not evidence that a
 capability is false.
+
+### Task HTTP(S) capability
+
+`WebAllowlist` carries exact host/protocol destinations through workload
+requirements and the runtime plan. Both the execution class and runtime profile
+must advertise `supports_task_web_egress`; an old profile receives the actionable
+`task_egress_runtime_unavailable` rejection. Unused extension fields remain omitted
+from existing canonical records. The Gateway independently requires a protected
+address configuration before authorizing tunnels. Gateway-only defaults and task
+Pod network restrictions are unchanged. See [sandbox isolation](sandbox-isolation.md#declared-hosted-task-web-egress)
+for configuration, task declarations, transport bounds and acceptance limits.
 
 ## Logical pool and regional policy
 
