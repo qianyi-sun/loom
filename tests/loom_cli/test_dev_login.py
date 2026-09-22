@@ -32,7 +32,7 @@ def login_http(monkeypatch, tmp_xdg_home):
                     "cluster_id": "cluster", "physical_pool_id": "pool", "application_namespace": "loom-dev-alice",
                     "execution_namespace": "loom-run-" + INCARNATION.replace("-", ""),
                     "build_namespace": "loom-run-" + INCARNATION.replace("-", "") + "-build",
-                    "public_host": "alice.example.com", "target_id": "env-" + ENVIRONMENT.replace("-", ""),
+                    "public_host": "alice.example.com", "target_id": "env-" + INCARNATION.replace("-", ""),
                     "deployment_generation": 1, "desired_state": "active"}
     status = {"registration": registration, "operation": {
         "operation_id": INCARNATION, "environment_id": ENVIRONMENT, "deployment_generation": 1,
@@ -136,3 +136,30 @@ def test_login_to_destroyed_environment_does_not_issue_or_consume_a_proof(login_
     state["status"]["registration"]["desired_state"] = "destroyed"
     assert main(["dev", "login", ENVIRONMENT]) == 1
     assert len(requests) == 1
+
+
+def test_refreshing_child_login_preserves_explicit_child_local_configuration(login_http):
+    assert main(["dev", "login", ENVIRONMENT]) == 0
+    with selected_context(CONTEXT):
+        cfg = load_config()
+        cfg.tokens["openai"] = "explicit-child-only-key"
+        save_config(cfg)
+    assert main(["dev", "login", ENVIRONMENT]) == 0
+    with selected_context(CONTEXT):
+        assert load_config().tokens == {"openai": "explicit-child-only-key"}
+    assert load_config().tokens == {"openai": "private-model-key"}
+
+
+def test_failed_child_credential_write_reports_safely_and_keeps_management(login_http, monkeypatch, capsys):
+    from loom_cli import environment_login
+
+    original = config_path().read_bytes()
+
+    def fail_save(cfg):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(environment_login, "save_config", fail_save)
+    assert main(["dev", "login", ENVIRONMENT]) == 1
+    assert config_path().read_bytes() == original
+    output = capsys.readouterr()
+    assert PROOF not in output.out + output.err
