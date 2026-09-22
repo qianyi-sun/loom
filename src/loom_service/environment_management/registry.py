@@ -29,6 +29,7 @@ from loom.db.nebius_environment_schema import (
     NebiusPlatformReservation,
 )
 from loom.nebius_environment_contract import (
+    EnvironmentCreateRequestV1,
     EnvironmentOperationV1,
     EnvironmentRegistrationV1,
     EnvironmentStatusV1,
@@ -80,6 +81,33 @@ class EnvironmentRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self.session_factory = session_factory
 
+    @staticmethod
+    def _create_fingerprint(*, team: UUID, cluster_id: str, slug: str, candidate_id: UUID) -> str:
+        return hashlib.sha256(json.dumps({
+            "action": "create", "slug": slug, "candidate_id": str(candidate_id),
+            "owner_team_id": str(team), "cluster_id": cluster_id,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    async def replay_create(
+        self, *, principal: AuthContext, idempotency_key: str,
+        request: EnvironmentCreateRequestV1, cluster_id: str,
+    ) -> EnvironmentOperationV1 | None:
+        owner, team = owner_identity(principal, mutation=True)
+        if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", idempotency_key) is None:
+            raise ManagementError("invalid_idempotency_key", 422)
+        async with self.session_factory() as session:
+            row = (await session.execute(select(NebiusEnvironmentOperation).where(
+                NebiusEnvironmentOperation.owner_user_id == owner,
+                NebiusEnvironmentOperation.idempotency_key == idempotency_key,
+            ))).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.request_sha256 != self._create_fingerprint(
+                team=team, cluster_id=cluster_id, slug=request.slug, candidate_id=request.candidate_id,
+            ):
+                raise ManagementError("idempotency_conflict")
+            return operation_view(row)
+
     async def create(
         self, *, principal: AuthContext, idempotency_key: str, prepared: RenderedEnvironment,
     ) -> EnvironmentOperationV1:
@@ -92,10 +120,9 @@ class EnvironmentRegistry:
         if (row.scope != "personal" or row.binding_mode != "generated" or row.candidate_id is None
                 or row.deployment_generation != 1 or row.desired_state != "active" or prepared.execution_enabled):
             raise ManagementError("invalid_create_plan", 422)
-        request_sha256 = hashlib.sha256(json.dumps({
-            "action": "create", "slug": row.slug, "candidate_id": str(row.candidate_id),
-            "owner_team_id": str(team), "cluster_id": row.cluster_id,
-        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        request_sha256 = self._create_fingerprint(
+            team=team, cluster_id=row.cluster_id, slug=row.slug, candidate_id=row.candidate_id,
+        )
         needed = asdict(prepared.platform_envelope)
         if any(type(value) is not int or value < 0 for value in needed.values()):
             raise ManagementError("invalid_platform_envelope", 422)

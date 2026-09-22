@@ -67,5 +67,11 @@ class EnvironmentManager:
 
     async def create(self, principal: AuthContext, request: EnvironmentCreateRequestV1, *,
                      idempotency_key: str) -> EnvironmentOperationV1:
+        replay = await self.registry.replay_create(
+            principal=principal, idempotency_key=idempotency_key, request=request,
+            cluster_id=self.plans.foundation.platform_config["cluster_id"],
+        )
+        if replay is not None:
+            return replay
         prepared = await self.plans.prepare(principal, request)
         return await self.registry.create(principal=principal, idempotency_key=idempotency_key, prepared=prepared)

@@ -121,7 +121,10 @@ async def test_manager_recovers_lost_reply_without_publication_and_rejects_chang
     environment_registry, platform_inputs,
 ):
     from loom.nebius_environment_contract import EnvironmentCreateRequestV1
-    from loom_service.environment_management.manager import EnvironmentManager, EnvironmentPlanFactory
+    from loom_service.environment_management.manager import (
+        EnvironmentManager,
+        EnvironmentPlanFactory,
+    )
     from loom_service.environment_management.registry import ManagementError
 
     registry, _, (alice, bob), prepare = environment_registry
