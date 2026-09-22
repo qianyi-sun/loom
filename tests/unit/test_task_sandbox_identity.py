@@ -2,7 +2,7 @@
 
 import pytest
 
-from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, ExecutionRuntimePlanV1
 from loom.models.task import TaskConfig
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -130,5 +130,6 @@ def test_explicit_template_cannot_bypass_automatic_capability_readiness(declarat
         payload["environment"]["mutable_paths"] = ["/data"]
     else:
         template["task_egress"] = {"kind": "web-allowlist", "destinations": [{"host": "example.org", "protocol": "https"}]}
+        template["output_declarations"].append(TASK_EGRESS_OUTPUT.model_dump(mode="json"))
     with pytest.raises(ValueError, match="automatic native execution"):
         TaskConfig.model_validate(payload)

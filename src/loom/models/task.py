@@ -252,6 +252,8 @@ class TaskServiceExecutionV1(BaseModel):
         )
         if plan.execution_role != "attempt":
             raise ValueError("task service execution requires an attempt runtime plan")
+        if plan.task_egress is not None or any(sidecar.identity is not None for sidecar in plan.sidecars):
+            raise ValueError("task identity and web egress require automatic native execution")
         payload = plan.canonical_payload()
         del payload["task_revision_sha256"]
         return payload
@@ -294,6 +296,11 @@ class TaskConfig(BaseModel):
     def _service_execution_matches_task(self) -> TaskConfig:
         if self.service_execution is None:
             return self
+        if (self.environment.user != "agent" or self.verifier.user is not None
+                or "HOME" in self.environment.environment or self.environment.mutable_paths
+                or self.environment.service_lifecycle is not None
+                or self.environment.baseline_network_policy.kind == "web-allowlist"):
+            raise ValueError("declared sandbox capabilities require automatic native execution")
 
         from loom.execution_contract import workload_requirements_from_task
         from loom.execution_runtime_contract import validate_runtime_plan_requirements

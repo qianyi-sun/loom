@@ -707,6 +707,11 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
+Task identity, web egress, mutable paths and retained-service declarations require
+automatic native execution. A task-supplied `service_execution.runtime_template`
+cannot enable these extensions or bypass deployment readiness; intake rejects
+such combinations before submission or scheduling.
+
 Automatic Terminus tasks may declare `environment.mutable_paths` for directory
 state outside their workdir. The controller captures each root in a separate
 validated archive and binds its path, size and SHA-256 in a required manifest.
