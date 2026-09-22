@@ -60,7 +60,9 @@ def test_inventory_projects_capacity_and_routes_without_claiming_installation_re
     cluster = Cluster()
     result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
     assert result["status"] == "observed"
-    assert result["candidate_sha"] == "a" * 40
+    # The ConfigMap can advance before workload rollout/migration succeeds.
+    assert result["configured_candidate_sha"] == "a" * 40
+    assert "running_candidate_correspondence" in result["unverified"]
     assert result["configured_execution_node_group_id"] == "mk8snodegroup-test"
     assert result["nodes"][0]["allocatable"]["memory"] == "30000Mi"
     assert result["pods"][0]["containers"][0]["requests"] == {"cpu": "500m", "memory": "512Mi"}
