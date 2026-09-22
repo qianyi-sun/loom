@@ -61,7 +61,7 @@ def test_unicode_text_in_body_cannot_create_an_instruction_boundary() -> None:
     assert [(item.line, item.keyword) for item in instructions] == [(1, "FROM"), (2, "RUN"), (5, "WORKDIR")]
 
 
-@pytest.mark.parametrize("source", ["RUN cat <<\n", "RUN cat <<'EOF\n", "FROM ubuntu:24.04 \\\n"])
+@pytest.mark.parametrize("source", ["RUN cat <<\n", "RUN cat <<'EOF\n", "RUN cat <<''\n", "FROM ubuntu:24.04 \\\n"])
 def test_incomplete_boundaries_are_rejected(source: str) -> None:
     with pytest.raises(DockerfileParseError):
         dockerfile_instructions(source)
