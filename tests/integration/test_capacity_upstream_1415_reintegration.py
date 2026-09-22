@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _script(package: str) -> ScriptDirectory:
-    root = REPO_ROOT / package
+    root = REPO_ROOT / "database" / package
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root))
     return ScriptDirectory.from_config(config)

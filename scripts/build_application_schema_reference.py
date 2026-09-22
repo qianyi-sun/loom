@@ -213,7 +213,7 @@ async def _migrate_reference_guard(
     })
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "alembic", "-c",
-        str(_ROOT / "capacity_guard_migrations/alembic.ini"), "upgrade", guard_head,
+        str(_ROOT / "database/capacity_guard_migrations/alembic.ini"), "upgrade", guard_head,
         cwd=_ROOT, env=environment, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )

@@ -82,7 +82,7 @@ def test_bundled_reference_pins_image_and_existing_historical_revisions() -> Non
     )
     for directory, head in (
         ("migrations", expected.application_head),
-        ("capacity_guard_migrations", expected.guard_head),
+        ("database/capacity_guard_migrations", expected.guard_head),
     ):
         config = Config(str(root / directory / "alembic.ini"))
         config.set_main_option("script_location", str(root / directory))

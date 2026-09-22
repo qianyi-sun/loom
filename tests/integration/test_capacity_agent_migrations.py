@@ -24,8 +24,8 @@ def _value(database: dict[str, object], key: str) -> str:
 
 def _guard_config(database: dict[str, object]) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")

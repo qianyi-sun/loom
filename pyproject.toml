@@ -140,7 +140,7 @@ abort_family = "loom.family_run.failure:AbortFamilyPolicy"
 s3_artifacts = "loom.family_run.state_backends:S3ArtifactsStateBackend"
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
+where = ["src", "database"]
 include = ["loom*", "loom_drivers*", "capacity_guard_migrations*", "capacity_migrations*", "capacity_build_guard_migrations*"]
 
 [tool.setuptools.package-data]

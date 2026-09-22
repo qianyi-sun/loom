@@ -7,8 +7,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _capacity_config_without_database() -> Config:
-    config = Config(str(REPO_ROOT / "capacity_migrations/alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "capacity_migrations"))
+    config = Config(str(REPO_ROOT / "database/capacity_migrations/alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "database" / "capacity_migrations"))
     return config
 
 

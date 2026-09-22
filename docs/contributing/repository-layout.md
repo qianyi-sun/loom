@@ -20,15 +20,18 @@ components. Directory boundaries follow runtime, packaging and schema ownership.
 | `scripts/` | Repository checks, operator entrypoints and benchmark tooling |
 | `tests/` | Unit, contract, integration, system, CLI and operations coverage |
 | `migrations/` | Published application Alembic chain |
-| `capacity_migrations/`, `capacity_guard_migrations/`, `capacity_build_guard_migrations/` | Separate published historical schema chains required for reconstruction and qualified restores |
+| `database/capacity_migrations/`, `database/capacity_guard_migrations/`, `database/capacity_build_guard_migrations/` | Separate published historical schema chains required for reconstruction and qualified restores |
 | `third_party/` | Pinned vendored dependencies, with their upstream layout and licensing |
 | `.github/` | CI, publication and protected release workflows |
 | `docs/` | Current documentation, machine-read contracts and minimal marked history |
 
-The migration roots are intentionally separate. Their published revisions and
-loader paths are compatibility contracts; do not merge or rename them merely to
-shorten the root listing. The same applies to package boundaries and vendored
-source. Use [architecture](../architecture/README.md) to trace runtime ownership.
+The active application chain stays in `migrations/`; the three retained capacity
+chains are grouped under [database/](../../database/README.md). They remain
+independent histories with stable Python package names and unchanged published
+revisions. Source layout can change when loaders, packaging and reconstruction
+checks change together; revision identities and data compatibility must survive.
+Package boundaries and vendored layouts also follow their consumers. Use
+[architecture](../architecture/README.md) to trace runtime ownership.
 
 ## Documentation layout
 

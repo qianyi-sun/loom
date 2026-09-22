@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -143,3 +144,53 @@ def test_wheel_contains_complete_capacity_guard_migration_package(
         members = set(wheel.namelist())
 
     assert _GUARD_MIGRATION_RESOURCES <= members
+
+
+def test_capacity_migration_sources_are_grouped_under_database() -> None:
+    for package in (
+        "capacity_migrations", "capacity_guard_migrations", "capacity_build_guard_migrations",
+    ):
+        assert not (_REPO_ROOT / package).exists()
+        assert (_REPO_ROOT / "database" / package / "alembic.ini").is_file()
+
+
+def test_wheel_preserves_all_historical_migration_resources(
+    built_loom_wheel: Path,
+) -> None:
+    with zipfile.ZipFile(built_loom_wheel) as wheel:
+        for package in (
+            "capacity_migrations", "capacity_guard_migrations", "capacity_build_guard_migrations",
+        ):
+            source = _REPO_ROOT / "database" / package
+            for path in source.rglob("*"):
+                if path.is_file() and "__pycache__" not in path.parts:
+                    member = f"{package}/{path.relative_to(source).as_posix()}"
+                    assert wheel.read(member) == path.read_bytes(), member
+
+
+def test_installed_wheel_loads_each_chain_outside_checkout(
+    built_loom_wheel: Path, tmp_path: Path,
+) -> None:
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(built_loom_wheel) as wheel:
+        wheel.extractall(installed)
+    script = '''
+import sys
+from importlib.resources import files
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+sys.path.insert(0, sys.argv[1])
+for package, head in (
+    ("capacity_migrations", "capacity_0023"),
+    ("capacity_guard_migrations", "guard_0035"),
+    ("capacity_build_guard_migrations", "build_guard_0032"),
+):
+    resources = files(package)
+    assert str(resources).startswith(sys.argv[1])
+    config = Config(str(resources / "alembic.ini"))
+    assert ScriptDirectory.from_config(config).get_heads() == [head]
+'''
+    subprocess.run(
+        [sys.executable, "-I", "-c", script, str(installed)],
+        cwd=tmp_path, check=True,
+    )

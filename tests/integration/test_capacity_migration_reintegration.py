@@ -140,8 +140,8 @@ class CapacitySchemaSurface:
 
 def _capacity_config(url: str) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     os.environ["LOOM_CAPACITY_DB_URL"] = url
     return cfg
 
@@ -149,7 +149,7 @@ def _capacity_config(url: str) -> AlembicConfig:
 def _capacity_config_without_database() -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
     cfg = AlembicConfig()
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     return cfg
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None:
-    source = Path("capacity_guard_migrations/env.py").read_text(encoding="utf-8")
+    source = Path("database/capacity_guard_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
@@ -19,13 +19,13 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
 def test_historical_guard_migrations_remain_in_static_validation() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     ruff_command = (
-        "ruff check src tests packages migrations capacity_guard_migrations capacity_migrations"
+        "ruff check src tests packages migrations database/capacity_guard_migrations database/capacity_migrations"
     )
     assert ruff_command in workflow
 
 
 def test_prepared_admission_migration_remains_zero_executable_and_projection_read_only() -> None:
-    source = Path("capacity_guard_migrations/versions/guard_0003_prepared_admission.py").read_text(
+    source = Path("database/capacity_guard_migrations/versions/guard_0003_prepared_admission.py").read_text(
         encoding="utf-8"
     )
     lowered = source.lower()
@@ -43,7 +43,7 @@ def test_prepared_admission_migration_remains_zero_executable_and_projection_rea
 
 def test_disconnected_claim_guard_has_no_live_entry_or_candidate_mutation() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py"
+        "database/capacity_guard_migrations/versions/guard_0004_disconnected_claim_guard.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "executable_new_capacity_ceiling = 0" in lowered
@@ -60,7 +60,7 @@ def test_disconnected_claim_guard_has_no_live_entry_or_candidate_mutation() -> N
 
 def test_legacy_fence_migration_is_inert_and_has_no_candidate_mutation() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py"
+        "database/capacity_guard_migrations/versions/guard_0005_inert_legacy_authority_fence.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "proposed_authority_mode = 'legacy-compatibility'" in lowered
@@ -84,7 +84,7 @@ def test_legacy_fence_migration_is_inert_and_has_no_candidate_mutation() -> None
 
 def test_lifecycle_demand_projection_is_read_only_and_nonexecutable() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0006_lifecycle_demand_projection.py"
+        "database/capacity_guard_migrations/versions/guard_0006_lifecycle_demand_projection.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "capture_demand_observation_v1_legacy" in lowered
@@ -105,7 +105,7 @@ def test_lifecycle_demand_projection_is_read_only_and_nonexecutable() -> None:
 
 def test_inert_submission_registration_has_no_live_or_public_mutation() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py"
+        "database/capacity_guard_migrations/versions/guard_0007_inert_trial_submission.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "register_inert_trial_submission" in lowered
@@ -126,7 +126,7 @@ def test_inert_submission_registration_has_no_live_or_public_mutation() -> None:
 
 def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py"
+        "database/capacity_guard_migrations/versions/guard_0008_complete_mutation_inventory.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "execution-attempt-queued-to-claimed" in lowered
@@ -143,7 +143,7 @@ def test_complete_mutation_inventory_migration_only_tightens_inert_policy() -> N
 
 def test_executable_intent_observation_migration_is_read_only_and_role_bounded() -> None:
     source = Path(
-        "capacity_guard_migrations/versions/guard_0014_executable_intent_observation.py"
+        "database/capacity_guard_migrations/versions/guard_0014_executable_intent_observation.py"
     ).read_text(encoding="utf-8")
     lowered = source.lower()
     assert "observe_executable_intent" in lowered

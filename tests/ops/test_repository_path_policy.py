@@ -93,7 +93,7 @@ def test_repository_path_policy_preserves_domain_plans(tmp_path: Path) -> None:
     result = _run_checker(
         tmp_path,
         "src/loom/task_image_build_plan.py",
-        "capacity_build_guard_migrations/versions/build_guard_0003_prepare_plan.py",
+        "database/capacity_build_guard_migrations/versions/build_guard_0003_prepare_plan.py",
         "scripts/plan_ci_validations.py",
         "docs/architecture/pipeline-orchestrator.md",
         "docs/runbooks/nebius-deployment.md",

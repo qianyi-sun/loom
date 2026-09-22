@@ -14,8 +14,8 @@ from tests.support.historical_capacity import _value
 
 def _downgrade(database: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(__file__).resolve().parents[2]
-    config = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    config.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    config = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     with monkeypatch.context() as environment:
         for suffix, key in (
             ("DB_URL", "migrator_url"),

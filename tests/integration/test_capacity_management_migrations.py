@@ -94,8 +94,8 @@ def _normalize_sql(sql: str) -> str:
 
 def _capacity_config(url: str) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     os.environ["LOOM_CAPACITY_DB_URL"] = url
     return cfg
 
@@ -2963,7 +2963,7 @@ def test_capacity_migration_downgrades_and_reupgrades(
 
 
 def test_capacity_alembic_environment_has_no_environment_db_fallback() -> None:
-    source = Path("capacity_migrations/env.py").read_text(encoding="utf-8")
+    source = Path("database/capacity_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_DB_URL" in source
     assert "LOOM_DB_URL" not in source
     assert "LOOM_CP_DB_URL" not in source
@@ -2977,8 +2977,8 @@ def test_capacity_alembic_connection_enforces_fixed_postgres_timeouts(
     encoded_url = (
         f"{capacity_postgres_url}?application_name=capacity%40migration&connect_timeout=99"
     )
-    cfg = AlembicConfig(str(root / "capacity_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_migrations"))
     monkeypatch.setenv("LOOM_CAPACITY_DB_URL", encoded_url)
     real_engine_from_config = sqlalchemy.engine_from_config
     captured: dict[str, object] = {}

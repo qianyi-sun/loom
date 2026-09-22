@@ -874,8 +874,8 @@ def test_guard_owner_has_only_bounded_public_submission_privileges(
 
 def _guard_config(database: dict[str, object]) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     os.environ["LOOM_CAPACITY_GUARD_DB_URL"] = _value(database, "migrator_url")
     os.environ["LOOM_CAPACITY_GUARD_OWNER_ROLE"] = _value(database, "owner_role")
     os.environ["LOOM_CAPACITY_GUARD_AGENT_ROLE"] = _value(database, "agent_role")
@@ -3060,7 +3060,7 @@ def test_lifecycle_projection_has_bounded_unresolved_blocker_access_path(
 
 
 def test_guard_alembic_environment_has_no_database_fallback() -> None:
-    source = Path("capacity_guard_migrations/env.py").read_text(encoding="utf-8")
+    source = Path("database/capacity_guard_migrations/env.py").read_text(encoding="utf-8")
     assert "LOOM_CAPACITY_GUARD_DB_URL" in source
     assert "LOOM_CAPACITY_GUARD_OWNER_ROLE" in source
     assert "LOOM_CAPACITY_GUARD_AGENT_ROLE" in source
@@ -3073,7 +3073,7 @@ def test_guard_alembic_environment_has_no_database_fallback() -> None:
 
 def test_guard_alembic_logging_formatter_is_valid() -> None:
     config = ConfigParser(interpolation=None)
-    assert config.read("capacity_guard_migrations/alembic.ini")
+    assert config.read("database/capacity_guard_migrations/alembic.ini")
     formatter = Formatter(
         config["formatter_generic"]["format"],
         datefmt=config["formatter_generic"]["datefmt"],
@@ -3087,8 +3087,8 @@ def test_guard_migration_requires_explicit_canonical_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
 
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_DB_URL", raising=False)
     monkeypatch.delenv("LOOM_CAPACITY_GUARD_OWNER_ROLE", raising=False)
@@ -3153,8 +3153,8 @@ def test_guard_migration_login_must_be_owner_member(
         password=password,
     )
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     try:
         with engine.begin() as connection:
             connection.exec_driver_sql(
@@ -3190,8 +3190,8 @@ def test_guard_migration_rejects_superuser_login(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    cfg = AlembicConfig(str(root / "capacity_guard_migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "capacity_guard_migrations"))
+    cfg = AlembicConfig(str(root / "database" / "capacity_guard_migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "database" / "capacity_guard_migrations"))
     monkeypatch.setenv("LOOM_CAPACITY_GUARD_DB_URL", _value(capacity_guard_database, "admin_url"))
     monkeypatch.setenv(
         "LOOM_CAPACITY_GUARD_OWNER_ROLE", _value(capacity_guard_database, "owner_role")
