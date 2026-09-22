@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from types import TracebackType
+from typing import Any
 from uuid import UUID
 
 from pydantic import TypeAdapter
@@ -50,6 +51,12 @@ class EnvironmentClient:
         return EnvironmentStatusV1.model_validate(assert_2xx(
             self.http.get(f"/api/v1/environments/{environment_id}"), action="read personal environment",
         ))
+
+    def login(self, environment_id: UUID) -> dict[str, Any]:
+        value = assert_2xx(self.http.post(f"/api/v1/environments/{environment_id}/login"), action="request personal login")
+        if not isinstance(value, dict):
+            raise ValueError("invalid personal login response")
+        return value
 
     def operation(self, operation_id: UUID, *, timeout: float = 30) -> EnvironmentOperationV1:
         return EnvironmentOperationV1.model_validate(assert_2xx(

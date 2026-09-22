@@ -20,11 +20,15 @@ All fields are optional — a fresh install has no file and
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import tomli_w
+
+from loom_cli.contexts import ManagedEnvironmentBinding, current_context
 
 CONFIG_FILENAME = "config.toml"
 
@@ -37,7 +41,9 @@ def _xdg_config_home() -> Path:
 
 
 def config_path() -> Path:
-    return _xdg_config_home() / "loom" / CONFIG_FILENAME
+    root = _xdg_config_home() / "loom"
+    context = current_context()
+    return root / "contexts" / (context + ".toml") if context is not None else root / CONFIG_FILENAME
 
 
 @dataclass
@@ -64,9 +70,16 @@ class LoomConfig:
     auth_session_cookie_name: str = "loom_session"
     auth_csrf_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
+    managed_environment: ManagedEnvironmentBinding | None = None
+    # Session rotation saves to the config's source, even after a nested context
+    # exits. Not serialized and not part of config value equality.
+    _storage_path: Path | None = field(default=None, repr=False, compare=False)
 
     def to_toml_dict(self) -> dict[str, object]:
         out: dict[str, object] = {}
+        self.validate_binding()
+        if self.managed_environment is not None:
+            out["managed_environment"] = asdict(self.managed_environment)
         if self.tokens:
             out["tokens"] = dict(self.tokens)
         if self.server_url is not None:
@@ -90,11 +103,16 @@ class LoomConfig:
             out["local_providers"] = local
         return out
 
+    def validate_binding(self) -> None:
+        if self.managed_environment is not None and self.server_url != self.managed_environment.child_origin:
+            raise ValueError("server URL conflicts with managed context binding")
+
 
 def load_config() -> LoomConfig:
     path = config_path()
     if not path.exists():
-        return LoomConfig()
+        return LoomConfig(_storage_path=path)
+    _check_regular_destination(path)
     raw = tomllib.loads(path.read_text())
     tokens_obj = raw.get("tokens", {})
     if not isinstance(tokens_obj, dict):
@@ -146,7 +164,7 @@ def load_config() -> LoomConfig:
             api_key=api_key,
             served_model_name=served_model_name,
         )
-    return LoomConfig(
+    cfg = LoomConfig(
         tokens=tokens,
         server_url=server_url,
         auth_token=auth_token,
@@ -154,17 +172,55 @@ def load_config() -> LoomConfig:
         auth_session_cookie_name=auth_session_cookie_name,
         auth_csrf_token=auth_csrf_token,
         local_providers=local_providers,
+        managed_environment=ManagedEnvironmentBinding.from_dict(raw.get("managed_environment")),
+        _storage_path=path,
     )
+    cfg.validate_binding()
+    return cfg
+
+
+def _check_regular_destination(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        raise ValueError("CLI config must be a regular file, not a symlink")
 
 
 def save_config(cfg: LoomConfig) -> None:
-    path = config_path()
+    path = cfg._storage_path or config_path()
+    cfg.validate_binding()
+    if cfg.managed_environment is not None and path.parent.name != "contexts":
+        raise ValueError("a managed environment requires a separate named context")
+    if path.parent.is_symlink():
+        raise ValueError("CLI config parent must be a regular directory")
     path.parent.mkdir(parents=True, exist_ok=True)
+    _check_regular_destination(path)
     if os.name != "nt":
         path.parent.chmod(0o700)
-    path.write_text(tomli_w.dumps(cfg.to_toml_dict()))
-    if os.name != "nt":
-        path.chmod(0o600)
+    descriptor, name = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(tomli_w.dumps(cfg.to_toml_dict()))
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            # Exclusive first publication closes the two-writers-create-the-
+            # same-name race. Losers must verify the winning binding before
+            # replacing credentials; they cannot replace another environment.
+            os.link(temporary, path)
+        except FileExistsError:
+            _check_regular_destination(path)
+            existing = tomllib.loads(path.read_text())
+            binding = ManagedEnvironmentBinding.from_dict(existing.get("managed_environment"))
+            if binding != cfg.managed_environment:
+                raise ValueError("existing context binding cannot be changed or removed") from None
+            os.replace(temporary, path)
+        cfg._storage_path = path
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def set_local_provider(
