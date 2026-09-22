@@ -14,8 +14,8 @@ POOL = "postgresql+psycopg://loom:pw@loom-pgbouncer:6432/loom"
 
 def _stub_required_env(cls: type[Any], monkeypatch: pytest.MonkeyPatch) -> None:
     """Fill in stubs for every required Settings field so instantiation
-    succeeds during the test. Reads model_fields to discover required fields
-    and applies a type-appropriate stub value."""
+    succeeds during the test. Includes application-mode storage requirements,
+    which are conditional rather than unconditionally required model fields."""
     import os
     prefix_map = {
         "ControlPlaneSettings": "LOOM_CP_",
@@ -24,7 +24,9 @@ def _stub_required_env(cls: type[Any], monkeypatch: pytest.MonkeyPatch) -> None:
     }
     prefix = prefix_map[cls.__name__]
     for name, field in cls.model_fields.items():
-        if not field.is_required():
+        if not field.is_required() and not (
+            cls is LoomServiceSettings and name in {"minio_access_key", "minio_secret_key"}
+        ):
             continue
         env_name = prefix + name.upper()
         if os.environ.get(env_name):
@@ -42,7 +44,9 @@ def _stub_required_env(cls: type[Any], monkeypatch: pytest.MonkeyPatch) -> None:
 def _required_env_lines(cls: type[Any], prefix: str) -> list[str]:
     lines: list[str] = []
     for name, field in cls.model_fields.items():
-        if not field.is_required():
+        if not field.is_required() and not (
+            cls is LoomServiceSettings and name in {"minio_access_key", "minio_secret_key"}
+        ):
             continue
         env_name = prefix + name.upper()
         ann = str(field.annotation)
