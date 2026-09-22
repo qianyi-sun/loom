@@ -14,8 +14,7 @@
 # Backblaze B2, and Wasabi. The parser also accepts
 # cleanup_incomplete_uploads_after_hours, but the S3 renderer intentionally
 # omits it because MinIO drops AbortIncompleteMultipartUpload from persisted
-# lifecycle state. The library has a pure GCS renderer; this CLI does not
-# dispatch or apply it.
+# lifecycle state. Non-S3 lifecycle backends are unsupported.
 #
 # See docs/architecture/storage-retention.md for the design rationale
 # and docs/runbooks/operator-runbook.md#storage-retention for the
@@ -25,8 +24,8 @@
 #   "minio" | "s3" | "r2" | "b2" | "wasabi"
 backend = "minio"
 
-# Trajectories accumulate fastest. 30d is the SOC2-equivalent default
-# for log-style data; tune for your team's investigation cadence.
+# Trajectories accumulate fastest. This example retains them for 30 days;
+# tune for your team's investigation and data-retention requirements.
 [[retention]]
 bucket = "trajectories"
 strategy = "expire_after_days"

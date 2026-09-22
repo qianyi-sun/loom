@@ -46,10 +46,7 @@ from typing import Any
 import boto3
 from botocore.config import Config
 
-# Kept in sync with config/loom-schema.toml [service_config.storage_auth_kind]
-# description. ``workload_identity`` and ``sa_json`` are reserved for the
-# GCS renderer integration (#254 follow-up); they error from this factory
-# until the GCS-specific client path lands.
+# Implemented authentication strategies for S3-compatible clients.
 SUPPORTED_AUTH_KINDS: frozenset[str] = frozenset({"static_keys", "irsa"})
 
 
@@ -84,9 +81,8 @@ def build_s3_client(
     ``serviceAccountToken`` on EKS). ``access_key`` and ``secret_key``
     are ignored if passed.
 
-    Other values raise ``UnsupportedAuthKindError`` with a clear
-    pointer at the tracking issue — at least until the GCS-specific
-    client path lands (#254 follow-up).
+    Other values raise ``UnsupportedAuthKindError`` and list the
+    supported strategies.
     """
     if auth_kind == "static_keys":
         if not access_key or not secret_key:
@@ -116,7 +112,5 @@ def build_s3_client(
         )
     raise UnsupportedAuthKindError(
         f"auth_kind={auth_kind!r} not supported by build_s3_client. "
-        f"Supported today: {sorted(SUPPORTED_AUTH_KINDS)}. "
-        "(workload_identity and sa_json are reserved for the GCS "
-        "client path; #254 follow-up.)",
+        f"Supported: {sorted(SUPPORTED_AUTH_KINDS)}.",
     )

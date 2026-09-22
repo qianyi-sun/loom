@@ -1,78 +1,8 @@
-"""Storage retention policy: provider-neutral rules + per-backend rendering.
+"""Validated retention rules for S3-compatible object stores.
 
-Design
-======
-
-Loom's object store (MinIO by default; pluggable via `--storage external`)
-accumulates trajectories and artifacts indefinitely without a retention
-policy. We need server-side lifecycle rules — set them once at deploy
-time and the storage backend expires objects in the background, with no
-ongoing application load.
-
-The shape is layered:
-
-  ┌────────────────────────────────────────┐
-  │  storage-lifecycle.toml                │  ← single source of truth
-  └─────────────────┬──────────────────────┘
-                    │
-                    ▼
-  ┌────────────────────────────────────────┐
-  │  RetentionRule (typed dataclass below) │  ← provider-neutral
-  └─────────────────┬──────────────────────┘
-                    │
-         ┌──────────┴──────────┐
-         ▼                     ▼
-  ┌──────────────┐    ┌──────────────────┐
-  │ S3-compat    │    │ GCS / Azure      │
-  │ renderer     │    │ renderer (later) │
-  │ → lifecycle  │    │ → native rules   │
-  │   dict       │    └──────────────────┘
-  └──────────────┘
-
-S3-compatible (MinIO / AWS S3 / Cloudflare R2 / Backblaze B2 / Wasabi)
-share one renderer because they share the lifecycle schema. GCS and
-Azure get separate renderers when those backends are added.
-
-The renderer emits the dict shape that boto3
-``put_bucket_lifecycle_configuration`` accepts (NOT raw XML — boto3
-handles serialization).
-
-Strategies shipped
-==================
-
-``expire_after_days``
-    Delete objects N days after creation.
-
-``keep_forever``
-    Sentinel — emits no lifecycle rule. Documents intent explicitly so
-    a future PR that mass-adds expiry doesn't accidentally apply it to
-    long-term buckets like ATIF.
-
-``cleanup_incomplete_uploads_after_hours``
-    Aborts stuck multipart uploads. Doesn't touch completed objects.
-    Matches the behavior previously documented in
-    ``docs/architecture/cluster-deploy.md``.
-
-Not shipped (build only when concretely needed)
------------------------------------------------
-
-``preserve_tag`` (tag-based escape hatch)
-    S3 lifecycle cannot natively express "object does NOT have tag X".
-    A correct implementation either inverts semantics (tag everything
-    expire-able and use a positive tag filter — burdensome for the
-    application) or runs a sweeper that joins against application
-    state. We defer until Run Library has an explicit "pin" concept.
-
-``tier_transition_after_days``
-    AWS S3 only — MinIO has one storage tier.
-
-``keep_latest_n_versions``
-    Requires bucket versioning, which Loom doesn't use.
-
-``per_prefix_expiry``
-    If an operator needs different retention per prefix within one
-    bucket, they should split the prefixes into separate buckets. The
-    config is simpler and the lifecycle XML is simpler.
+Expiration rules render to boto3 lifecycle configuration. ``keep_forever``
+emits no rule; multipart-cleanup settings are retained for config compatibility
+but currently emit no action. Non-S3 lifecycle backends are unsupported.
 """
 
 from __future__ import annotations
@@ -98,29 +28,25 @@ S3_COMPATIBLE_BACKENDS: frozenset[str] = frozenset({
     "wasabi",
 })
 
-# GCS speaks its own lifecycle JSON dialect — see render_gcs_lifecycle
-# below. Listed separately so the validator surfaces "supported, but
-# uses a different renderer" vs "outright unknown backend."
-GCS_BACKENDS: frozenset[str] = frozenset({"gcs"})
-
-SUPPORTED_BACKENDS: frozenset[str] = S3_COMPATIBLE_BACKENDS | GCS_BACKENDS
-
-
 @dataclass(frozen=True)
 class RetentionRule:
-    """One bucket's retention policy. Provider-neutral.
-
-    The same rule renders into MinIO lifecycle XML, AWS S3 lifecycle XML,
-    or (when those renderers ship) GCS / Azure equivalents.
-    """
+    """One bucket's retention policy."""
 
     bucket: str
     strategy: Strategy
     days: int | None = None
     hours: int | None = None
-    rule_id: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.bucket, str) or not self.bucket.strip():
+            raise ValueError("retention bucket must be a non-empty string")
+        if self.strategy not in (
+            "expire_after_days", "keep_forever", "cleanup_incomplete_uploads_after_hours",
+        ):
+            raise ValueError(f"unsupported retention strategy: {self.strategy!r}")
+        for name, duration in (("days", self.days), ("hours", self.hours)):
+            if duration is not None and type(duration) is not int:
+                raise ValueError(f"{name} must be an integer")
         if self.strategy == "expire_after_days":
             if self.days is None or self.days < 1:
                 raise ValueError(
@@ -158,12 +84,11 @@ class RetentionConfig:
     rules: tuple[RetentionRule, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        if self.backend not in SUPPORTED_BACKENDS:
+        if self.backend not in S3_COMPATIBLE_BACKENDS:
             raise ValueError(
                 f"backend={self.backend!r} is not supported by the "
                 f"current renderers; supported: "
-                f"{sorted(SUPPORTED_BACKENDS)}. (Azure Blob renderer "
-                f"is the next family on the roadmap.)",
+                f"{sorted(S3_COMPATIBLE_BACKENDS)}.",
             )
         # Multiple rules per bucket are valid (e.g. one for object
         # expiry + one for multipart cleanup), but two of the SAME
@@ -176,6 +101,9 @@ class RetentionConfig:
                     f"duplicate strategy={r.strategy!r} for "
                     f"bucket={r.bucket!r}; one strategy per bucket",
                 )
+            opposite = "keep_forever" if r.strategy == "expire_after_days" else "expire_after_days"
+            if r.strategy in ("keep_forever", "expire_after_days") and (r.bucket, opposite) in seen:
+                raise ValueError(f"conflicting keep_forever and expiration rules for bucket={r.bucket!r}")
             seen.add(key)
 
 
@@ -199,11 +127,8 @@ def render_bucket_lifecycle(
     accepted by both backends and is also what `mc ilm rule add`
     emits when you stack multiple ILM actions.
 
-    `keep_forever` rules contribute nothing (no S3 action) but do not
-    suppress merging — a bucket configured `keep_forever` with a
-    sibling multipart-cleanup rule renders just the cleanup action,
-    which is the right behavior (preserve forever but don't accumulate
-    stuck uploads).
+    ``keep_forever`` and multipart-cleanup rules contribute no S3 action.
+    Only expiration is currently rendered.
     """
     matching = [r for r in config.rules if r.bucket == bucket]
     if not matching:
@@ -271,94 +196,3 @@ def apply_lifecycle_to_s3(
         )
         applied[bucket] = rendered
     return applied
-
-
-# ──────────────────────────────────────────────────────────────────────
-# GCS renderer
-# ──────────────────────────────────────────────────────────────────────
-
-# GCS speaks its own lifecycle JSON dialect, not S3-compatible XML. Two
-# important differences from the S3 path:
-#
-#   - GCS supports MULTI-RULE policies natively (one action per rule).
-#     We don't need MinIO's single-merged-rule workaround.
-#   - GCS condition fields use `age` (days since object creation) rather
-#     than `Days`. Other names also differ (storageClass, numNewerVersions,
-#     etc.) but we don't use those today.
-#
-# This renderer produces the dict shape that the GCS REST API's
-# `lifecycle` field on a bucket-patch accepts. The SDK integration
-# (google-cloud-storage) is intentionally NOT taken on in this PR —
-# adding the dep is a separate scope. Operators with a GCS deployment
-# today can capture the rendered JSON via `--dry-run` and apply it via
-# `gsutil lifecycle set` or `gcloud storage buckets update --lifecycle-file`.
-
-
-def render_gcs_lifecycle(
-    config: RetentionConfig,
-    *,
-    bucket: str,
-) -> dict[str, Any]:
-    """Render the bucket's retention rules as GCS lifecycle JSON.
-
-    Returns a ``{"rule": [...]}`` dict matching the GCS bucket
-    resource's ``lifecycle`` field. Empty list when no rules apply.
-
-    Unlike the S3 path, GCS accepts multi-rule policies natively — we
-    emit one rule per RetentionRule (no merging required).
-    """
-    if config.backend not in GCS_BACKENDS:
-        raise ValueError(
-            f"render_gcs_lifecycle called with backend={config.backend!r}; "
-            f"GCS renderer only handles {sorted(GCS_BACKENDS)}",
-        )
-
-    rules: list[dict[str, Any]] = []
-    for rule in config.rules:
-        if rule.bucket != bucket:
-            continue
-        if rule.strategy == "expire_after_days":
-            assert rule.days is not None
-            rules.append({
-                "action": {"type": "Delete"},
-                "condition": {"age": rule.days},
-            })
-        elif rule.strategy == "cleanup_incomplete_uploads_after_hours":
-            assert rule.hours is not None
-            # GCS expresses multipart cleanup in days. Round up.
-            days = max(1, (rule.hours + 23) // 24)
-            rules.append({
-                "action": {"type": "AbortIncompleteMultipartUpload"},
-                "condition": {"age": days},
-            })
-        # keep_forever: contributes nothing; absence of a Delete action
-        # means objects never auto-expire.
-
-    return {"rule": rules}
-
-
-def apply_lifecycle_to_gcs(
-    gcs_client: Any,
-    config: RetentionConfig,
-    *,
-    buckets: tuple[str, ...] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Apply rendered GCS lifecycle to each bucket via google-cloud-storage.
-
-    Mirror of ``apply_lifecycle_to_s3``. The SDK integration is left as a
-    follow-up; today this function raises ``NotImplementedError`` with a
-    clear pointer at the operator workaround (use ``--dry-run`` and
-    ``gsutil lifecycle set``).
-
-    The signature is shipped now so that callers (bootstrap-storage-
-    lifecycle) can dispatch on backend without conditional imports.
-    """
-    raise NotImplementedError(
-        "GCS lifecycle apply requires google-cloud-storage integration "
-        "(deferred until the first GCS deployment lands). For now, run "
-        "`loom cluster bootstrap-storage-lifecycle --dry-run` to capture "
-        "the rendered JSON, then apply via:\n"
-        "  gcloud storage buckets update gs://<bucket> "
-        "--lifecycle-file=<file>.json\n"
-        "or `gsutil lifecycle set <file>.json gs://<bucket>`.",
-    )
