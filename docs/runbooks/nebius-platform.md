@@ -167,10 +167,48 @@ restricted Pod Security labels remain unchanged. See the
 [egress contract](../architecture/sandbox-isolation.md#declared-hosted-task-web-egress)
 for destination enforcement and required installed acceptance.
 
-The renderer also rejects `supports_task_identity: true` under its current
-restricted execution namespace policy. Publishing a readiness flag does not
-qualify a root-admission path or change Pod Security policy. Keep identity
-readiness disabled until that separate policy and admission evidence exist.
+### Private task identity policy
+
+The default execution namespace enforces restricted Pod Security. An independent,
+single-target deployment may explicitly configure:
+
+```json
+{
+  "task_identity_policy": {
+    "mode": "private-root-v1",
+    "target_id": "<exact configured target_id>",
+    "execution_namespace": "<exact configured execution_namespace>"
+  }
+}
+```
+
+This renders baseline Pod Security pinned to v1.33, restricted audit/warn labels,
+and a namespace-bound, fail-closed `ValidatingAdmissionPolicy`. The policy
+preserves non-root controllers, no privilege escalation, RuntimeDefault seccomp,
+restricted volumes and capability dropping. Only the native private task/verifier
+init sidecars may use UID 0 and the six installation capabilities. Their commands,
+private socket/binary mounts and target annotation are checked. Host resources,
+shared PID, device claims, added controller capabilities and credential mounts
+into private sidecars are rejected. Pod updates and ephemeral-container updates
+are subject to the same policy. Managed and regional targets remain unsupported
+for this policy mode.
+
+Deployment first retains restricted PSS while it installs the exact policy and
+binding, checks observed generation and CEL type-checking, and performs positive
+and negative server-side admission probes. The negative probe must be rejected
+by this specific policy. Only then may the deployment apply the namespace mode.
+Probe Pods are dry runs: they create no workloads or image pulls. Failure leaves
+restricted PSS and the deployment guard in place.
+
+Prepare this policy with identity readiness disabled. Qualify the installed
+Kubernetes version, the intended root and non-root container shapes, actual
+package installation and independent verifier handoff, concurrent isolation,
+cancellation and cleanup before enabling `supports_task_identity`. Disposable
+Kubernetes admission and local Docker installation evidence do not qualify a
+live Nebius target. For rollback, disable identity readiness, drain active work
+through the rollout guard, and remove this configuration in a fresh render to
+restore restricted PSS. The stronger namespace policy may retain the old VAP
+until separately reviewed removal; never remove it while baseline PSS remains.
 
 The example execution price records the September 8, 2026 cpu-e2 eu-north1
 [official rates](https://docs.nebius.com/compute/resources/pricing): 12,000 micro-USD/vCPU-hour,

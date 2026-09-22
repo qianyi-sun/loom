@@ -23,6 +23,11 @@ from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     TaskExecutionResourceRequestsV1,
 )
+from loom.nebius_task_identity_policy import (
+    identity_namespace_labels,
+    identity_policy_documents,
+    validate_identity_policy,
+)
 
 # Scheduling baseline for future automatic Nebius Terminus tasks, not task limits.
 DEFAULT_TASK_RESOURCE_REQUESTS = {
@@ -98,10 +103,15 @@ def validate_environment(config: dict[str, Any]) -> None:
             "task_resource_requests",
             "default_task_resource_requests",
             "task_egress",
+            "task_identity_policy",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
+    try:
+        validate_identity_policy(config)
+    except ValueError as exc:
+        raise NebiusPlatformError(str(exc)) from exc
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
     if "task_egress" in config:
@@ -1342,7 +1352,7 @@ def _build_platform(
         raise NebiusPlatformError(
             "task egress configuration and runtime profile readiness must agree"
         )
-    if profile.get("supports_task_identity", False):
+    if profile.get("supports_task_identity", False) and not validate_identity_policy(config):
         raise NebiusPlatformError(
             "task identity readiness requires a qualified policy; execution namespaces remain restricted"
         )
@@ -1379,6 +1389,9 @@ def _build_platform(
     short = revision.removeprefix("sha256:")[:12]
     files: dict[str, list[dict[str, Any]]] = {}
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
+    if validate_identity_policy(config):
+        files["00-namespaces.yaml"][1]["metadata"]["labels"].update(identity_namespace_labels())
+        files["00-task-identity-policy.yaml"] = identity_policy_documents(ex, config["target_id"])
     db_host = f"loom-postgres.{ns}.svc"
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     target = {

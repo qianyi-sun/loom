@@ -41,7 +41,11 @@ private PID namespaces. This supports package installation and cleanup of
 task descendants that drop UID, without host/device/kernel privileges.
 Admission cannot infer arbitrary named users from image passwd metadata.
 An older runtime profile defaults to rejecting this extension; enabling it
-requires a compatible runtime and namespace security policy. The
+requires a compatible runtime and the explicitly target-bound
+[`private-root-v1` admission policy](../runbooks/nebius-platform.md#private-task-identity-policy).
+The default namespace remains restricted. Policy installation proves enforcement
+before any namespace exception, and readiness remains a separate qualification.
+The
 [Terminus runbook](../runbooks/nebius-terminus2.md) documents declaration and
 state-transfer limits. Local installation evidence does not establish live
 activation or original-task acceptance.

@@ -68,10 +68,11 @@ For the equivalent local preparation path, `nebius_candidate.py create` and
 `--supports-task-identity`. Without them, the corresponding fields remain
 omitted from the canonical profile. Web egress still requires the matching
 [deployment policy](nebius-platform.md); the renderer rejects missing or
-unmatched configuration. Current restricted execution namespaces cannot admit
-the root task-identity extension, so the renderer rejects identity readiness
-until a separate qualified admission path is implemented. Do not enable that
-variable based only on successful image publication.
+unmatched configuration. Identity readiness requires the explicit
+[`task_identity_policy` deployment contract](nebius-platform.md#private-task-identity-policy).
+Keep the variable disabled until the selected target passes installed
+admission and execution qualification; successful image publication alone
+does not establish that evidence.
 
 BuildKit is pinned to `v0.33.0` and its manifest digest in the workflow.
 Skopeo is pinned to Ubuntu package `1.13.3+ds1-2ubuntu0.24.04.3`; the explicit
