@@ -82,7 +82,10 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         report.add("package_defect", "invalid_toml", str(exc), "Repair task.toml and rerun validation.")
         return
     report.original_requirements = {
-        key: raw[key] for key in ("environment", "agent", "verifier", "steps", "required_agent_capabilities")
+        key: raw[key] for key in (
+            "environment", "agent", "verifier", "steps", "required_agent_capabilities",
+            "artifacts", "multi_step", "service_execution",
+        )
         if key in raw
     }
     if execution_profile == NEBIUS_TERMINUS_PROFILE:
@@ -107,6 +110,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
             report.status = "schema_valid"
         return
     _dropped_environment_requirements(raw, normalized, report)
+    _dropped_runtime_requirements(raw, normalized, report)
     try:
         with tempfile.TemporaryDirectory(prefix="loom-compatibility-") as stage_root:
             staged = Path(stage_root) / "bundle"
@@ -279,3 +283,39 @@ def _record_changes(
             report.add("unsupported_conversion", "artifact_requirements_changed",
                        "Profile removes declared artifact paths or patterns.",
                        "Preserve artifact requirements through an explicit supported collection contract.")
+
+
+def _dropped_runtime_requirements(
+    raw: dict[str, Any], normalized: dict[str, Any], report: TaskCompatibilityReport,
+) -> None:
+    for section in ("agent", "verifier"):
+        mapped = _section(normalized, section)
+        for key in _section(raw, section):
+            if key in mapped or (section == "verifier" and key == "environment_mode"):
+                continue
+            report.add("unsupported_conversion", f"unmapped_{section}_requirement",
+                       f"Harbor normalization discards {section}.{key}.",
+                       "Map this declaration explicitly while preserving the original requirement.",
+                       source=f"{report.source_location}#{section}.{key}")
+    if raw.get("required_agent_capabilities") and raw.get("required_agent_capabilities") != normalized.get("required_agent_capabilities"):
+        report.add("runtime_capability", "agent_capabilities_unsupported",
+                   "Harbor normalization discards the declared required agent capabilities.",
+                   "Preserve and qualify the required execution capabilities through #2051.",
+                   source=f"{report.source_location}#required_agent_capabilities")
+    artifacts = raw.get("artifacts")
+    if isinstance(artifacts, list):
+        mapped_artifacts = [
+            artifact for step in normalized.get("steps", [])
+            for artifact in step.get("artifacts", [])
+        ]
+        if any(artifact not in mapped_artifacts for artifact in artifacts):
+            report.add("unsupported_conversion", "unmapped_artifact_requirement",
+                       "Harbor normalization discards declared artifact paths.",
+                       "Provide a supported artifact collection contract without dropping required outputs.",
+                       source=f"{report.source_location}#artifacts")
+    for key in ("steps", "multi_step", "service_execution"):
+        if key in raw and raw[key] != normalized.get(key):
+            report.add("unsupported_conversion", "unmapped_runtime_requirement",
+                       f"Harbor normalization changes the declared {key} contract.",
+                       "Preserve the original execution contract in a reviewed task conversion.",
+                       source=f"{report.source_location}#{key}")
