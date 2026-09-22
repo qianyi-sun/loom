@@ -293,10 +293,10 @@ establish registry availability, and makes no changes to the source tree.
 
 For custom trajectory-generation archives, publication belongs in a team-owned
 TaskSet with `intents=["trajectory_generation"]`; `publish-local` is the catalog
-benchmark path. Validation itself publishes nothing. The original 60 inputs
-in [#2046](https://github.com/qianyi-sun/loom/issues/2046) still need their
-original archives for a complete matrix and real trajectory-generation
-acceptance; fixture checks do not establish that evidence.
+benchmark path. Validation itself publishes nothing. Full acceptance of the
+60 inputs in [#2046](https://github.com/qianyi-sun/loom/issues/2046) requires a
+report against the original archives and real trajectory-generation delivery;
+fixture checks alone do not establish that evidence.
 
 That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
 `cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets

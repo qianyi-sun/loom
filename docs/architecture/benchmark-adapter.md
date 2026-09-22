@@ -599,6 +599,23 @@ copy into `config/benchmarks.toml`. With `source_subdir = "tasks"`, the
 DB task id stays `team-evals/alpha` while the materializer source points
 at `fixture://team-evals/tasks/alpha`.
 
+Harbor inputs with `[metadata]` may omit task identity. Local validation and
+publication supply the catalog ID derived from the selected collection and
+relative task path; TaskSet bundle uploads use the path relative to the selected
+archive root (or the TaskSet slug for a single task at that root). An authored
+task ID remains intact during normalization. Catalog registration binds the
+normalized execution identity to the original `task.toml` bytes; it does not
+rewrite the source file. Missing Harbor image declarations use
+`environment/Dockerfile`, build context `environment`, and workdir `/app`.
+
+Normalization preserves declared CPUs and converts legacy `memory`/`storage`
+quantities such as `2G` into `memory_mb`/`storage_mb` using binary units (`2G`
+is 2048 MiB). `M`, `G`, `T` and their `MB`/`MiB` spellings are accepted when
+they resolve to positive whole MiB. Conflicting legacy and `_mb` declarations
+are rejected. Timeouts, build budgets and explicit resource requests are not
+replaced with profile defaults. Unsupported `agent.continue_until_timeout`
+remains an explicit intake blocker; dropping it would change agent behavior.
+
 For a complete static intake matrix, add `--compatibility-report --json`.
 The report records every discovered task, including malformed TOML, with a
 stable task ID, source location, reason and suggested action. It returns exit

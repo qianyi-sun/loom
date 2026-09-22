@@ -10,10 +10,10 @@ and verifier/runtime use.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from decimal import Decimal
 from pathlib import PurePosixPath
-import re
 from typing import Any
 
 DEFAULT_AGENT_TIMEOUT_SEC = 360.0

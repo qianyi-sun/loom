@@ -16,10 +16,10 @@ class ObjectStore:
     def __init__(self, archive):
         self.objects = {"tasksets/user/team/slice/bundle.tar.gz": archive}
 
-    def get_object(self, *, Bucket, Key):
+    def get_object(self, *, Bucket, Key):  # noqa: N803 - boto3 protocol
         return {"Body": io.BytesIO(self.objects[Key])}
 
-    def put_object(self, *, Bucket, Key, Body, ContentType):
+    def put_object(self, *, Bucket, Key, Body, ContentType):  # noqa: N803 - boto3 protocol
         self.objects[Key] = Body
 
 

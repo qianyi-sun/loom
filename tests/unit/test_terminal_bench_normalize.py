@@ -390,7 +390,7 @@ def test_context_identity_does_not_replace_an_authored_identity() -> None:
     {"memory": "plenty"}, {"memory": "0G"}, {"storage": "-1G"},
 ])
 def test_ambiguous_or_conflicting_harbor_resources_are_rejected(environment) -> None:
-    with pytest.raises(ValueError, match="memory|storage"):
+    with pytest.raises(ValueError, match=r"memory|storage"):
         normalize_terminal_bench_task_toml(_tb_raw(**environment))
 
 
