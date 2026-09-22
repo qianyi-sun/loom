@@ -95,7 +95,7 @@ func TestTaskEgressRealHTTPAndTLSAndRedirectDenial(t *testing.T) {
 				t.Fatal(err)
 			}
 			broker := &workloadBroker{podTokenFile: tokenFile, root: root, identity: workloadIdentity{LeaseID: "lease-one", Generation: 1, ExecutionRole: "attempt"}, client: gateway.Client()}
-			broker.setPhaseDeadline(time.Now().Add(time.Minute))
+			broker.setPhase("agent", time.Now().Add(time.Minute))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			proxy, stop, err := broker.startTaskEgress(ctx, &webAllowlist{Kind: "web-allowlist", Destinations: []webDestination{{Host: "packages.example.org", Protocol: protocol}}}, "sha256:bound", io.Discard)
@@ -147,20 +147,20 @@ func TestTaskEgressRealHTTPAndTLSAndRedirectDenial(t *testing.T) {
 				close(finished)
 			}()
 			<-started
-			broker.setPhaseDeadline(time.Time{})
+			broker.setPhase("agent", time.Time{})
 			select {
 			case <-finished:
 			case <-time.After(time.Second):
 				t.Fatal("phase completion did not cancel tunnel")
 			}
-			broker.setPhaseDeadline(time.Now().Add(time.Minute))
+			broker.setPhase("verifier", time.Now().Add(time.Minute))
 			response, err = client.Get(protocol + "://packages.example.org/package")
 			if err != nil {
 				t.Fatal(err)
 			}
 			response.Body.Close()
 			if response.StatusCode != 200 {
-				t.Fatal("new phase cannot use proxy")
+				t.Fatal("verifier phase cannot use proxy")
 			}
 			cancel()
 			response, err = client.Get(protocol + "://packages.example.org/package")

@@ -63,7 +63,7 @@ func main() {
 	}
 	executionContext, stopMonitor := monitorPrivateSandboxes(ctx, p)
 	defer stopMonitor()
-	broker.setPhaseDeadline(time.Time{})
+	broker.setPhase("", time.Time{})
 	proxyURL, stopProxy, err := broker.startProxy(ctx, executionContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start workload proxy:", err)
@@ -104,7 +104,7 @@ func main() {
 		filepath.Clean(*workspace),
 		cleanOutput,
 		trustedEnvironment,
-		broker.setPhaseDeadline,
+		broker.setPhase,
 	)
 	stopTaskEgress()
 	stopMonitor()

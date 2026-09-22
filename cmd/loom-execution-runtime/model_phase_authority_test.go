@@ -46,7 +46,7 @@ func TestSetupAndVerifierCannotReopenModelAuthority(t *testing.T) {
 			evidence, err := runPhase(context.Background(), phase{
 				Role: role, Argv: []string{os.Args[0], "-test.run=^TestModelAuthorityPhaseHelper$"}, WorkingDirectory: workspace, TimeoutSeconds: 3,
 				Environment: map[string]string{"LOOM_MODEL_AUTHORITY_TEST_PROXY": proxy, "LOOM_MODEL_AUTHORITY_EXPECT_STATUS": expected},
-			}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil, broker.setPhaseDeadline)
+			}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil, broker.setPhase)
 			if err != nil || evidence.ExitCode != 0 {
 				t.Fatalf("phase %s exposed model authority or lost ledger: %v %+v", role, err, evidence)
 			}
@@ -125,8 +125,8 @@ func TestAgentPhaseCompletionCancelsRetainedModelRequest(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer stop()
-			boundary := func(deadline time.Time) {
-				broker.setPhaseDeadline(deadline)
+			boundary := func(role string, deadline time.Time) {
+				broker.setPhase(role, deadline)
 				if deadline.IsZero() {
 					return
 				}

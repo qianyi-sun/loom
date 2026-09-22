@@ -80,8 +80,12 @@ require `honor-http-proxy` or a task-side HTTPS key download.
 The task, controller and verifier share a Pod network namespace. Its existing
 DNS-and-Gateway NetworkPolicy stays intact: public access belongs to Gateway's
 separate network scope. Removing proxy settings cannot grant direct access.
-The model-call proxy and its attribution remain separate. HTTPS stays encrypted
-end to end; CONNECT checks the destination, not encrypted HTTP headers/content.
+The model-call proxy and its attribution remain separate. Only the agent phase
+can use model authority; phase completion cancels pending token and model
+requests. Setup and verifier phases cannot reopen model access. Declared web
+egress remains available during verifier execution, and the call ledger remains
+available for final accounting. HTTPS stays encrypted end to end; CONNECT checks
+the destination, not encrypted HTTP headers/content.
 
 Tunnels have bounded frames, transfer sizes, concurrency, idle time and lifetime.
 They stop at phase cancellation, periodically recheck lease fences, and join

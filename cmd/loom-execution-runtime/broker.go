@@ -37,10 +37,12 @@ type workloadBroker struct {
 	identity      workloadIdentity
 	client        *http.Client
 	mu            sync.Mutex
+	tokenMu       sync.Mutex
 	token         string
 	expires       time.Time
 	phaseDeadline time.Time
 	phaseBound    bool
+	phaseRole     string
 }
 
 type tokenRequest struct {
@@ -199,7 +201,7 @@ func (b *workloadBroker) doJSON(ctx context.Context, method, endpoint string, re
 }
 
 // Only the trusted runner supplies phase boundaries. Client headers cannot extend them.
-func (b *workloadBroker) setPhaseDeadline(deadline time.Time) {
+func (b *workloadBroker) setPhase(role string, deadline time.Time) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.phaseCancel != nil {
@@ -208,27 +210,44 @@ func (b *workloadBroker) setPhaseDeadline(deadline time.Time) {
 	b.phaseContext, b.phaseCancel = context.WithDeadline(context.Background(), deadline)
 	b.phaseDeadline = deadline
 	b.phaseBound = true
+	b.phaseRole = role
 	b.token = ""
 	b.expires = time.Time{}
 }
 
 func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
+	// Serialize refreshes without blocking phase changes on Gateway IO.
+	b.tokenMu.Lock()
+	defer b.tokenMu.Unlock()
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return "", err
+	}
 	if b.phaseBound && !b.phaseDeadline.After(time.Now()) {
+		b.mu.Unlock()
 		return "", context.DeadlineExceeded
 	}
-	if b.token != "" && time.Until(b.expires) > 60*time.Second {
-		return b.token, nil
+	if b.phaseBound && b.phaseRole != "agent" {
+		b.mu.Unlock()
+		return "", fmt.Errorf("model authority requires an agent phase")
 	}
+	if b.token != "" && time.Until(b.expires) > 60*time.Second {
+		token := b.token
+		b.mu.Unlock()
+		return token, nil
+	}
+	phaseContext := b.phaseContext
 	var deadline *time.Time
 	if !b.phaseDeadline.IsZero() {
 		if !b.phaseDeadline.After(time.Now()) {
+			b.mu.Unlock()
 			return "", context.DeadlineExceeded
 		}
 		value := b.phaseDeadline
 		deadline = &value
 	}
+	b.mu.Unlock()
 	var response tokenResponse
 	if err := retryOperation(ctx, func() error {
 		return b.doJSON(ctx, http.MethodPost, b.endpoint("/token"), tokenRequest{
@@ -241,6 +260,14 @@ func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	}
 	if response.SchemaVersion != "loom.service-execution-token.v1" || response.Token == "" || !response.ExpiresAt.After(time.Now()) {
 		return "", fmt.Errorf("broker returned invalid step token")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if phaseContext != b.phaseContext {
+		return "", context.Canceled
 	}
 	b.token, b.expires = response.Token, response.ExpiresAt
 	return b.token, nil
@@ -276,22 +303,29 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 				http.Error(writer, "execution is no longer running", http.StatusServiceUnavailable)
 				return
 			}
-			requestContext, cancelRequest := context.WithCancel(request.Context())
-			stopCancellation := context.AfterFunc(modelContext, cancelRequest)
-			defer stopCancellation()
-			defer cancelRequest()
 			b.mu.Lock()
-			phaseDeadline, phaseBound := b.phaseDeadline, b.phaseBound
+			phaseDeadline, phaseBound, phaseRole, phaseContext := b.phaseDeadline, b.phaseBound, b.phaseRole, b.phaseContext
 			b.mu.Unlock()
+			requestParent := request.Context()
 			if phaseBound {
 				if !phaseDeadline.After(time.Now()) {
 					http.Error(writer, "execution phase deadline reached", http.StatusGatewayTimeout)
 					return
 				}
-				bounded, cancel := context.WithDeadline(requestContext, phaseDeadline)
-				defer cancel()
-				requestContext = bounded
+				if phaseRole != "agent" {
+					http.Error(writer, "model authority requires an agent phase", http.StatusForbidden)
+					return
+				}
+				// Direct ancestry makes phase revocation synchronous, including
+				// requests racing a transition to verifier or finalization.
+				requestParent = phaseContext
 			}
+			requestContext, cancelRequest := context.WithCancel(requestParent)
+			defer cancelRequest()
+			stopClientCancellation := context.AfterFunc(request.Context(), cancelRequest)
+			defer stopClientCancellation()
+			stopCancellation := context.AfterFunc(modelContext, cancelRequest)
+			defer stopCancellation()
 			token, tokenErr := b.currentToken(requestContext)
 			if tokenErr != nil {
 				http.Error(writer, "workload token unavailable", http.StatusServiceUnavailable)
