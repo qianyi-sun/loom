@@ -17,9 +17,6 @@ EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
     ".github/workflows/release-promotion-gate.yml": (
         "release-promotion-gate-${{ inputs.candidate_sha }}"
     ),
-    ".github/workflows/trusted-image-release-controller.yml": (
-        "trusted-image-release-controller-dev"
-    ),
 }
 
 
@@ -43,7 +40,7 @@ def test_mutating_workflows_are_serialized_without_cancellation(
     }
 
 
-def test_trusted_image_publication_is_outside_pr_cancellation_scope() -> None:
+def test_manual_image_validation_is_outside_pr_cancellation_scope() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     cancellation = " ".join(
         str(workflow["concurrency"]["cancel-in-progress"]).split()

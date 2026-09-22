@@ -21,14 +21,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.component_ownership import load_manifest  # noqa: E402
+from scripts.component_ownership import NEBIUS_PLATFORM_IMAGES  # noqa: E402
 
-COMPONENT_MANIFEST = REPO_ROOT / "config/component-ownership.toml"
-REQUIRED_IMAGE_DIGESTS = tuple(
-    component.release_digest
-    for component in load_manifest(COMPONENT_MANIFEST).components
-    if component.kind == "release-image" and component.release_digest is not None
-)
+REQUIRED_IMAGE_DIGESTS = tuple(NEBIUS_PLATFORM_IMAGES.values())
 
 REQUIRED_CHECKS: dict[str, tuple[str, ...]] = {
     "repository_ci": ("url",),
@@ -180,24 +175,6 @@ def _string_value(value: Any, path: str, errors: list[str]) -> str | None:
         return str(value)
     errors.append(f"{path} must be a non-empty string")
     return None
-
-
-def _bool_value(value: Any, path: str, errors: list[str], *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    errors.append(f"{path} must be a boolean")
-    return default
-
-
-def _int_value(value: Any, path: str, errors: list[str], *, default: int = 0) -> int:
-    if value is None:
-        return default
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    errors.append(f"{path} must be an integer")
-    return default
 
 
 def _validate_top_level(
@@ -392,8 +369,14 @@ def _validate_execution_capacity_smoke(check: dict[str, Any]) -> list[str]:
         errors.append(f"{prefix}.execution_records must contain native execution evidence")
         return errors
     required_fields = (
-        "trial_id", "attempt_id", "target_id", "project_id", "cluster_id",
-        "namespace", "job_uid", "node_name",
+        "trial_id",
+        "attempt_id",
+        "target_id",
+        "project_id",
+        "cluster_id",
+        "namespace",
+        "job_uid",
+        "node_name",
     )
     seen: set[tuple[str, str]] = set()
     for index, record in enumerate(records):
@@ -526,14 +509,6 @@ def _validate_prod_staging_isolation(
             errors.extend(
                 _validate_prod_staging_workers(prod_worker, staging_worker, manifest=manifest)
             )
-
-    staging_capacity = _as_dict(
-        check.get("staging_capacity"),
-        "prod_staging_isolation.staging_capacity",
-        errors,
-    )
-    if staging_capacity is not None:
-        errors.extend(_validate_staging_capacity(staging_capacity))
 
     return errors
 
@@ -719,88 +694,32 @@ def _validate_prod_staging_workers(
     elif not isinstance(source_commit, str) or not SHA_RE.fullmatch(source_commit):
         errors.append("prod_staging_isolation.workers.production.source_commit must be a git SHA")
 
-    image_tag = manifest.get("image_tag")
-    worker_digest = None
+    # The schema retains "workers" for execution identity evidence. Nebius
+    # executes through execution-runtime, not the retired shared worker image.
     image_digests = manifest.get("image_digests")
-    if isinstance(image_digests, dict):
-        worker_digest = image_digests.get("loom-worker")
-    image = prod_worker.get("image")
-    image_digest = prod_worker.get("image_digest")
-    if worker_digest is not None and image_digest != worker_digest:
+    runtime_digest = (
+        image_digests.get(NEBIUS_PLATFORM_IMAGES["execution_runtime"])
+        if isinstance(image_digests, dict)
+        else None
+    )
+    if not isinstance(runtime_digest, str) or not re.fullmatch(
+        r"[^@\s]+@sha256:[0-9a-f]{64}",
+        runtime_digest,
+    ):
         errors.append(
-            "prod_staging_isolation.workers.production.image_digest must match "
-            "image_digests.loom-worker",
+            "image_digests.loom-execution-runtime must be an immutable image reference",
         )
-    if isinstance(image, str) and isinstance(image_tag, str) and image_tag not in image:
-        errors.append(
-            "prod_staging_isolation.workers.production.image must reference image_tag",
-        )
-    if isinstance(image, str) and re.search(r"(staging|:dev\b|/dev\b)", image, re.IGNORECASE):
-        errors.append(
-            "prod_staging_isolation.workers.production.image must not be a dev/staging image"
-        )
+    for field in ("image", "image_digest"):
+        if prod_worker.get(field) != runtime_digest or runtime_digest is None:
+            errors.append(
+                f"prod_staging_isolation.workers.production.{field} must match "
+                "image_digests.loom-execution-runtime",
+            )
     if prod_worker.get("k8s_namespace") != "loom-prod":
         errors.append("prod_staging_isolation.workers.production.k8s_namespace must be 'loom-prod'")
     if staging_worker.get("k8s_namespace") == "loom-prod":
         errors.append("prod_staging_isolation.workers.staging.k8s_namespace must not be loom-prod")
     return errors
-
-
-def _validate_staging_capacity(staging_capacity: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
-    lease_state = staging_capacity.get("lease_state")
-    lease = staging_capacity.get("lease")
-    if lease_state is None and isinstance(lease, dict):
-        lease_state = lease.get("state")
-    if lease_state is None:
-        lease_state = "none"
-    if not isinstance(lease_state, str) or not lease_state:
-        errors.append(
-            "prod_staging_isolation.staging_capacity.lease_state must be a non-empty string"
-        )
-        lease_state = "invalid"
-    lease_state_normalized = str(lease_state).lower()
-    staging_slots = _int_value(
-        staging_capacity.get("staging_slots")
-        if staging_capacity.get("staging_slots") is not None
-        else (
-            staging_capacity.get("summary", {}).get("staging_slots")
-            if isinstance(staging_capacity.get("summary"), dict)
-            else None
-        ),
-        "prod_staging_isolation.staging_capacity.staging_slots",
-        errors,
-        default=0,
-    )
-    new_claims_allowed = _bool_value(
-        staging_capacity.get("new_staging_claims_allowed"),
-        "prod_staging_isolation.staging_capacity.new_staging_claims_allowed",
-        errors,
-        default=False,
-    )
-    blocking_lease = (
-        lease_state_normalized in {"active", "leased", "draining"}
-        or staging_slots != 0
-        or new_claims_allowed
-    )
-    if blocking_lease and not _has_documented_staging_override(staging_capacity):
-        errors.append(
-            "prod_staging_isolation.staging_capacity requires staging_slots=0 and no active "
-            "staging lease unless override.approved includes reason and url",
-        )
-    return errors
-
-
-def _has_documented_staging_override(staging_capacity: dict[str, Any]) -> bool:
-    override = staging_capacity.get("override")
-    if not isinstance(override, dict):
-        return False
-    return (
-        override.get("approved") is True
-        and _is_non_empty_string(override.get("reason"))
-        and isinstance(override.get("url"), str)
-        and URL_RE.fullmatch(str(override["url"])) is not None
-    )
 
 
 def _validate_no_leaks(manifest: dict[str, Any]) -> list[str]:

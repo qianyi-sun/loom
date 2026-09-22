@@ -128,6 +128,15 @@ uv run --no-sync python scripts/ops/release_gate.py validate \
   --output-markdown release-evidence/release-gate-evidence.md
 ```
 
+Use the seven immutable image references from the exact `nebius-candidate`
+publication for `image_digests`. Production reuses these Nebius images after
+`dev` to `main` promotion; no GHCR rebuild occurs on `main`. Before production
+apply, [pin all seven digests with the release SemVer tag](nebius-deployment.md)
+so integration retention cannot delete a production-only release. The retained
+`workers` evidence identifies the native execution runtime and binds its digest
+and source commit to that candidate. Historical shared-pool lease/slot evidence
+is retired; deployment's native active-task guard owns mutation safety.
+
 The manifest currently requires these checks:
 
 - `repository_ci`, `image_build`, `cluster_render_audit`, and

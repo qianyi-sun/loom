@@ -131,7 +131,8 @@ def test_uv_binary_and_lock_are_exact_and_current() -> None:
 def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> None:
     setup_steps: list[tuple[Path, dict[str, Any]]] = []
 
-    for path, workflow in _workflows().items():
+    workflows = _workflows()
+    for path, workflow in workflows.items():
         for step in _workflow_steps(workflow):
             uses = str(step.get("uses", ""))
             assert not uses.startswith("actions/cache@"), path
@@ -162,7 +163,12 @@ def test_workflows_use_checksum_verified_uv_locked_sync_and_safe_caches() -> Non
         checksum = inputs.get("checksum")
         assert checksum in {UV_CHECKSUMS["linux-x86_64"], MATRIX_CHECKSUM_EXPRESSION}, path
         assert inputs.get("enable-cache") is True, path
-        assert inputs.get("save-cache") == SAFE_SAVE_EXPRESSION, path
+        triggers = workflows[path].get("on", workflows[path].get(True, {}))
+        untrusted_events = {"pull_request", "pull_request_target", "merge_group", "workflow_call"}
+        if untrusted_events.intersection(triggers):
+            assert inputs.get("save-cache") == SAFE_SAVE_EXPRESSION, path
+        else:
+            assert inputs.get("save-cache") is True, path
         assert inputs.get("cache-dependency-glob") == "uv.lock", path
 
 

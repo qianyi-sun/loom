@@ -352,15 +352,12 @@ build only the web image, Dockerfile-only changes build the matching component,
 and shared Python/runtime changes rebuild the affected Python images. Relevant
 pull requests, merge groups, and manual dispatches use the checked-in read-only
 build path, do not log in to GHCR, and do not use a publication cache. Manual
-dispatch is build-only. PR image validation builds AMD64 on GitHub-hosted native CPUs. Existing
-signed publication consumers retain their declared AMD64/ARM64 manifest
-contract until their consumers migrate. `nebius-candidate` is the sole automatic
-dev publisher and uses the seven-image Nebius AMD64 set. Historical publication
-jobs in `images` run automatically only on main pushes. The
-`trusted-image-release-controller` has no schedule; its manual dispatch supports
-protected-head personal-dev compatibility publication. These publication jobs
-request job-scoped `packages: write`; ordinary `images` manual dispatch remains
-build-only. The legacy manifest joiner verifies both AMD64 and ARM64 members.
+dispatch is build-only. Image validation builds the seven-image Nebius AMD64 set
+on GitHub-hosted native CPUs. `nebius-candidate` publishes immutable images from
+`dev`; the existing production gates promote that same candidate into `main`.
+There is no GHCR publisher, ARM64 manifest joiner, or personal-dev publication
+controller. `images` requests no publication credentials. See the
+[workflow inventory](ci.md#workflow-inventory) for the remaining entry points.
 Same-repository branch workflow code still runs on the read-only PR
 path; autonomous-agent hard isolation requires
 fork-only execution or an external trusted workflow/App.
