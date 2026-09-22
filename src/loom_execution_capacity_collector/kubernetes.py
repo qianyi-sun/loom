@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections.abc import Callable
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -91,7 +93,7 @@ def _container_request(container: Any) -> ResourceTotals:
 
 
 def _pod_request(pod: Any) -> ResourceTotals:
-    """Mirror scheduler accounting, including restartable init sidecars."""
+    """Conservative scheduler accounting, including native init sidecars."""
 
     regular = _add(*[_container_request(row) for row in list(pod.spec.containers or [])])
     restartable = ResourceTotals(cpu_millis=0, memory_mib=0, storage_mib=0)
@@ -103,7 +105,46 @@ def _pod_request(pod: Any) -> ResourceTotals:
         else:
             init_peaks.append(_add(restartable, request))
     effective = _maximum(_add(regular, restartable), *init_peaks)
+    pod_resources = getattr(pod.spec, "resources", None)
+    if pod_resources is not None:
+        requests = (pod_resources.get("requests", {}) if isinstance(pod_resources, dict)
+                    else getattr(pod_resources, "requests", None) or {})
+        # Admission validates Pod requests against container requests. Taking
+        # the maximum also stays conservative for unfamiliar API combinations.
+        effective = _maximum(effective, _resources(requests))
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
+
+
+def _decode_pool_pods(response: Any) -> Any:
+    """Preserve PodLevelResources omitted by the pinned Kubernetes SDK model."""
+    from kubernetes import client
+
+    try:
+        data = response.data
+        if not isinstance(data, bytes) or len(data) > 32 * 1024 * 1024:
+            raise ValueError("invalid Pod page")
+        document = json.loads(data)
+        if (not isinstance(document, dict) or document.get("kind") != "PodList"
+                or document.get("apiVersion") != "v1" or not isinstance(document.get("items"), list)):
+            raise ValueError("incomplete Pod page")
+        with client.ApiClient() as api:
+            result = api.deserialize(response, "V1PodList")
+        for raw, pod in zip(document["items"], result.items, strict=True):
+            resources = raw["spec"].get("resources")
+            if resources is not None:
+                if not isinstance(resources, dict) or not isinstance(resources.get("requests", {}), dict):
+                    raise ValueError("invalid Pod resource requests")
+                pod.spec.resources = resources
+        return result
+    except Exception:
+        # Neither the HTTP body nor deserializer diagnostics are evidence: Pod
+        # payloads may contain credentials, commands or private source URLs.
+        raise KubernetesObservationError("Kubernetes pool Pod page is invalid") from None
+    finally:
+        # _preload_content=False transfers ownership of the HTTP response.
+        release = getattr(response, "release_conn", None)
+        if release is not None:
+            release()
 
 
 def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
@@ -416,6 +457,7 @@ class InClusterKubernetesCapacityReader:
         *,
         maximum_items: int,
         page_size: int,
+        decode: Callable[[Any], Any] | None = None,
         **kwargs: object,
     ) -> tuple[list[Any], str]:
         items: list[Any] = []
@@ -429,6 +471,8 @@ class InClusterKubernetesCapacityReader:
                 _continue=token or None,
                 _request_timeout=(self._request_timeout, self._request_timeout),
             )
+            if decode is not None:
+                response = decode(response)
             metadata = getattr(response, "metadata", None)
             version = getattr(metadata, "resource_version", None)
             if not version or (resource_version is not None and str(version) != resource_version):
@@ -467,6 +511,8 @@ class InClusterKubernetesCapacityReader:
                 maximum_items=200_000,
                 page_size=1000,
                 watch=False,
+                decode=_decode_pool_pods if pool is not None else None,
+                **({"_preload_content": False} if pool is not None else {}),
             )
             daemons, daemon_version = self._list_all(
                 self._apps.list_daemon_set_for_all_namespaces,
