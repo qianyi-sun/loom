@@ -8,6 +8,7 @@ import shlex
 import shutil
 import tempfile
 import tomllib
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,10 @@ from loom.dockerfile_instructions import (
     dockerfile_instructions,
 )
 from loom.execution_architecture import execution_cpu_arch
+from loom.execution_requirements import (
+    TaskExecutionRequirementsV1,
+    execution_requirement_diagnostics,
+)
 from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.nebius_terminus_ingest import (
@@ -88,12 +93,13 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         report.add("package_defect", "invalid_toml", str(exc), "Repair task.toml and rerun validation.")
         return
     report.original_requirements = {
-        key: raw[key] for key in (
+        key: deepcopy(raw[key]) for key in (
             "environment", "agent", "verifier", "steps", "required_agent_capabilities",
             "artifacts", "multi_step", "service_execution",
         )
         if key in raw
     }
+    _declared_execution_requirement_diagnostics(raw, report, execution_profile=execution_profile)
     if execution_profile == NEBIUS_TERMINUS_PROFILE:
         _declared_runtime_requirements(raw, report)
     try:
@@ -135,7 +141,10 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
                    source=str(path.parent))
         return
     report.admission_passed = not reasons
+    diagnosed_codes = {item["code"] for item in report.diagnostics}
     for reason in reasons:
+        if reason in diagnosed_codes:
+            continue
         report.add("runtime_capability", reason, f"Profile admission rejected: {reason}.",
                    "Use a qualified runtime capability or retain this task as blocked.")
     if not report.diagnostics:
@@ -145,6 +154,28 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
     value = raw.get(name)
     return value if isinstance(value, dict) else {}
+
+
+def _declared_execution_requirement_diagnostics(
+    raw: dict[str, Any], report: TaskCompatibilityReport, *, execution_profile: str | None,
+) -> None:
+    declaration = _section(raw, "environment").get("execution_requirements")
+    if declaration is None:
+        return
+    try:
+        requirements = TaskExecutionRequirementsV1.model_validate(declaration)
+    except ValidationError:
+        # Invalid references or extra fields may contain credentials. Preserve
+        # the source and validation paths, but do not copy their values into JSON.
+        report.original_requirements["environment"]["execution_requirements"] = {
+            "redacted": True, "reason": "Invalid declaration; inspect the source task.toml.",
+        }
+        return
+    if execution_profile != NEBIUS_TERMINUS_PROFILE:
+        return
+    for item in execution_requirement_diagnostics(requirements):
+        report.add(item.category, item.code, item.reason, item.action,
+                   source=f"{report.source_location}#environment.execution_requirements.{item.field}")
 
 
 def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilityReport) -> None:
