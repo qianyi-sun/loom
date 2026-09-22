@@ -121,16 +121,29 @@ revisions remain readable for migration and operator tests, but ordinary users
 do not select a physical target or hand-author a binding.
 
 Automatic compilation is fail-closed and intentionally not a general Docker
-converter. It accepts one Linux x86 CPU task with explicit positive CPU, RAM,
-ephemeral-storage and timeout bounds; `/workspace`; one safe instruction; a
-direct-completion/LiteLLM API agent; one safe script verifier; and safe relative
-artifact paths. All declared and required artifact paths are frozen into the
-runtime plan together with the lossless model-call trajectory, attributed
-usage, and structured verifier output; multiple artifacts are part of the
-supported ordinary TaskSet matrix. It rejects GPU, multi-step, custom identity, sidecar, skill,
-MCP, environment-variable, custom DNS/host/tmpfs, health-check, capability,
-extended-runtime, mutable-image, or host-specialized shapes. Supporting one of
-those shapes requires a reviewed materializer change, not an implicit default.
+converter. It accepts one Linux x86 CPU task with explicit CPU, RAM,
+ephemeral-storage and timeout bounds, one safe instruction, a shared script
+verifier, and safe relative artifact paths. The API-model agent can be
+`direct-completion`, `litellm`, or `terminus-2`. Direct-completion/LiteLLM tasks
+use `/workspace`; Terminus tasks can use `/workspace` or `/app`. Both require
+the `agent` identity and `gateway-only` network policy.
+
+Terminus task Dockerfiles can enter the separate task-image preparation path;
+execution still uses the prepared immutable image and a matching frozen grant.
+Terminus also requires a private `verifier/` script and workspace isolation.
+All declared and required artifact paths are frozen into the runtime plan with
+the lossless model-call trajectory, attributed usage and structured verifier
+output. Multiple artifacts are supported within those path constraints.
+
+The compiler rejects GPU, multi-step, custom identity, sidecar, skill, MCP,
+extra environment-variable, custom DNS/host/tmpfs, health-check, capability,
+multi-model and other extended-runtime shapes. A mutable image is not accepted
+as an execution image. Supporting another harness or task shape requires a
+reviewed materializer change; the wider harness target in
+[#2054](https://github.com/qianyi-sun/loom/issues/2054) is not evidence that all
+of those harnesses have native execution acceptance. The current admission
+rules live in
+[`automatic_service_execution_rejections`](../../src/loom/service_execution_materialization.py).
 
 The candidate-bound acceptance TaskSet builder and authenticated staged runner
 are the executable acceptance path. The builder derives the immutable task
