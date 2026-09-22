@@ -1029,6 +1029,10 @@ def _execution_documents(
                         if labels.get("kubernetes.io/metadata.name") == "loom":
                             labels["kubernetes.io/metadata.name"] = ns
             if doc["kind"] == "ConfigMap":
+                if filename == "nebius-capacity-collector.yaml" and builder is not None:
+                    doc["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_BUILD_CONCURRENCY_LIMIT"] = str(
+                        builder.max_concurrent
+                    )
                 for suffix, key in (
                     ("NEBIUS_PROJECT_ID", "project_id"),
                     ("NEBIUS_QUOTA_PARENT_ID", "quota_parent_id"),

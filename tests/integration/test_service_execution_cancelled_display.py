@@ -6,13 +6,14 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import Batch, Token, Trial, User
+from loom.db.schema import Batch, ExecutionCapacityObservation, Token, Trial, User
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration import test_service_execution_leases as fixtures
+from tests.integration.test_execution_capacity_placement import _record as _record_capacity
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
 )
@@ -73,6 +74,14 @@ async def test_cancelled_output_unavailable_agrees_across_public_projections(
             lease.cleanup_requested_at = now
             lease.cleanup_deadline_at = now + timedelta(minutes=5)
             lease.deleted_at = now
+            observation = await session.scalar(select(ExecutionCapacityObservation).where(
+                ExecutionCapacityObservation.target_id == target.target_id,
+            ).order_by(ExecutionCapacityObservation.observed_at.desc()).limit(1))
+            assert observation is not None
+            await _record_capacity(session, target.target_id, datetime.now(UTC), {
+                **observation.observation_json["placement"],
+                "nodes": [], "pending_pods": [], "build_concurrency_limit": 7,
+            })
             await session.commit()
 
         async with httpx.AsyncClient(
@@ -90,6 +99,8 @@ async def test_cancelled_output_unavailable_agrees_across_public_projections(
             })
         assert placement.status_code == 200, placement.text
         assert placement.json()["available"] is True
+        assert placement.json()["build_concurrency_limit"] == 7
+        assert placement.json()["nodes"] == [] and placement.json()["pending_builds"] == 0
         assert forbidden.status_code == 403
         for response in (detail, batch, monitor):
             assert response.status_code == 200, response.text

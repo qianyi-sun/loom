@@ -62,6 +62,23 @@ describe("EventTimeline", () => {
     expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["facade:tokens-only", 0, "n/a"],
+    ["facade:rate-card:missing", 0, "unknown/unpriced"],
+    ["facade:operator-supplied:invalid", 0, "unknown/unpriced"],
+    ["failed-upstream", 0, "unavailable"],
+    ["", 0, "unknown/unpriced"],
+    ["facade:operator-supplied", 0, "$0.0000"],
+    ["sha256:priced-snapshot", 0.25, "$0.2500"],
+  ])("preserves per-call pricing semantics for %s", (rateCard, cost, label) => {
+    render(<EventTimeline events={[{
+      kind: "llm_call", model: "glm-5.2", input_tokens: 100, output_tokens: 50,
+      rate_card_hash: rateCard, cost_usd_snapshot: cost,
+    }]} />);
+    expect(screen.getByText(`LLM call — glm-5.2 (100 in, 50 out, ${label})`))
+      .toBeInTheDocument();
+  });
+
   it("uses stable unique keys when duplicate seq and kind values appear", () => {
     const consoleError = vi
       .spyOn(console, "error")

@@ -1,5 +1,11 @@
 # Correct a previously committed Terminus accounting export
 
+Trajectory display uses each call's frozen pricing marker, not its numeric cost
+snapshot alone. Token-only calls display `n/a`, missing/invalid pricing displays
+`unknown/unpriced`, and failed upstream calls display `unavailable`; a priced
+call can legitimately display `$0.0000`. This presentation also applies to
+historical events and does not rewrite their snapshots or require an export repair.
+
 The existing Control Plane materializer reconciles terminal, current-attempt Terminus-2 exports when new calls appear in their tenant, lease, and output-generation-bound Gateway ledger (#1962). It compares the published call count with the bound ledger and uses the same fenced helper described below. It retries transient or concurrent changes without resetting the committed materialization or changing the Trial outcome. The CLI remains available for an explicit inspection or correction of one lease. This operation performs no model calls, creates no Trial or worker, and changes no result, reward, attempt, source commit, or retention deadline.
 
 Run the deployed module inside the Control Plane environment, using its existing database and object-storage configuration. Supply the exact lease UUID and owning team UUID. Start with a read-only projection:

@@ -25,6 +25,15 @@ def test_placement_preserves_shared_totals_without_cross_team_identifiers():
     assert "private" not in str(result)
 
 
+def test_idle_placement_keeps_configured_build_limit_without_build_pods():
+    payload = {"nodes": [], "pending_pods": [], "build_concurrency_limit": 7}
+    result = placement_response(payload, {}, admin=False)
+    assert result["build_concurrency_limit"] == 7
+    assert result["nodes"] == [] and result["pending_builds"] == 0
+    del payload["build_concurrency_limit"]
+    assert placement_response(payload, {}, admin=False)["build_concurrency_limit"] is None
+
+
 def test_terminal_progress_uses_retained_image_timing_not_current_cache():
     now = datetime.now(UTC)
     lease_id = uuid4()
