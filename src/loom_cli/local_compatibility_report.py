@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shlex
 import shutil
 import tempfile
 import tomllib
@@ -11,6 +14,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
 from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
@@ -97,8 +101,10 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         report.add("package_defect", "invalid_task_config", reason,
                    "Supply the missing Loom intake fields or repair the declared schema; preserve task requirements.")
         return
+    _build_context_diagnostics(path.parent, task, report)
     if execution_profile != NEBIUS_TERMINUS_PROFILE:
-        report.status = "schema_valid"
+        if not report.diagnostics:
+            report.status = "schema_valid"
         return
     _dropped_environment_requirements(raw, normalized, report)
     try:
@@ -169,6 +175,62 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
         add("devices", "environment.gpus", "Declared GPU capability is not supported by this profile.", 2051)
     if verifier.get("env_mode", verifier.get("environment_mode", "shared")) != "shared":
         add("verifier_environment", "verifier.env_mode", "Profile replaces the declared verifier environment mode.", 2050)
+    verifier_args = _section(verifier, "args")
+    script = verifier_args.get("script_path")
+    if script is not None and script not in ("verifier/run.sh", "/app/verifier/run.sh"):
+        report.add("unsupported_conversion", "verifier_entrypoint_changed",
+                   f"Profile would replace the declared verifier entrypoint {script!r}.",
+                   "Provide a reviewed equivalent verifier bridge that preserves the original entrypoint.",
+                   source=f"{report.source_location}#verifier.args.script_path")
+
+
+def _build_context_diagnostics(bundle: Path, task: TaskConfig, report: TaskCompatibilityReport) -> None:
+    """Check literal local COPY inputs, without pretending to build an image."""
+    env = task.environment
+    if env.dockerfile is None:
+        return
+    dockerfile = bundle / env.dockerfile
+    context = bundle / (env.docker_build_context or ".")
+    if not dockerfile.resolve().is_relative_to(bundle) or not context.resolve().is_relative_to(bundle):
+        report.add("package_defect", "build_path_outside_bundle", "Docker build inputs leave the task bundle.",
+                   "Keep the original Dockerfile and build context inside the task package.")
+        return
+    if not dockerfile.is_file() or not context.is_dir():
+        report.add("package_defect", "missing_build_input", "Declared Dockerfile or build context is missing.",
+                   "Supply the original Dockerfile and complete build context.", source=str(dockerfile))
+        return
+    try:
+        instructions = dockerfile_instructions(dockerfile.read_text(encoding="utf-8"))
+        for instruction in instructions:
+            if instruction.keyword not in {"COPY", "ADD"}:
+                continue
+            arguments = instruction.arguments
+            flags = []
+            while match := re.match(r"^(--[^\s]+)\s+", arguments):
+                flags.append(match.group(1))
+                arguments = arguments[match.end():]
+            if any(flag.startswith("--from=") for flag in flags):
+                continue
+            values = json.loads(arguments) if arguments.startswith("[") else shlex.split(arguments)
+            if not isinstance(values, list) or len(values) < 2 or not all(isinstance(value, str) for value in values):
+                raise ValueError("COPY/ADD requires source paths and a destination")
+            for source in values[:-1]:
+                # Inline inputs, build-arg expansion and remote sources need
+                # Docker evaluation; absence on this filesystem proves nothing.
+                if source.startswith("<<") or "$" in source or "://" in source or source.startswith("git@"):
+                    continue
+                relative = source.lstrip("/")
+                if ".." in Path(relative).parts:
+                    continue
+                if not any(context.glob(relative)):
+                    report.add("package_defect", "missing_copy_source",
+                               f"{instruction.keyword} source {source!r} is absent from build context {env.docker_build_context or '.'}.",
+                               "Restore the original source or publish an explicit reviewed package repair; do not invent an empty directory.",
+                               source=f"{dockerfile}:{instruction.line}")
+    except (OSError, UnicodeError, ValueError) as exc:
+        location = f"{dockerfile}:{exc.line}" if isinstance(exc, DockerfileParseError) else str(dockerfile)
+        report.add("package_defect", "invalid_dockerfile", str(exc),
+                   "Repair the Dockerfile input syntax and rerun validation.", source=location)
 
 
 def _dropped_environment_requirements(
@@ -200,7 +262,12 @@ def _record_changes(
                 continue
             report.changes.append({
                 "field": f"{section}.{key}", "before": before.get(key), "after": after.get(key),
-                "category": "profile_default" if key not in before else "profile_conversion",
+                "category": (
+                    "profile_default" if key not in before else
+                    "equivalent_conversion" if (section, key) in {
+                        ("environment", "dockerfile"), ("environment", "docker_build_context"),
+                    } else "profile_conversion"
+                ),
             })
     if normalized.get("steps") != adapted.get("steps"):
         report.changes.append({

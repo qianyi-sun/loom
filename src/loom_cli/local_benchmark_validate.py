@@ -211,7 +211,9 @@ def render_validation_json(result: LocalBenchmarkValidationResult) -> str:
             "resources_filled_tasks": result.profile_stats.resources_filled_tasks,
             "preflight_passed": result.profile_stats.preflight_passed,
         }
-    return json.dumps(payload, indent=2, sort_keys=True)
+    # Even invalid TOML field types (including native dates) must remain
+    # reportable without aborting the complete-input diagnostic output.
+    return json.dumps(payload, indent=2, sort_keys=True, default=str)
 
 
 def _load_benchmark_toml(path: Path) -> BenchmarkToml:
