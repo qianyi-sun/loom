@@ -94,3 +94,14 @@ async def test_new_directory_can_be_restored_into_fresh_verifier(docker_drivers,
     await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
     result = await verifier.exec("cat /data/new/marker", user="root")
     assert result.stdout.strip() == b"created"
+
+
+async def test_cross_root_hardlinks_are_rejected_instead_of_silently_copied(docker_drivers, tmp_path):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths
+
+    agent, _ = docker_drivers
+    await agent.exec("mkdir -p /data /home/task; echo linked > /data/marker; ln /data/marker /home/task/link", user="root")
+    with pytest.raises(RuntimeError, match="hardlinks.*declared roots"):
+        await export_mutable_paths(agent, (PurePosixPath("/data"), PurePosixPath("/home/task")),
+                                   tmp_path, workdir=PurePosixPath("/workspace"))
+    assert not (tmp_path / "manifest.json").exists()

@@ -29,6 +29,7 @@ def test_declared_paths_round_trip_and_become_required_execution_outputs():
     ["/"], ["relative"], ["/data/../tests"], ["/data", "/data/sub"],
     ["/data", "/data"], ["/app"], ["/app/tests"], ["/loom"], ["/proc"],
     ["/run"], ["/var"], ["/tests"], ["/solution"], ["/tmp"],
+    ["/opt"], ["/opt/verifier"], ["/opt/verifier-python"], ["/opt/verifier-assets"],
     ["/data\x00bad"], [f"/data{i}" for i in range(17)],
 ])
 def test_unsafe_or_ambiguous_path_declarations_are_rejected(paths):
