@@ -9,12 +9,21 @@ from pydantic import TypeAdapter
 
 from loom.models.trajectory import LLMCallEvent, TrajectoryEvent
 from loom.models.trial import TrialConfig
+from loom.models.types import ModelSpec
 from loom.trajectory.llm_call_events import llm_call_diagnostic_counts, llm_call_row_to_event
 
 _EVENT: TypeAdapter[TrajectoryEvent] = TypeAdapter(TrajectoryEvent)
 _COUNTERS = (
     "input_tokens", "cached_input_tokens", "cache_write_tokens", "output_tokens", "thinking_tokens",
 )
+
+
+def _same_model_identity(actual: ModelSpec, expected: ModelSpec | None) -> bool:
+    # Gateway accounting records model identity, not the Trial's generation
+    # limits. Retain source/routing checks without requiring those limits to
+    # round-trip through every native trace and ledger projection.
+    limits = {"max_input_tokens", "max_output_tokens"}
+    return expected is not None and actual.model_dump(exclude=limits) == expected.model_dump(exclude=limits)
 
 
 def parse_terminus_events(
@@ -33,7 +42,7 @@ def parse_terminus_events(
         if not (event.kind.startswith("terminus2_") or isinstance(event, LLMCallEvent)):
             raise ValueError("Terminus source cannot author lifecycle events")
         if isinstance(event, LLMCallEvent):
-            if event.model != trial.agent_model:
+            if not _same_model_identity(event.model, trial.agent_model):
                 raise ValueError("Terminus trace has another model identity")
             if not event.gateway_request_id or event.gateway_request_id in call_ids:
                 raise ValueError("Terminus trace has missing or duplicate Gateway calls")
@@ -76,7 +85,7 @@ def reconcile_terminus_ledger(
                 or row.get("step_id") != "agent"):
             raise ValueError("Gateway ledger has invalid or duplicate call identity")
         call = llm_call_row_to_event(row, trial_id=trial_id, seq=0)
-        if call.model != trial.agent_model:
+        if not _same_model_identity(call.model, trial.agent_model):
             raise ValueError("Gateway ledger has another model identity")
         if row.get("finish_reason"):
             call = call.model_copy(update={"finish_reason": row["finish_reason"]})

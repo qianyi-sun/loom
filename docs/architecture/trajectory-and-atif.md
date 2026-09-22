@@ -257,3 +257,13 @@ await object_store.put_object(bucket, atif_key, json.dumps(atif).encode())
 - `src/loom/trajectory/reader.py` — the reader
 - `src/loom/trajectory/atif.py` — the projection
 - `src/loom/models/trajectory.py` — event dataclasses
+
+### Terminus model identity and generation limits
+
+Native Terminus traces and Gateway ledger rows are reconciled against the Trial's
+model identity, including provider, model name and source/routing fields. Optional
+`max_input_tokens` and `max_output_tokens` are generation limits, not identity:
+Gateway accounting does not persist them, so their absence in a projected event
+must not invalidate the trajectory. The frozen Trial retains those limits;
+identity mismatches still reject materialization, and reconciliation does not
+change timeout, token usage or verifier outcomes.
