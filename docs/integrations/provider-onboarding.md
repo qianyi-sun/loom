@@ -21,13 +21,16 @@ third-party API or a self-hosted OpenAI-compatible service such as vLLM.
 
 Rotating an API key changes the connection's active encrypted secret reference.
 Deleting a connection disables and soft-deletes it while retaining attribution
-for historical results. Neither action currently removes the previous encrypted
-secret from Loom's database: delayed secret cleanup is not implemented.
+for historical results. Both actions start a durable 24-hour grace period;
+the service then reclaims the encrypted value once no active provider or retained
+historical consumer references it. Existing soft-deleted connections get a fresh
+grace period when discovered. Historical rotation orphans without a retained
+owner remain stored because their ownership cannot be established safely.
+See [provider key retirement](../architecture/service-mode.md#provider-api-key-retirement)
+for collection limits and concurrency guarantees.
 
 Loom does not revoke keys at the inference provider. Revoke superseded keys
-through that provider once in-flight work no longer needs them. Database secret
-cleanup requires a separate implementation that accounts for cached credentials
-and in-flight requests.
+through that provider once in-flight work no longer needs them.
 
 ## Hosted Third-Party API
 

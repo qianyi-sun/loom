@@ -75,8 +75,6 @@ def test_keep_forever_rejects_any_duration() -> None:
 
 
 def test_unsupported_backend_raises() -> None:
-    # gcs is now accepted via the GCS renderer (#254); use an
-    # actually-unknown backend to exercise the validator.
     with pytest.raises(ValueError, match="not supported"):
         RetentionConfig(backend="azure", rules=())
 
@@ -356,3 +354,48 @@ def test_example_file_loads_cleanly() -> None:
     # The example covers our three reference buckets.
     buckets = {r.bucket for r in cfg.rules}
     assert {"trajectories", "artifacts", "atif"}.issubset(buckets)
+
+
+@pytest.mark.parametrize("backend", ["gcs", "azure"])
+def test_non_s3_retention_backends_are_rejected(backend: str) -> None:
+    with pytest.raises(ValueError, match="not supported"):
+        RetentionConfig(backend=backend)
+
+
+@pytest.mark.parametrize("rule", [
+    {"bucket": "artifacts", "strategy": "expire_after_day", "days": 30},
+    {"bucket": "artifacts", "strategy": "expire_after_days", "days": True},
+    {"bucket": "artifacts", "strategy": "expire_after_days", "days": 1.5},
+    {"bucket": "", "strategy": "keep_forever"},
+])
+def test_invalid_retention_rule_is_rejected(rule) -> None:
+    with pytest.raises(ValueError):
+        RetentionRule(**rule)
+
+
+@pytest.mark.parametrize("policy", [
+    'backend = "s3"\nretentoin = []',
+    'backend = "s3"\nretention = 1',
+    'backend = "s3"\n[[retention]]\nbucket = "artifacts"',
+    'backend = "s3"\n[[retention]]\nstrategy = "keep_forever"',
+])
+def test_malformed_policy_has_actionable_value_error(tmp_path: Path, policy: str) -> None:
+    path = tmp_path / "retention.toml"
+    path.write_text(policy)
+    with pytest.raises(ValueError):
+        load_retention_config(path)
+
+
+def test_keep_forever_cannot_be_combined_with_expiration() -> None:
+    with pytest.raises(ValueError, match="conflicting"):
+        RetentionConfig(backend="s3", rules=(
+            RetentionRule(bucket="artifacts", strategy="keep_forever"),
+            RetentionRule(bucket="artifacts", strategy="expire_after_days", days=30),
+        ))
+
+
+def test_policy_rejects_ignored_custom_rule_id(tmp_path: Path) -> None:
+    path = tmp_path / "retention.toml"
+    path.write_text('backend = "s3"\n[[retention]]\nbucket = "artifacts"\nstrategy = "keep_forever"\nrule_id = "custom"')
+    with pytest.raises(ValueError, match="unknown keys"):
+        load_retention_config(path)

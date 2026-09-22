@@ -76,7 +76,7 @@ def test_provisioning_downgrade_refuses_to_discard_platform_budget(environment_d
     with pytest.raises(DBAPIError, match="cannot remove managed provisioning or platform budget history"):
         command.downgrade(cfg, "0154")
     with environment_database.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0155"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0156"
         assert connection.execute(select(NebiusPlatformBudget.cpu_millis)).scalar_one() == 1000
 
 

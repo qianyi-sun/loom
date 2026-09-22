@@ -94,7 +94,11 @@ def test_secrets_table_columns(postgres_url: str) -> None:
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'secrets'",
         ))}
-    assert cols == {"ref", "ciphertext", "nonce", "master_key_version", "created_at"}
+    # The fixture upgrades through head, including retirement metadata in 0156.
+    assert cols == {
+        "ref", "ciphertext", "nonce", "master_key_version", "created_at",
+        "provider_retired_at",
+    }
 
 
 def test_resolved_egress_ips_is_inet_array(postgres_url: str) -> None:

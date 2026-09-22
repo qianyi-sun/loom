@@ -12,10 +12,11 @@ policy backend must match `LOOM_SVC_STORAGE_BACKEND`. Endpoint, region, and
 credentials come from the service storage settings or the documented MinIO
 root-credential fallback.
 
-The parser also accepts `gcs`, and the Python module contains a pure GCS JSON
-renderer. The CLI does not dispatch to that renderer or apply GCS lifecycle
-configuration; `bootstrap-storage-lifecycle` is currently an S3-compatible
-operation.
+Non-S3 backends, including `gcs`, are rejected when loading the policy.
+The unused GCS renderer and unimplemented apply API have been removed.
+Unknown fields, misspelled strategies and non-integer durations are rejected
+before rendering or applying a policy. The previously ignored `rule_id` field
+is rejected; rendered rule IDs remain `loom-<bucket>`.
 
 ## Policy file
 
@@ -52,7 +53,7 @@ round-trip, which would create permanent drift. Do not rely on it to clean
 incomplete uploads.
 
 Multiple different strategies may target a bucket, but duplicate instances of
-the same strategy are rejected. Expiration actions for one bucket are merged
+the same strategy and conflicting `keep_forever`/expiration policies are rejected. Expiration actions for one bucket are merged
 into a stable `loom-<bucket>` rule. Reapplying the same policy is idempotent.
 Buckets whose rendered policy is empty are skipped; Loom does not delete
 unrelated lifecycle rules from them.
