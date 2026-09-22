@@ -880,6 +880,13 @@ up front or force 16 builds to run: node capacity, provider quota and shared
 capacity admission still determine how many can start. On the shared execution
 pool, account for the 16 GiB storage request per build alongside Trial requests;
 builds can need several nodes even when their total CPU would fit on one.
+
+The renderer also supplies this same limit to the existing capacity collector.
+Monitor's shared-node panel displays the configured build concurrency from that
+target's capacity observation, including when no builds or execution nodes remain.
+Observation freshness still applies; historical observations without the field
+show unavailable. This is a configured ceiling, not a count of currently available
+build slots, and does not change admission or node scaling.
 Apply the operator configuration through the
 normal renderer/deployer; changing only the actuator environment or namespace
 quota leaves the two limits inconsistent. Builds still compete with executions

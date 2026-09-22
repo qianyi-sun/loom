@@ -51,7 +51,7 @@ export function NebiusPlacement({ targetId }: { targetId?: string }): JSX.Elemen
       <p className="text-xs text-slate-600">
         {data.is_fresh ? "Fresh observation" : "Stale observation — placement may have changed"}
         {data.observed_at ? ` · ${new Date(data.observed_at).toLocaleTimeString()}` : ""}
-        {" · "}Observed build concurrency limit: {data.build_concurrency_limit ?? "unavailable"}
+        {" · "}Configured build concurrency limit: {data.build_concurrency_limit ?? "unavailable"}
       </p>
       <div className="grid gap-3 lg:grid-cols-2">
         {data.nodes.map((node) => <article key={node.id} className="rounded-lg border border-slate-200 p-3">

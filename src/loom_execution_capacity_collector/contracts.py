@@ -95,6 +95,8 @@ class NodeGroupPlacement(BaseModel):
 class CapacityPlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
+    # Absent in historical observations or when no native builder is configured.
+    build_concurrency_limit: int | None = Field(default=None, ge=1)
     quota_resources: dict[Literal["nodes", "vcpu", "memory", "storage"], QuotaResource]
     node_group: NodeGroupPlacement
     nodes: list[NodePlacement]

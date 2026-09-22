@@ -1,7 +1,6 @@
 """On-demand placement projection; no provider calls or cross-team identities."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +43,7 @@ def placement_response(
     pending = payload.get("pending_pods", [])
     return {
         "nodes": nodes, "pending": workloads(pending),
+        "build_concurrency_limit": payload.get("build_concurrency_limit"),
         "pending_builds": sum(p["lease_id"].startswith("task-image:") for p in pending),
         "pending_executions": sum(not p["lease_id"].startswith("task-image:") for p in pending),
         "capacity_scope": "shared_target",
@@ -95,19 +95,9 @@ async def load_placement(
         TaskImageMaterializationAttempt.native_build.is_not(None),
         TaskImageMaterializationAttempt.native_build["target_id"].as_string() == observation.target_id,
     ))).all() if by_image else []
-    limits: set[int] = set()
     for build in builds:
         native = build.native_build or {}
         trial_id, task_id = by_image[build.materialization_id]
-        observed = native.get("observed_at")
-        if isinstance(observed, str):
-            try:
-                age = (datetime.now(UTC) - datetime.fromisoformat(observed)).total_seconds()
-            except (ValueError, TypeError):
-                age = float("inf")
-            limit = native.get("concurrency_limit")
-            if 0 <= age <= 120 and type(limit) is int:
-                limits.add(limit)
         phase = next((p["name"] for p in native.get("phases", [])
                       if "running" in p.get("state", {})), native.get("state", "unknown"))
         visible[f"task-image:{build.materialization_id}:{build.lease_epoch}"] = {
@@ -116,5 +106,4 @@ async def load_placement(
         }
     return {
         "available": True, **placement_response(payload, visible, admin=admin),
-        "build_concurrency_limit": next(iter(limits)) if len(limits) == 1 else None,
     }

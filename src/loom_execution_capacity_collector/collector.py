@@ -203,6 +203,7 @@ async def collect_capacity_observation(
             provisioned_memory = active_nodes * raw_node.memory_mib
             provisioned_storage = active_nodes * raw_node.storage_mib
             placement = CapacityPlacement(
+                build_concurrency_limit=settings.build_concurrency_limit,
                 quota_resources=provider_snapshot.quota_resources,
                 node_group=provider_snapshot.node_group,
                 nodes=kubernetes_snapshot.nodes,
