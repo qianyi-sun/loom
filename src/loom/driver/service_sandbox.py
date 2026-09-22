@@ -34,7 +34,8 @@ from loom.models.networking import NetworkPolicy
 from loom.models.types import OS
 
 _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
-                   "/stop-processes": "stop_processes"}
+                   "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
+                   "/resume-processes": "resume_processes"}
 _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
     "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
@@ -53,7 +54,7 @@ class SandboxRPCError(DriverError):
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
-            if path != "/stop-processes" or reason not in _CLEANUP_REASONS:
+            if path not in {"/stop-processes", "/pause-processes", "/resume-processes"} or reason not in _CLEANUP_REASONS:
                 reason = "http_error"
             detail = f"HTTP {status}; {reason}"
             if reason == "process_owner_mismatch":
@@ -246,6 +247,14 @@ class ServiceSandboxDriver:
     async def stop_processes(self) -> None:
         """Stop task descendants before exporting the separate verifier snapshot."""
         await self._request("POST", "/stop-processes")
+
+    async def pause_processes(self) -> None:
+        """Suspend task descendants while keeping the snapshot RPC available."""
+        await self._request("POST", "/pause-processes")
+
+    async def resume_processes(self) -> None:
+        """Resume only processes suspended by the preceding pause operation."""
+        await self._request("POST", "/resume-processes")
 
     async def export_workspace_archive(self, src: PurePosixPath, dst: Path) -> None:
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")

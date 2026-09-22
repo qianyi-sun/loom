@@ -479,6 +479,56 @@ actual installation requests root. Nebius images must have tools preinstalled,
 and unsupported root execution still fails normally. Remove the #1550 patch
 when the Harbor pin includes the corresponding upstream fix.
 
+## Declared mutable state and services
+
+Tasks that produce state outside the workdir declare exact directory roots:
+
+```toml
+[environment]
+mutable_paths = ["/data", "/home/agent/.local/share/jupyter"]
+```
+
+These roots must exist at handoff and cannot overlap the workdir, another root,
+or runtime/private verifier paths (including `/opt/verifier`,
+`/opt/verifier-python` and `/opt/verifier-assets`). The bundle retains per-root
+archives and `artifacts/mutable-paths/manifest.json`. Restore replaces directory
+contents to preserve deletions. Files, modes, ownership and internal links are
+preserved; cross-root hardlinks and special files fail explicitly. The aggregate
+limit is 256 MiB and 100,000 entries, across at most 16 roots. Declare all state
+needed by private verification, including installation metadata when relevant;
+undeclared system mutations do not appear in the fresh verifier.
+
+For a task whose agent must start an HTTP service:
+
+```toml
+[environment.service_lifecycle]
+readiness_timeout_sec = 30
+
+[environment.service_lifecycle.readiness]
+command = "curl --fail --silent http://127.0.0.1:8000/health"
+interval_sec = 1
+timeout_sec = 2
+retries = 10
+```
+
+If the original environment initializes a prerequisite service, also declare
+`startup_command = ["/entrypoint.sh", "/bin/true"]` and
+`startup_timeout_sec = 60` in `[environment.service_lifecycle]`, after reviewing
+the initializer. The command must return after leaving its background service
+running; do not insert an agent solution or pre-complete required task work.
+The native PID 1 remains in control, so image ENTRYPOINT/CMD is not automatically
+executed. This explicit declaration records the reviewed initialization.
+
+The controller captures bounded initializer stdout/stderr and exit status in
+`diagnostics/service-startup.json`. Initialization failure occurs before model
+calls. Readiness is checked before the agent for initialized services and again
+at handoff. Services pause during state capture, resume for private verification
+over Pod loopback, and stop after verification or failed/cancelled handoff.
+Background log files need ordinary artifact declarations. Deployment admission
+requires `service_lifecycle_ready=true` in the runtime profile, qualified with
+the matching sandbox pause/resume implementation. A declaration alone is not
+evidence of live support or original-task acceptance.
+
 ## Verification and acceptance
 
 A local image check should run with `--network none`, the image's non-root user,

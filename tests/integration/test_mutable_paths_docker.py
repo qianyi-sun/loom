@@ -101,7 +101,7 @@ async def test_cross_root_hardlinks_are_rejected_instead_of_silently_copied(dock
 
     agent, _ = docker_drivers
     await agent.exec("mkdir -p /data /home/task; echo linked > /data/marker; ln /data/marker /home/task/link", user="root")
-    with pytest.raises(RuntimeError, match="hardlinks.*declared roots"):
+    with pytest.raises(RuntimeError, match=r"hardlinks.*declared roots"):
         await export_mutable_paths(agent, (PurePosixPath("/data"), PurePosixPath("/home/task")),
                                    tmp_path, workdir=PurePosixPath("/workspace"))
     assert not (tmp_path / "manifest.json").exists()

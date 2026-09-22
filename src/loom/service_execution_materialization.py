@@ -132,6 +132,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
+    service_lifecycle_ready: bool = False
 
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
@@ -140,6 +141,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("task_resource_requests", None)
         if self.default_task_resource_requests is None:
             payload.pop("default_task_resource_requests", None)
+        if not self.service_lifecycle_ready:
+            payload.pop("service_lifecycle_ready", None)
         return payload
 
     @model_validator(mode="after")
@@ -265,6 +268,8 @@ def automatic_service_execution_rejections(
         reasons.append("gpu_unsupported")
     if env.mutable_paths and not terminus:
         reasons.append("mutable_paths_require_terminus")
+    if env.service_lifecycle is not None and not terminus:
+        reasons.append("service_lifecycle_requires_terminus")
     if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (
         env.dockerfile is not None
         or env.docker_image is None
@@ -381,6 +386,8 @@ def compile_service_execution_plan(
             raise ValueError("prepared task image does not match the frozen task")
         task = resolve_prepared_task(task, task_image_grant)
     task = normalize_steps(task)
+    if task.environment.service_lifecycle is not None and not profile.service_lifecycle_ready:
+        raise ValueError("service_lifecycle runtime is not ready")
     reasons = automatic_service_execution_rejections(
         task,
         trial,
@@ -685,6 +692,11 @@ def _compile_terminus_plan(
             source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,
         ))
     published_refs: set[str | None] = {agent_image, profile.runtime_image_ref}
+    if env.service_lifecycle is not None:
+        outputs.append(RuntimeOutputDeclarationV1(
+            source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
+            kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
+        ))
     if env.mutable_paths:
         for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
             outputs.append(RuntimeOutputDeclarationV1(

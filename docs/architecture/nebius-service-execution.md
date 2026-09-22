@@ -696,6 +696,32 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
+Automatic Terminus tasks may declare `environment.mutable_paths` for directory
+state outside their workdir. The controller captures each root in a separate
+validated archive and binds its path, size and SHA-256 in a required manifest.
+The independent verifier receives the same absolute paths, including deletions,
+mode and ownership, before running private tests. There are at most 16 roots,
+100,000 entries and 256 MiB aggregate archived/expanded content. Runtime and
+verifier roots, overlapping roots, symlink ancestors, escaping links, special
+files and cross-root hardlinks are rejected. Ownership that the verifier cannot
+restore is an explicit handoff failure. This does not copy an entire writable
+container layer or expose private verifier dependencies to task mutations.
+
+An explicit `environment.service_lifecycle` retains task processes through the
+independent verifier. Its optional returning startup argv initializes the
+environment before agent execution; agent-owned services have no initializer.
+Readiness checks have an explicit deadline. On successful or acknowledged
+deadline handoff, the native task PID 1 suspends descendants, snapshots workspace
+and declared directories, then resumes those same process identities. Processes
+already stopped remain stopped. The verifier container can reach the retained
+service over the trial Pod's loopback network while its private files remain
+separate. Startup is not repeated in the verifier. Failed/cancelled handoffs stop
+the descendants; verifier completion or failure stops retained task services.
+Attempt cancellation, deadlines, sandbox-incarnation monitoring and Pod deletion
+remain authoritative. Existing undeclared tasks retain stop-before-snapshot
+behavior. The deployment must explicitly set `service_lifecycle_ready` after
+qualifying matching controller and sandbox runtimes; the default is disabled.
+
 The frozen plan also declares every workspace output that belongs in the
 complete Trial bundle, including its source path, package path, semantic kind,
 and whether it is required. For the automatic direct-completion profile this

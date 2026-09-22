@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -59,6 +60,27 @@ class TaskSidecarConfig(BaseModel):
     depends_on: list[str] = []
 
 
+class ServiceLifecycleConfig(BaseModel):
+    """Keep task-owned services alive until the independent verifier finishes.
+
+    Startup is an optional, returning environment initializer, not an agent
+    solution. Agent-owned services omit it and supply a readiness check only.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    startup_command: tuple[str, ...] = Field(default=(), max_length=64)
+    startup_timeout_sec: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
+    readiness: HealthcheckSpec
+    readiness_timeout_sec: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
+
+    @field_validator("startup_command")
+    @classmethod
+    def _startup_argv(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any("\x00" in item or len(item) > 4096 for item in value) or (value and not value[0]):
+            raise ValueError("service startup requires valid argv")
+        return value
+
+
 class EnvironmentConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     os: OS
@@ -81,6 +103,7 @@ class EnvironmentConfig(BaseModel):
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
     mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
+    service_lifecycle: ServiceLifecycleConfig | None = None
     user: str | int = "agent"
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
@@ -98,6 +121,15 @@ class EnvironmentConfig(BaseModel):
     storage_mb: int | None = Field(default=None, gt=0)
     gpus: int = Field(default=0, ge=0)
     sidecars: list[TaskSidecarConfig] = []
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_handoff_declarations(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if not self.mutable_paths:
+            payload.pop("mutable_paths", None)
+        if self.service_lifecycle is None:
+            payload.pop("service_lifecycle", None)
+        return payload
 
     @model_validator(mode="after")
     def _validate_mutable_paths(self) -> EnvironmentConfig:

@@ -115,6 +115,10 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     output.mkdir(parents=True, exist_ok=True)
     trial_id = None
     agent_entered = False
+    handoff_allowed = False
+    services_retained = False
+    driver_started = False
+    lifecycle = task.environment.service_lifecycle
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -138,10 +142,26 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             async with asyncio.timeout(deadline.remaining() if deadline else None):
                 trial_id, team_id = await _execution_identity(gateway)
                 await driver.start()
+                driver_started = True
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=_agent_input_exclusions(task),
                 )
+                if lifecycle is not None and lifecycle.startup_command:
+                    result = await driver.exec(
+                        shlex.join(lifecycle.startup_command), cwd=task.environment.workdir,
+                        timeout_sec=lifecycle.startup_timeout_sec,
+                    )
+                    _write_json_atomic(workspace / ".loom/service-startup.json", {
+                        "return_code": result.return_code,
+                        "stdout": result.stdout.decode("utf-8", errors="replace"),
+                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                        "truncated": result.truncated,
+                    })
+                    if result.return_code:
+                        raise ServiceExecutionTaskError("environment service startup failed")
+                    async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                        await driver.run_healthcheck(lifecycle.readiness)
                 instruction = _safe_workspace_path(
                     workspace, str(task.steps[0].instruction_file),
                 ).read_text()
@@ -151,10 +171,12 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
                     deadline=deadline,
                 )
+                handoff_allowed = True
         except (TimeoutError, asyncio.CancelledError):
             if deadline is None or not deadline.reached or not agent_entered:
                 raise
             timed_out = True
+            handoff_allowed = True
         except Exception as exc:
             _write_json_atomic(output / "exception.json", exception_info(exc).model_dump(mode="json"))
             raise
@@ -174,7 +196,12 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 )
                                 _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
                         finally:
-                            await driver.stop_processes()
+                            if lifecycle is not None and handoff_allowed:
+                                async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                                    await driver.run_healthcheck(lifecycle.readiness)
+                                await driver.pause_processes()
+                            else:
+                                await driver.stop_processes()
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(driver, task.environment.workdir, archive)
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
@@ -190,20 +217,34 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 await driver.download(task.environment.workdir / path, destination)
                             except (DriverError, FileNotFoundError):
                                 print(f"task artifact unavailable: {path}", file=sys.stderr)
+                        if lifecycle is not None and handoff_allowed:
+                            await driver.resume_processes()
+                            services_retained = True
                 finally:
-                    await driver.stop()
+                    if lifecycle is None or services_retained:
+                        await driver.stop()
         # A successful agent may use the grace period for its snapshot. Once
         # that handoff completes, acknowledge the expired Go phase with 124 too.
         if timed_out or (agent_entered and deadline is not None and deadline.reached):
             raise AgentTimeoutFinalizedError("agent deadline reached; verifier handoff completed")
     finally:
-        if deadline is not None:
-            loop.remove_signal_handler(signal.SIGTERM)
+        try:
+            if lifecycle is not None and not services_retained:
+                try:
+                    # Cleanup has its own bounded RPC and also runs if startup,
+                    # snapshot, or the finalization budget fails or is cancelled.
+                    if driver_started:
+                        await driver.stop_processes()
+                finally:
+                    await driver.stop()
+        finally:
+            if deadline is not None:
+                loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
     driver = sandbox_driver("verifier-sandbox", task)
-    await driver.start()
+    driver_started = False
     failure: BaseException | None = None
 
     def retain_failure(operation: str, exc: BaseException) -> None:
@@ -221,6 +262,8 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
             )
 
     try:
+        await driver.start()
+        driver_started = True
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=task.environment.workdir,
             policy=_POLICY, phase="verifier",
@@ -267,13 +310,26 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         retain_failure("execution", exc)
     finally:
         try:
-            await driver.stop_processes()
+            if driver_started:
+                await driver.stop_processes()
         except BaseException as exc:
             retain_failure("stop_processes", exc)
         try:
             await driver.stop()
         except BaseException as exc:
             retain_failure("stop", exc)
+        if task.environment.service_lifecycle is not None:
+            service_driver = sandbox_driver("task-sandbox", task)
+            try:
+                await service_driver.start()
+                await service_driver.stop_processes()
+            except BaseException as exc:
+                retain_failure("service_cleanup", exc)
+            finally:
+                try:
+                    await service_driver.stop()
+                except BaseException as exc:
+                    retain_failure("service_disconnect", exc)
     if failure is not None:
         raise failure
 

@@ -24,7 +24,7 @@ def inputs():
 
 def test_lifecycle_requires_runtime_readiness_and_declares_startup_evidence():
     task, trial, profile = inputs()
-    with pytest.raises(ValueError, match="service_lifecycle.*ready"):
+    with pytest.raises(ValueError, match=r"service_lifecycle.*ready"):
         compile_service_execution_plan(task=task, trial=trial, profile=profile,
             source_provenance=_provenance(), task_revision_sha256=_REVISION)
     profile = profile.model_copy(update={"service_lifecycle_ready": True})
@@ -32,6 +32,12 @@ def test_lifecycle_requires_runtime_readiness_and_declares_startup_evidence():
         source_provenance=_provenance(), task_revision_sha256=_REVISION)
     assert any(output.relative_path == "diagnostics/service-startup.json" for output in plan.output_declarations)
     assert "service_lifecycle_ready" not in inputs()[2].model_dump(mode="json")
+
+
+def test_undeclared_handoff_options_do_not_change_existing_task_serialization():
+    task, _, _ = _inputs()
+    assert "mutable_paths" not in task.environment.model_dump(mode="json")
+    assert "service_lifecycle" not in task.environment.model_dump(mode="json")
 
 
 @pytest.mark.parametrize("startup", [[""], ["/bin/sh", "bad\x00value"]])
@@ -124,3 +130,54 @@ async def test_service_survives_snapshot_until_private_verifier_finishes(tmp_pat
         assert events[-1] == "kill"
         assert events.index("snapshot") < events.index("resume") < events.index("verify")
     assert (tmp_path / ".loom/service-startup.json").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timed_out", [False, True])
+async def test_cancelled_service_handoff_cleans_up_and_timeout_can_finalize(tmp_path, monkeypatch, timed_out):
+    import asyncio
+    import time
+
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = inputs()
+    (tmp_path / "instruction.md").write_text("start a service")
+    events = []
+
+    class ServiceSandbox(Sandbox):
+        async def pause_processes(self):
+            events.append("pause")
+            self.quiesced = True
+
+        async def resume_processes(self):
+            events.append("resume")
+
+        async def stop_processes(self):
+            events.append("kill")
+            await super().stop_processes()
+
+    driver = ServiceSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    if timed_out:
+        monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.03))
+        monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "1")
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        if timed_out:
+            await asyncio.sleep(10)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    with pytest.raises(module.AgentTimeoutFinalizedError if timed_out else asyncio.CancelledError):
+        await module.run_agent(tmp_path, task, trial)
+    if timed_out:
+        assert events == ["pause", "resume"]
+    else:
+        assert "kill" in events and "resume" not in events
+    assert driver.state == "stopped"
