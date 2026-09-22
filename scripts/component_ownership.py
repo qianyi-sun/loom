@@ -17,7 +17,10 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from loom.nebius_candidate_contract import NEBIUS_PLATFORM_IMAGES as NEBIUS_PLATFORM_IMAGES
+# CI invokes these stdlib-only planners before installing the Loom package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from loom.nebius_candidate_contract import NEBIUS_PLATFORM_IMAGES as NEBIUS_PLATFORM_IMAGES  # noqa: E402
 
 
 class ManifestError(ValueError):
