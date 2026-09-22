@@ -131,3 +131,21 @@ dpkg --install /tmp/loom-identity-proof.deb
     unrelated = await default.exec("test ! -e /usr/local/share/loom-identity-proof && ! dpkg-query -W loom-identity-proof")
     assert unrelated.return_code == 0, unrelated.stderr
     await verifier.stop_processes()
+
+
+async def test_handoff_preserves_numeric_ownership_when_account_names_differ(sandboxes, tmp_path):
+    agent, verifier, _ = sandboxes
+    for driver, uid in ((agent, 1201), (verifier, 1301)):
+        result = await driver.exec(
+            f"groupadd -g {uid} ownercheck && useradd -u {uid} -g {uid} ownercheck && "
+            "mkdir -p /app /data"
+        )
+        assert result.return_code == 0, result.stderr
+    result = await agent.exec("echo owned > /data/marker && chown 1201:1201 /data/marker")
+    assert result.return_code == 0, result.stderr
+    paths = (PurePosixPath("/data"),)
+    await export_mutable_paths(agent, paths, tmp_path / "snapshot", workdir=PurePosixPath("/app"))
+    await import_mutable_paths(verifier, paths, tmp_path / "snapshot", workdir=PurePosixPath("/app"))
+    result = await verifier.exec("stat -c '%u:%g' /data/marker")
+    assert result.return_code == 0, result.stderr
+    assert result.stdout.strip() == b"1201:1201"
