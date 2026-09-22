@@ -58,11 +58,14 @@ def login_http(monkeypatch, tmp_xdg_home):
             if request.method == "GET":
                 return httpx.Response(200, json=copy.deepcopy(state["status"]))
             assert request.url.path == f"/api/v1/environments/{ENVIRONMENT}/login"
-            return httpx.Response(200, json=copy.deepcopy(state["proof"]))
+            issued = copy.deepcopy(state["proof"])
+            if sum(r.method == "POST" and r.url.host == "management.example.com" for r in requests) > 1:
+                issued["login_token"] = "loom_env_login_" + "b" * 43
+            return httpx.Response(200, json=issued)
         assert request.url.host == "alice.example.com"
         assert request.url.path == "/api/v1/auth/login/complete"
         assert not any(header in request.headers for header in ("authorization", "cookie", "x-loom-csrf"))
-        assert json.loads(request.content) == {"token": PROOF}
+        assert json.loads(request.content)["token"] in {PROOF, "loom_env_login_" + "b" * 43}
         return httpx.Response(state["child_status"], json=state["session"], headers={
             "set-cookie": state["cookie"], "location": "https://foreign.example.com/stolen",
         })
@@ -163,3 +166,31 @@ def test_failed_child_credential_write_reports_safely_and_keeps_management(login
     assert config_path().read_bytes() == original
     output = capsys.readouterr()
     assert PROOF not in output.out + output.err
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_browser_uses_a_separate_fragment_proof_and_never_prints_it(login_http, monkeypatch, capsys, opened):
+    import webbrowser
+    from urllib.parse import parse_qs, urlsplit
+
+    _, requests = login_http
+    launched = []
+
+    def open_browser(url, **kwargs):
+        launched.append(url)
+        return opened
+
+    monkeypatch.setattr(webbrowser, "open", open_browser)
+    assert main(["dev", "login", ENVIRONMENT, "--browser"]) == (0 if opened else 1)
+    assert len(launched) == 1
+    url = urlsplit(launched[0])
+    assert url.scheme == "https" and url.netloc == "alice.example.com" and url.path == "/auth/managed"
+    assert not url.query
+    browser_proof = parse_qs(url.fragment)["token"][0]
+    assert browser_proof == "loom_env_login_" + "b" * 43
+    child_request = next(r for r in requests if r.url.host == "alice.example.com")
+    assert json.loads(child_request.content)["token"] != browser_proof
+    output = capsys.readouterr()
+    assert PROOF not in output.out + output.err and browser_proof not in output.out + output.err
+    with selected_context(CONTEXT):
+        assert load_config().auth_session_cookie == "new-child-session"
