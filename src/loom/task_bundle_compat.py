@@ -10,12 +10,14 @@ from __future__ import annotations
 import re
 import shlex
 import tomllib
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
 
 
 class CompatibilitySeverity(StrEnum):
@@ -131,8 +133,22 @@ def collect_dockerfile_compatibility_issues(
     seen_app_root_references: set[str] = set()
     issues: list[TaskBundleCompatibilityIssue] = []
 
-    for line_no, instruction in _logical_instructions(text):
-        stripped = instruction.strip()
+    try:
+        instructions = dockerfile_instructions(text)
+    except DockerfileParseError as exc:
+        return [TaskBundleCompatibilityIssue(
+            code="TASK_COMPAT_DOCKERFILE_PARSE",
+            severity=CompatibilitySeverity.ERROR,
+            path=label,
+            line=exc.line,
+            phase="task_image_build",
+            message=str(exc),
+            hint="Complete the Dockerfile instruction or heredoc before running compatibility checks.",
+        )]
+
+    for instruction in instructions:
+        line_no = instruction.line
+        stripped = f"{instruction.keyword} {instruction.arguments}".strip()
         upper = stripped.upper()
         if upper.startswith("FROM "):
             issues.extend(
@@ -313,23 +329,6 @@ def format_compatibility_issues(
             f"{issue.code} {location}: {issue.message}. Hint: {issue.hint}",
         )
     return "\n".join(lines)
-
-
-def _logical_instructions(text: str) -> Iterator[tuple[int, str]]:
-    current: list[str] = []
-    start_line = 1
-    for line_no, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.rstrip()
-        if not current:
-            start_line = line_no
-        if line.endswith("\\"):
-            current.append(line[:-1].rstrip())
-            continue
-        current.append(line)
-        yield start_line, " ".join(part for part in current if part).strip()
-        current = []
-    if current:
-        yield start_line, " ".join(part for part in current if part).strip()
 
 
 def _node_major_from_from_instruction(instruction: str) -> int | None:

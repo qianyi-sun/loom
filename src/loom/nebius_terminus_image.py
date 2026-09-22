@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
+
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
 _DOCKERFILE_SUFFIX = ".loom-nebius"
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
 _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*\Z")
 _UV_INSTALL = re.compile(
-    r"curl -LsSf https://astral\.sh/uv/0\.9\.5/install\.sh\s*\|\s*sh\s*\Z",
+    r"curl -LsSf https://astral\.sh/uv/\d+\.\d+\.\d+/install\.sh\s*\|\s*sh\s*\Z",
 )
 _UV_SOURCE = re.compile(r'source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bin/env)\s*\Z')
 
@@ -114,7 +116,7 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         if words[:2] == ["uv", "venv"]:
             if (
                 len(words) != 5
-                or words[2] != "-p"
+                or words[2] not in {"-p", "--python"}
                 or not re.fullmatch(r"\d+\.\d+", words[3])
                 or not re.fullmatch(r"[A-Za-z0-9_.-]+", words[4])
                 or venv is not None
@@ -167,14 +169,14 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
                 indexes.extend((option, value))
                 position += 2
             if (
-                words[position : position + 1] != ["-p"]
+                words[position : position + 1] not in (["-p"], ["--python"])
                 or position + 1 >= len(words)
                 or not re.fullmatch(r"\d+\.\d+", words[position + 1])
             ):
                 raise ValueError("nebius-terminus: unsupported uvx Python declaration")
             python_version = words[position + 1]
             position += 2
-            while position + 1 < len(words) and words[position] == "-w":
+            while position + 1 < len(words) and words[position] in {"-w", "--with"}:
                 requirements.append(requirement(words[position + 1]))
                 position += 2
             if words[position : position + 1] != ["pytest"]:
@@ -259,15 +261,36 @@ def _bundle_path(staged: Path, value: str, *, directory: bool = False) -> Path:
 
 
 def _preparation_dockerfile(original: str, bootstrap: HarborOfflineBootstrap, workdir: str) -> str:
-    from_lines = re.findall(r"(?im)^FROM\s+(\S+)", original)
-    if not from_lines or not re.fullmatch(
+    try:
+        instructions = dockerfile_instructions(original)
+    except DockerfileParseError as exc:
+        raise ValueError(f"nebius-terminus: {exc}") from exc
+    stages: dict[str, str] = {}
+    final_base = ""
+    for instruction in instructions:
+        if instruction.keyword != "FROM":
+            continue
+        words = instruction.arguments.split()
+        if words and words[0].startswith("--platform="):
+            words.pop(0)
+        if not (len(words) == 1 or (len(words) == 3 and words[1].upper() == "AS")):
+            raise ValueError(
+                f"nebius-terminus: unsupported FROM instruction at line {instruction.line}"
+            )
+        final_base = stages.get(words[0].lower(), words[0])
+        if len(words) == 3:
+            alias = words[2].lower()
+            if alias in stages:
+                raise ValueError("nebius-terminus: duplicate Dockerfile stage alias")
+            stages[alias] = final_base
+    if not re.fullmatch(
         r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?))",
-        from_lines[-1],
+        final_base,
     ):
         raise ValueError(
             "nebius-terminus: image preparation supports Debian/Ubuntu final base images only"
         )
-    if re.search(r"(?im)^SHELL\s", original):
+    if any(instruction.keyword == "SHELL" for instruction in instructions):
         raise ValueError("nebius-terminus: custom Dockerfile SHELL requires explicit adaptation")
     packages = sorted(
         {

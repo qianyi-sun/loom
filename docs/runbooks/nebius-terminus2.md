@@ -298,7 +298,9 @@ adapters or image shapes fail with an adaptation error; configuration admission
 alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
 before a model batch. This adapter supports Debian/Ubuntu final images and the
-Harbor uv 0.9.5/preinstalled `uvx -p ... -w package==version ... pytest`,
+Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
+and preinstalled `uvx -p ... -w package==version ... pytest` (including the
+equivalent `--python` and `--with` options),
 exact-pinned pip plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Official Debian-based Python full
@@ -311,6 +313,20 @@ for its own executions, without making an upstream reproducibility claim. The pu
 opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
 [#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed
 bucket and pass `--minio-region` for signing.
+
+Dockerfile compatibility and image preparation share instruction-boundary
+parsing. Quoted, tab-stripped and multiple heredoc bodies remain opaque: a
+Python `from datetime` or literal `SHELL` inside a body cannot change the
+detected build stage. Continuations and an earlier stage alias are supported;
+unterminated heredocs and unresolved final base images fail before preparation
+writes derived outputs. Original stages and build-context files are retained.
+This does not repair unavailable base images, missing `COPY` sources, or task
+mocks, and it does not validate every Dockerfile instruction in place of
+BuildKit. Such package defects require an explicit, reviewable source repair.
+The build uses Loom's pinned uv provisioner and installs an explicitly declared
+verifier Python under `/opt/verifier-python`, preserving the task interpreter
+and PATH even when the task image uses an older Python. Incompatible dependency
+pins still fail the image build; they are never silently omitted or relaxed.
 
 This is distinct from `scripts/ops/prepare_nebius_terminal_bench.py`, which
 builds a one-task TaskSet upload. Use the TaskSet helper for a single adapted
