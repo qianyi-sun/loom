@@ -87,3 +87,18 @@ def login_environment(client: EnvironmentClient, environment_id: UUID) -> str:
         cfg.auth_csrf_token = csrf
         save_config(cfg)
     return name
+
+
+def open_environment_browser(client: EnvironmentClient, environment_id: UUID) -> bool:
+    import webbrowser
+    from urllib.parse import urlencode
+
+    # A second one-use proof: the CLI's proof has already been consumed. Read
+    # status again so a concurrent lifecycle change cannot select a stale host.
+    row = client.status(environment_id).registration
+    if row.environment_id != environment_id or row.scope != "personal" or row.desired_state != "active":
+        raise ValueError("personal environment is not ready")
+    origin = https_origin("https://" + row.public_host)
+    token = _verify_proof(row, client.login(environment_id))
+    # No proof in query parameters, stdout, exception text or config storage.
+    return webbrowser.open(origin + "/auth/managed#" + urlencode({"token": token}), new=2)

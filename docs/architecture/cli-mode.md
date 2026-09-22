@@ -1,6 +1,6 @@
 # CLI mode
 
-> This page describes the local `loom run` evaluator. The separate
+> This page primarily describes the local `loom run` evaluator. The separate
 > `loom pipeline ...` namespace is a service-mode client for official Recipe
 > PipelineRuns; it uses authenticated `/api/v1/pipeline-*` routes and does not
 > expose local execution or raw graph controls.
@@ -18,6 +18,33 @@ is hidden and deprecated; it warns and forwards its value, and the service
 rejects anything other than `nebius` in a hosted environment. See
 [Nebius service execution](nebius-service-execution.md) for the service-only
 deprecation boundary.
+
+## Explicit server contexts
+
+`loom --context NAME <command>` selects a separate config under
+`$XDG_CONFIG_HOME/loom/contexts/NAME.toml` (normally `~/.config/loom/contexts/`).
+Put the option before the command, including `auth`, `providers` and `eval`.
+Omitting it retains the existing `loom/config.toml`; there is no globally active
+context pointer, branch inference or credential copying between contexts.
+Writes are atomic and owner-private. Session rotation updates the file from which
+that session was loaded, even across nested context selections.
+
+After a managed personal environment is ready, run `loom dev login ENVIRONMENT_ID`
+using your management login. It obtains a short-lived one-use proof, consumes it
+at that environment's exact HTTPS origin and saves fresh child credentials in the
+printed `dev-SLUG-ENVIRONMENT_UUID_HEX` context. Use the printed
+`loom --context NAME auth whoami` command to verify the selected identity. Management
+credentials and local model-provider keys are not copied. Managed contexts retain
+their environment/incarnation/origin binding; login refresh cannot retarget them.
+Explicit child-local settings survive repeated login.
+
+Add `--browser` to also open a separate browser proof. Confirm sign-in on the
+personal environment page within 90 seconds. The browser proof is separate from
+the consumed CLI proof, carried only in a URL fragment and removed before app
+startup requests; it is never printed or saved in CLI config. A failed browser
+launch leaves the CLI login saved and requests a fresh browser login. This requires
+the managed child protocol in the deployed candidate; login alone is not proof
+that shared task execution or installed multi-owner acceptance is enabled.
 
 ## What the CLI actually does
 

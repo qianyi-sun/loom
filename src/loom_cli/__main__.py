@@ -44,6 +44,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run local evaluations and manage Loom datasets, providers, "
             "service-mode evaluations, workers, and deployments."
         ),
+        epilog="For isolated credentials: loom --context NAME COMMAND ... (put --context before the command).",
     )
     p.add_argument("--version", action="version", version=__version__)
     sub = p.add_subparsers(dest="cmd", required=True)
