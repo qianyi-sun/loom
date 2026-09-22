@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -183,3 +185,73 @@ def test_render_does_not_mutate_protected_inputs(platform_inputs):
     before = json.dumps(platform_inputs, sort_keys=True)
     rendered(platform_inputs)
     assert json.dumps(platform_inputs, sort_keys=True) == before
+
+
+def test_managed_offline_render_does_not_require_cloud_or_database_clients(platform_inputs, tmp_path):
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text(json.dumps(platform_inputs))
+    result = subprocess.run([sys.executable, "-I", "-c", """
+import importlib.abc
+import json
+import sys
+from pathlib import Path
+from uuid import UUID
+root, source = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'src'))
+class NoClients(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'kubernetes', 'sqlalchemy', 'asyncpg', 'nebius'}:
+            raise ModuleNotFoundError('offline renderer imported ' + fullname)
+sys.meta_path.insert(0, NoClients())
+from loom.nebius_environment_contract import FoundationBinding, new_environment_registration
+from loom.nebius_environment_render import render_environment
+config, candidate, profile = json.loads(source.read_text())
+foundation = FoundationBinding(platform_config_json=json.dumps(config), public_dns_zone='dev.example.com',
+    ingress_class_name='shared', ingress_namespace='ingress', ingress_controller_label='ingress')
+row = new_environment_registration(foundation, environment_id=UUID(int=1), incarnation=UUID(int=2),
+    owner_user_id=UUID(int=3), owner_team_id=UUID(int=4), slug='alice')
+rendered = render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=root)
+assert rendered.platform_envelope.cpu_millis == 1050
+""", str(ROOT), str(inputs)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("state", ["suspended", "destroyed"])
+def test_nonactive_registration_cannot_render_running_stack(platform_inputs, state):
+    from loom.nebius_environment_render import render_environment
+
+    config, candidate, profile = platform_inputs
+    foundation = foundation_from(config)
+    row = registration_for(foundation, "alice")
+    row = EnvironmentRegistrationV1.model_validate({**row.model_dump(), "desired_state": state})
+    with pytest.raises(ValueError, match="active"):
+        render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+
+
+def test_import_preserves_exact_existing_names_and_buckets(platform_inputs):
+    from loom.nebius_environment_render import render_environment
+
+    config, candidate, profile = platform_inputs
+    foundation = foundation_from(config)
+    row = registration_for(foundation, "alice")
+    row = EnvironmentRegistrationV1.model_validate({
+        **row.model_dump(), "binding_mode": "imported", "application_namespace": config["namespace"],
+        "execution_namespace": config["execution_namespace"], "build_namespace": config["execution_namespace"] + "-build",
+        "target_id": config["target_id"], "public_host": config["public_host"],
+    })
+    result = render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+    assert result.config["buckets"] == config["buckets"]
+    assert result.config["namespace"] == config["namespace"]
+    changed = EnvironmentRegistrationV1.model_validate({**row.model_dump(), "application_namespace": "loom-imported-other"})
+    with pytest.raises(ValueError, match="import"):
+        render_environment(changed, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+
+
+def test_standalone_builder_settings_do_not_enable_child_builds(platform_inputs):
+    platform_inputs[0]["task_image_builder"] = {
+        "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 2,
+    }
+    result = rendered(platform_inputs)
+    assert "task_image_builder" not in result.config
+    assert all(doc["metadata"].get("namespace") == result.registration.application_namespace
+               for doc in documents(result) if doc["kind"] in {"Job", "Deployment", "CronJob"})
