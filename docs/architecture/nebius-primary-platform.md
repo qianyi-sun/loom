@@ -302,6 +302,42 @@ backup/restore evidence,
 before selecting this `dev` candidate for deployment. Keep the previous
 branch-bound candidate for that deployment until the conversion is qualified.
 
+## Physical pool observation for managed environments
+
+`InClusterKubernetesCapacityReader.capture_pool` reads one Node/Pod/DaemonSet
+inventory for a protected physical-pool selector. It does not add per-environment
+node totals. Its `PoolObservationScope` contains registry-bound environment
+incarnations, execution/build namespaces and targets, plus protected gateway Job
+receipts. A Pod discounts a global reservation only when its namespace,
+controller Job UID/name, target, workload kind and local claim generation match
+that receipt. Labels alone, a lost create receipt, or a same-named replacement Job
+never establish ownership. Reservation UUIDs form placement-only keys, so the
+same local claim ID in different environment databases cannot alias.
+
+Foreign resident Pods and terminating nonterminal Pods remain charged. Pending
+Pods are also charged unless an unregistered Pod has a hard node selector that
+contradicts the selected pool. Unknown affinity or tolerations do not establish
+exclusion; this can conservatively delay admission. Duplicate native node IDs,
+Pod UIDs or live Pods for one reservation fail closed, as does registered work
+scheduled outside the pool. The existing resource arithmetic retains Pod slots,
+restartable init sidecars and init peaks. The pool reader preserves Pod-level
+requests from raw API pages because older Kubernetes SDK models omit that field.
+In-place resize is not qualified by this entrypoint: active resize conditions or
+status allocations exceeding requested resources block the affected pool inventory
+until convergence. Equal settled allocations and workloads already assigned to a
+different pool do not cause that block. It never treats a requested downsize as
+proof that kubelet has released the old resources.
+Only the sanitized resource/identity projection leaves the reader; Pod payloads,
+environment values and commands are not evidence. A scope fingerprint binds the
+observation to the registry and gateway receipts used for that capture.
+
+This is a read-only library entrypoint, not live global admission. The caller must
+bind the selector to the actual native node group, combine fresh provider quota
+evidence, and use the management ledger to retain unobserved grants. Existing
+single-target collection remains unchanged. Managed hosted execution stays
+disabled until the shared ledger, local claim protocol and protected Job-write
+gateway are integrated and qualified together.
+
 ## Native task-image capacity fairness
 
 Native build and trial admission share the existing capacity transaction lock,
