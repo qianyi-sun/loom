@@ -1,28 +1,165 @@
 --- a/agents/terminus_2/tmux_session.py
 +++ b/agents/terminus_2/tmux_session.py
-@@ -127 +127 @@
+@@ -78,6 +78,9 @@
+         self._markers: list[tuple[float, str]] = []
+         self._extra_env: dict[str, str] = extra_env or {}
+         self._user = user
++        self._asciinema_command = "asciinema"
++        self._legacy_tmux_buffers = False
++        self._paste_lock = asyncio.Lock()
+
+     # TODO: Add asciinema logging
+     # @property
+@@ -124,14 +127,33 @@
+         Install both tmux and asciinema in a single operation for efficiency.
+         """
+         # Check what's already installed
 -        tmux_result = await self.environment.exec(command="tmux -V", user="root")
 +        tmux_result = await self.environment.exec(command="tmux -V")
-@@ -133 +133 @@
+         tmux_installed = tmux_result.return_code == 0
++        self._legacy_tmux_buffers = bool(re.match(r"^tmux 1\.", (tmux_result.stdout or "").strip()))
+
+         needs_asciinema = self._remote_asciinema_recording_path is not None
+         if needs_asciinema:
+             asciinema_result = await self.environment.exec(
 -                command="asciinema --version", user="root"
+-            )
 +                command="asciinema --version"
-@@ -172 +172 @@
++            )
++            # Installed asciinema can reject even --version under the C locale.
++            # Try an installed UTF-8 locale before treating this as a missing tool
++            # and requesting privileged package installation (#2079).
++            if asciinema_result.return_code != 0:
++                locales = await self.environment.exec(command="locale -a", user=self._user)
++                candidates = [
++                    value for value in (locales.stdout or "").splitlines()
++                    if re.fullmatch(r"[A-Za-z0-9_.@-]+", value)
++                    and re.search(r"utf-?8", value, re.IGNORECASE)
++                ]
++                candidates.sort(key=lambda value: (not value.lower().startswith("c."), value))
++                for value in candidates:
++                    command = f"LC_ALL={shlex.quote(value)} asciinema"
++                    probe = await self.environment.exec(command=f"{command} --version", user=self._user)
++                    if probe.return_code == 0:
++                        self._asciinema_command = command
++                        asciinema_result = probe
++                        break
+             asciinema_installed = asciinema_result.return_code == 0
+         else:
+             asciinema_installed = True
+@@ -169,7 +191,7 @@
+                     # Verify installations
+                     if not tmux_installed:
+                         verify_tmux = await self.environment.exec(
 -                            command="tmux -V", user="root"
 +                            command="tmux -V"
-@@ -182 +182 @@
+                         )
+                         if verify_tmux.return_code != 0:
+                             self._logger.warning(
+@@ -179,7 +201,7 @@
+
+                     if needs_asciinema and not asciinema_installed:
+                         verify_asciinema = await self.environment.exec(
 -                            command="asciinema --version", user="root"
 +                            command="asciinema --version"
-@@ -214 +213,0 @@
+                         )
+                         if verify_asciinema.return_code != 0:
+                             self._logger.warning(
+@@ -211,11 +233,10 @@
+         # Check for OS release files
+         os_release_result = await self.environment.exec(
+             command="cat /etc/os-release 2>/dev/null || echo 'not found'",
 -            user="root",
-@@ -218 +217 @@
+         )
+
+         # Check uname for system type
 -        uname_result = await self.environment.exec(command="uname -s", user="root")
 +        uname_result = await self.environment.exec(command="uname -s")
-@@ -234 +233 @@
+
+         # Detect package managers by checking if they exist
+         package_managers = [
+@@ -231,7 +252,7 @@
+
+         for pm_name in package_managers:
+             check_result = await self.environment.exec(
 -                command=f"which {pm_name} >/dev/null 2>&1", user="root"
 +                command=f"which {pm_name} >/dev/null 2>&1"
-@@ -335 +334 @@
+             )
+             if check_result.return_code == 0:
+                 system_info["package_manager"] = pm_name
+@@ -332,7 +353,7 @@
+
+             # Verify installation
+             verify_result = await self.environment.exec(
 -                command="tmux -V || /usr/local/bin/tmux -V", user="root"
 +                command="tmux -V || /usr/local/bin/tmux -V"
-@@ -380 +379 @@
+             )
+             if verify_result.return_code == 0:
+                 self._logger.debug("tmux successfully built and installed from source")
+@@ -377,7 +398,7 @@
+                 if result.return_code == 0:
+                     # Verify installation
+                     verify_result = await self.environment.exec(
 -                        command="asciinema --version", user="root"
 +                        command="asciinema --version"
+                     )
+                     if verify_result.return_code == 0:
+                         self._logger.debug("asciinema successfully installed using pip")
+@@ -519,7 +540,7 @@
+             self._logger.debug("Starting recording.")
+             await self.send_keys(
+                 keys=[
+-                    f"asciinema rec --stdin {self._remote_asciinema_recording_path}",
++                    f"{self._asciinema_command} rec --stdin {self._remote_asciinema_recording_path}",
+                     "Enter",
+                 ],
+                 min_timeout_sec=1.0,
+@@ -651,6 +672,12 @@
+         )
+
+     async def _paste_key(self, key: str, action: str) -> None:
++        # tmux 1.x has an indexed buffer stack, not named buffers. Serialize its
++        # push/paste/pop sequence; each task owns its tmux server (#2080).
++        async with self._paste_lock:
++            await self._paste_key_locked(key, action)
++
++    async def _paste_key_locked(self, key: str, action: str) -> None:
+         """Deliver *key* to the pane via a tmux paste buffer.
+
+         ``tmux send-keys`` rejects commands above its internal message size
+@@ -669,6 +696,9 @@
+         token = uuid.uuid4().hex
+         quoted_path = shlex.quote(f"/tmp/.harbor-tmux-paste-{token}")
+         buffer_name = f"harbor-paste-{token}"
++        load_option = "" if self._legacy_tmux_buffers else f"-b {buffer_name} "
++        buffer_option = "-b 0" if self._legacy_tmux_buffers else f"-b {buffer_name}"
++        loaded = False
+         payload = base64.b64encode(key.encode("utf-8")).decode("ascii")
+
+         async def _run(command: str) -> None:
+@@ -682,13 +712,19 @@
+                 redirect = ">>" if offset else ">"
+                 await _run(f"printf %s {chunk} | base64 -d {redirect} {quoted_path}")
+
+-            await _run(
+-                f"tmux load-buffer -b {buffer_name} {quoted_path} && "
+-                f"tmux paste-buffer -d -b {buffer_name} "
+-                f"-t {shlex.quote(self._session_name)}"
+-            )
++            await _run(f"tmux load-buffer {load_option}{quoted_path}")
++            loaded = True
++            # Never retry paste: a failed response cannot prove that no input
++            # reached the shell. Keep deletion separate so cleanup owns it once.
++            await _run(f"tmux paste-buffer {buffer_option} -t {shlex.quote(self._session_name)}")
+         finally:
+-            await self.environment.exec(command=f"rm -f {quoted_path}", user=self._user)
++            try:
++                if loaded:
++                    await self.environment.exec(
++                        command=f"tmux delete-buffer {buffer_option}", user=self._user
++                    )
++            finally:
++                await self.environment.exec(command=f"rm -f {quoted_path}", user=self._user)
+
+     async def _send_single_key(self, key: str, action: str) -> None:
+         command = self._send_keys_command([key])
