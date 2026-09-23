@@ -3,7 +3,33 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from tests.support.minio_images import MINIO_TLS_IMAGE
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_dev_compose_minio_uses_quay_pin() -> None:
+    """Local Compose must not depend on Docker Hub minio/minio (#1969 / #1462)."""
+    compose = (REPO_ROOT / "deploy" / "docker-compose.dev.yml").read_text()
+    minio_block = compose.split("\n  minio:\n", 1)[1].split("\n\n  ", 1)[0]
+    image_line = next(
+        line for line in minio_block.splitlines() if line.strip().startswith("image:")
+    )
+    # Prefer the current Quay release digest (not the 2022 testcontainers pin):
+    # laptop volumes already store newer xl headers.
+    assert image_line.strip() == f"image: {MINIO_TLS_IMAGE}"
+    assert "image: minio/minio" not in compose
+
+
+def test_dev_compose_gateway_has_minio_credentials() -> None:
+    """GatewaySettings requires MinIO keys; keep local Compose aligned (#1462)."""
+    compose = (REPO_ROOT / "deploy" / "docker-compose.dev.yml").read_text()
+    gateway_block = compose.split("\n  llm-gateway:\n", 1)[1].split(
+        "\n\n  control-plane:\n", 1,
+    )[0]
+    assert "LOOM_GW_MINIO_ENDPOINT: http://minio:9000" in gateway_block
+    assert "LOOM_GW_MINIO_ACCESS_KEY:" in gateway_block
+    assert "LOOM_GW_MINIO_SECRET_KEY:" in gateway_block
 
 
 def test_web_dev_container_uses_lockfile_stable_bootstrap() -> None:
