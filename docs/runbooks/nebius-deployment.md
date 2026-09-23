@@ -286,6 +286,22 @@ existing public LoadBalancer. The protected ingress installer must verify exact
 Secret ownership/UID and delivered fingerprint before activation, and connect
 renewal to verified reload before enabling a schedule.
 
+### Ingress TLS delivery and rotation status
+
+`scripts/ops/nebius_ingress_gateway.py` supplies private delivery, journaled
+controller switching and per-Pod TLS qualification primitives. There is no live
+ingress-install command or workflow operation yet; do not invoke them manually
+against a shared cluster to bypass protected rollout authority.
+
+Their receipts distinguish `tls_delivered`, `controller_switch_observed` and
+`controller_qualified`. These mean, respectively, exact immutable Secret readback,
+an observed controller specification change, and current-Pod certificate proof.
+None establishes public DNS, selector cutover or management readiness. On an
+unknown create/switch outcome, preserve the private delivery/switch journals and
+old Secrets. Never erase the intent or repeat a write to make it disappear; only
+exact readback can reconcile it. Renewal stays unscheduled until the protected
+issuance, delivery, reload and public-route qualification are connected.
+
 ### Render management manifests
 
 Management HTTP requests default to a 1 MiB body limit, eight in-flight requests
