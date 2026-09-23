@@ -1,6 +1,7 @@
 """Behavioral boundaries for the bounded Harbor image preparation adapter."""
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -166,6 +167,36 @@ def test_unterminated_installer_guard_is_rejected() -> None:
     script = SCRIPT + "if ! command -v curl >/dev/null 2>&1; then\napt-get install -y curl\n"
     with pytest.raises(ValueError, match="nebius-terminus"):
         adapt_harbor_test_script(script)
+
+
+def test_guard_comment_backslash_cannot_hide_task_work() -> None:
+    script = (
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\n"
+        "# A shell comment does not continue onto the next physical line. \\\n"
+        "echo TASK_WORK\nfi\n" + SCRIPT
+    )
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
+@pytest.mark.parametrize("condition", ["true", "false"])
+def test_relocated_guard_preserves_enclosing_branch_semantics(condition: str) -> None:
+    script = (
+        f"if {condition}; then\n"
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\nfi\nfi\n"
+        "if [ $? -eq 0 ]; then echo TASK_WORK; fi\n"
+        "exit 0\n" + SCRIPT
+    )
+    # Exit before pytest: exercise real shell control flow without executing
+    # installers, changing system files, or requiring the verifier environment.
+    converted = adapt_harbor_test_script(script).script
+    syntax = subprocess.run(["bash", "-n"], input=converted, text=True, capture_output=True)
+    assert syntax.returncode == 0, syntax.stderr
+    result = subprocess.run(["bash"], input=converted, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "TASK_WORK\n"
 
 
 @pytest.mark.parametrize(
