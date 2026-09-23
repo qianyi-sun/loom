@@ -5,6 +5,7 @@ import asyncio
 from pathlib import PurePosixPath
 
 import docker
+import httpx
 import pytest
 
 from loom.driver.service_sandbox import ServiceSandboxDriver
@@ -42,7 +43,7 @@ async def service_sandboxes(native_binary, tmp_path):  # noqa: F811
                 try:
                     await driver.start()
                     break
-                except (OSError, RuntimeError):
+                except (OSError, RuntimeError, httpx.TransportError):
                     if attempt == 99:
                         raise
                     await asyncio.sleep(0.05)
@@ -55,6 +56,28 @@ async def service_sandboxes(native_binary, tmp_path):  # noqa: F811
         for container in reversed(containers):
             container.remove(force=True)
         client.close()
+
+
+async def test_native_workspace_handoff_keeps_deletions_and_private_inputs(service_sandboxes):
+    from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+
+    agent, verifier = service_sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec(
+            "mkdir -p /app/data && echo keep > /app/data/file && ln -s data /app/foo",
+        )).return_code == 0
+    assert (await agent.exec("unlink /app/foo")).return_code == 0
+    assert (await verifier.exec("mkdir /app/tests && echo private > /app/tests/secret")).return_code == 0
+    await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier, workdir=PurePosixPath("/app"),
+        policy=WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ()),
+    )
+    checked = await verifier.exec(
+        "test ! -L /app/foo && test ! -e /app/foo && "
+        'test "$(cat /app/data/file)" = keep && test "$(cat /app/tests/secret)" = private',
+    )
+    assert checked.return_code == 0, checked.stderr
 
 
 async def test_service_survives_consistent_snapshot_and_private_verifier(service_sandboxes, tmp_path):

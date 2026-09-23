@@ -133,7 +133,7 @@ async def test_snapshot_hooks_preserve_public_files_without_root(tmp_path: Path)
 
     from loom.models.exec import ExecResult
     from loom.trial.workspace import WorkspaceStagingPolicy
-    from loom.trial.workspace_snapshot import _strip_private_entries, _validate_workspace_archive
+    from loom.trial.workspace_snapshot import _import_workspace_archive, _strip_private_entries
 
     class LocalTransport(ServiceSandboxDriver):
         # Exercise the production archive hooks against real POSIX processes;
@@ -144,6 +144,7 @@ async def test_snapshot_hooks_preserve_public_files_without_root(tmp_path: Path)
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(cwd) if cwd else None,
             )
             stdout, stderr = await process.communicate()
             return ExecResult(
@@ -173,11 +174,15 @@ async def test_snapshot_hooks_preserve_public_files_without_root(tmp_path: Path)
         trusted_oracle_paths=(),
     )
     _strip_private_entries(archive, policy)
-    _validate_workspace_archive(archive, policy)
     destination = tmp_path / "verifier"
-    await driver.import_workspace_archive(archive, PurePosixPath(str(destination)))
+    (destination / "tests").mkdir(parents=True)
+    (destination / "tests" / "trusted.py").write_text("private verifier")
+    (destination / "deleted.txt").write_text("stale image state")
+    await _import_workspace_archive(driver, archive, PurePosixPath(str(destination)), policy=policy)
     assert (destination / "answer.txt").read_text() == "result"
     assert not (destination / "tests" / "forged.py").exists()
+    assert not (destination / "deleted.txt").exists()
+    assert (destination / "tests" / "trusted.py").read_text() == "private verifier"
 
 
 @pytest.mark.parametrize("reason", [

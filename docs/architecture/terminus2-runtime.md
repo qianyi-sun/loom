@@ -33,7 +33,11 @@ fresh verifier-only driver after Terminus-2 exits. The public agent workspace
 is handed to that driver as a validated archive snapshot so directory layout,
 regular-file modes, safe workspace-relative symlinks, and hardlinks remain
 score-equivalent. Traversal, absolute/private link targets, devices, FIFOs, and
-sockets fail closed. Cancellation waits for verifier-driver teardown before it
+sockets fail closed. Restoration replaces public workdir contents, including
+deletions, while preserving freshly staged private verifier inputs and their
+parent directories. It rejects symlink destinations, incomplete inventories,
+and archive entries that would replace a parent of a preserved private input
+before deleting public state. Cancellation waits for verifier-driver teardown before it
 propagates, preventing sandbox cleanup from racing network/sidecar teardown.
 
 ## Runtime shape

@@ -723,6 +723,13 @@ files and cross-root hardlinks are rejected. Ownership that the verifier cannot
 restore is an explicit handoff failure. This does not copy an entire writable
 container layer or expose private verifier dependencies to task mutations.
 
+The workdir snapshot also replaces public image and bundle contents rather than
+overlaying them, so files and symlinks removed by the agent stay absent during
+grading. Freshly staged private verifier inputs and their ancestors survive.
+Archive validation, a complete non-following destination inventory, and checks
+for symlink destinations and conflicting private ancestors precede deletion.
+Native cleanup and extraction both run as the sandbox's declared identity.
+
 An explicit `environment.service_lifecycle` retains task processes through the
 independent verifier. Its optional returning startup argv initializes the
 environment before agent execution; agent-owned services have no initializer.
