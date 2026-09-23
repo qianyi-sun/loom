@@ -103,3 +103,17 @@ def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -
 
     assert "registry.k8s.io/kubectl:v1.36.2@sha256:" in text
     assert "COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl" in text
+
+
+def test_task_image_compose_builder_installs_skopeo_on_pinned_dind_rootless() -> None:
+    """Compose Jobs need skopeo in the build image; upstream dind-rootless does not ship it."""
+    from loom_execution_actuator.task_image_renderer import COMPOSE_BUILDER_IMAGE
+
+    text = (ROOT / "deploy" / "Dockerfile.task-image-compose-builder").read_text()
+    digest = COMPOSE_BUILDER_IMAGE.split("@", 1)[1]
+    assert digest.startswith("sha256:") and len(digest) == 71
+    assert digest in text
+    assert "apk add --no-cache skopeo" in text
+    assert "command -v skopeo" in text
+    assert "docker compose version" in text
+    assert "USER 1000:1000" in text

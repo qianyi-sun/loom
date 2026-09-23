@@ -922,6 +922,7 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
         "max_processes",
         "active_deadline_seconds",
         "max_concurrent",
+        "builder_engine",
         "snapshotter",
         "compatible_revision_cache",
         "export_cache_mode",
@@ -944,6 +945,11 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
             "task image publication requires a dedicated primary Nebius task-images repository"
         )
     cache = supplied.get("cache_bucket")
+    engine = supplied.get("builder_engine", "buildkit")
+    if engine == "compose" and cache is not None:
+        raise NebiusPlatformError(
+            "compose builder cannot use BuildKit S3 cache (omit cache_bucket)"
+        )
     if cache is not None:
         _name(cache, "task image cache bucket")
         if cache in {
@@ -966,8 +972,10 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
             cache_secret_name="loom-task-build-cache" if cache else None,
             **{**supplied, "cache_bucket": cache},
         )
-    except ValueError:
-        raise NebiusPlatformError("invalid task image build resource limits or namespace") from None
+    except ValueError as exc:
+        raise NebiusPlatformError(
+            f"invalid task image build resource limits or namespace: {exc}"
+        ) from None
 
 
 def _task_image_builder_documents(config: dict[str, Any], settings: Any) -> list[dict[str, Any]]:

@@ -1,0 +1,19 @@
+# Loom-owned rootless Compose builder for Nebius task-image Jobs (#2086).
+# Provides dockerd + docker compose + skopeo so one Job can:
+#   compose build → skopeo copy docker-daemon: → oci-archive: → existing publish.
+#
+# Base matches the Nebius compose probe pin (linux/amd64). Rebuild and retarget
+# COMPOSE_BUILDER_IMAGE in task_image_renderer.py after publishing an immutable digest.
+ARG DOCKER_DIND_ROOTLESS=docker.io/library/docker:28-dind-rootless@sha256:95813f7e06959c7cbd0e5a6e357cb76bf97c20db85ee2d16c57122c340ded385
+FROM --platform=linux/amd64 ${DOCKER_DIND_ROOTLESS}
+
+USER root
+# skopeo is not in upstream dind-rootless; required for OCI export into /loom/build.
+RUN apk add --no-cache skopeo \
+    && command -v skopeo \
+    && command -v docker \
+    && command -v rootlesskit \
+    && docker compose version
+
+# Upstream image runs rootless dockerd as uid 1000.
+USER 1000:1000

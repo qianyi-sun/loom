@@ -21,6 +21,15 @@ BUILDKIT_IMAGE = (
     "docker.io/moby/buildkit:v0.33.0-rootless@"
     "sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef"
 )
+# Loom-owned rootless Compose builder (#2086). Until the first immutable
+# publish of deploy/Dockerfile.task-image-compose-builder, tests and Job
+# renders pin the upstream dind-rootless digest used as that Dockerfile's
+# FROM; production enablement must retarget this constant to the published
+# cr.eu-north1…/…@sha256:… image that includes skopeo.
+COMPOSE_BUILDER_IMAGE = (
+    "docker.io/library/docker:28-dind-rootless@"
+    "sha256:95813f7e06959c7cbd0e5a6e357cb76bf97c20db85ee2d16c57122c340ded385"
+)
 _IMAGE = re.compile(r"[^\s]+@sha256:[0-9a-f]{64}")
 _DNS_NAME = re.compile(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?")
 _CLAIM = "/loom/claim/claim.json"
@@ -42,7 +51,9 @@ class TaskImageJobConfig:
     registry_secret_name: str
     cache_secret_name: str | None = None
     registry_auth_kind: Literal["docker-config", "nebius"] = "docker-config"
+    builder_engine: Literal["buildkit", "compose"] = "buildkit"
     buildkit_image: str = BUILDKIT_IMAGE
+    compose_image: str = COMPOSE_BUILDER_IMAGE
     cpu_millis: int = 1000
     memory_mib: int = 2048
     ephemeral_storage_mib: int = MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB
@@ -53,7 +64,7 @@ class TaskImageJobConfig:
     oci_export_format: Literal["archive", "directory"] = "archive"
 
     def __post_init__(self) -> None:
-        for image in (self.service_image, self.buildkit_image):
+        for image in (self.service_image, self.buildkit_image, self.compose_image):
             if not _IMAGE.fullmatch(image):
                 raise ValueError("task-image containers require an immutable image reference")
         for secret in (self.source_secret_name, self.registry_secret_name, self.cache_secret_name):
@@ -71,12 +82,19 @@ class TaskImageJobConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.ephemeral_storage_mib < MIN_TASK_IMAGE_EPHEMERAL_STORAGE_MIB:
             raise ValueError("native task-image builds require at least 16 GiB ephemeral storage")
+        if self.builder_engine not in {"buildkit", "compose"}:
+            raise ValueError("task-image builder_engine must be buildkit or compose")
         if self.snapshotter not in {"overlayfs", "native"}:
             raise ValueError("task-image snapshotter must be overlayfs or native")
         if self.export_cache_mode not in {"max", "min"}:
             raise ValueError("task-image export_cache_mode must be max or min")
         if self.oci_export_format not in {"archive", "directory"}:
             raise ValueError("task-image oci_export_format must be archive or directory")
+        if self.builder_engine == "compose":
+            if self.cache_secret_name is not None:
+                raise ValueError("compose builder cannot mount BuildKit S3 cache secrets")
+            if self.oci_export_format != "archive":
+                raise ValueError("compose builder v1 only supports oci_export_format=archive")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -219,6 +237,153 @@ def _build_script(
     return "\n".join(lines) + "\n"
 
 
+def _dockerfile_path_in_context(dockerfile_path: str, context_path: str) -> str:
+    """Compose `dockerfile:` is resolved relative to the build context."""
+    dockerfile = PurePosixPath(dockerfile_path)
+    if context_path in {".", ""}:
+        return dockerfile.as_posix()
+    return dockerfile.relative_to(PurePosixPath(context_path)).as_posix()
+
+
+def _compose_build_script(
+    components: tuple[TaskImageBuildComponentV1, ...],
+    *,
+    platform: str,
+    max_processes: int,
+    build_timeout_seconds: int,
+    build_args: dict[str, str] | None = None,
+    build_target: str | None = None,
+) -> str:
+    """One rootless dockerd per Job; Compose build → skopeo OCI archive (#2086)."""
+    lines = [
+        "set -eu",
+        f"ulimit -u {max_processes}",
+        "mkdir -p /run/user/1000 /scratch/tmp /scratch/runtime /scratch/docker-config "
+        "/scratch/docker-data /scratch/docker-exec /loom/build/oci",
+        "chmod 700 /run/user/1000",
+        "export XDG_RUNTIME_DIR=/run/user/1000",
+        "export TMPDIR=/scratch/tmp",
+        "export DOCKER_CONFIG=/scratch/docker-config",
+        "export DOCKER_HOST=unix:///scratch/docker-exec/docker.sock",
+        f"export DOCKER_DEFAULT_PLATFORM={shlex.quote(platform)}",
+        "command -v docker >/dev/null",
+        "command -v rootlesskit >/dev/null",
+        "command -v skopeo >/dev/null",
+        "docker compose version >/dev/null",
+        "trap 'test -z \"${daemon_pid:-}\" || kill \"$daemon_pid\" 2>/dev/null || true' EXIT",
+        'echo \'{"loom_task_image_stage":"dockerd","event":"start"}\'',
+        "dockerd_started=$(date +%s)",
+        # Nested rootless dockerd (same recipe as Nebius compose probes).
+        "/usr/bin/rootlesskit --net=none --detach-netns --port-driver=none "
+        "--copy-up=/etc --copy-up=/run sh -ec '"
+        "exec dockerd --rootless --host=\"$DOCKER_HOST\" "
+        "--iptables=false --ip6tables=false --bridge=none "
+        "--ip-forward=false --ip-masq=false --userland-proxy=false "
+        "--data-root=/scratch/docker-data --exec-root=/scratch/docker-exec "
+        "--pidfile=/scratch/docker.pid"
+        "' >/scratch/daemon.log 2>&1 &",
+        "daemon_pid=$!",
+        "i=0",
+        "until docker version >/dev/null 2>&1; do",
+        "  i=$((i+1))",
+        "  if [ \"$i\" -ge 60 ] || ! kill -0 \"$daemon_pid\" 2>/dev/null; then",
+        "    cat /scratch/daemon.log >&2 || true",
+        "    exit 1",
+        "  fi",
+        "  sleep 1",
+        "done",
+        "dockerd_ended=$(date +%s)",
+        (
+            'echo \'{"loom_task_image_stage":"dockerd","event":"end",'
+            '"duration_ms":\'"$(( (dockerd_ended - dockerd_started) * 1000 ))"\'}\''
+        ),
+    ]
+    for index, component in enumerate(components):
+        context = PurePosixPath(_BUILD, "context", component.context_path).as_posix()
+        dockerfile_rel = _dockerfile_path_in_context(
+            component.dockerfile_path, component.context_path
+        )
+        image_tag = f"loom-compose-build/{index}:local"
+        output = f"{_BUILD}/{component.oci_output_path}"
+        compose_file = f"/scratch/compose-{index}.yml"
+        build_block = [
+            "    build:",
+            f"      context: {context}",
+            f"      dockerfile: {dockerfile_rel}",
+            "      network: host",
+        ]
+        if component.name == "task":
+            if build_target is not None:
+                build_block.append(f"      target: {build_target}")
+            if build_args:
+                build_block.append("      args:")
+                for key, value in sorted(build_args.items()):
+                    build_block.append(f"        {key}: {json.dumps(value)}")
+        compose_yaml = "\n".join(
+            [
+                "services:",
+                "  task:",
+                f"    image: {image_tag}",
+                *build_block,
+            ]
+        )
+        lines.extend(
+            [
+                (
+                    'echo \'{"loom_task_image_stage":"solve","event":"start",'
+                    f'"component_index":{index},"budget_seconds":{build_timeout_seconds},'
+                    '"builder_engine":"compose"}\''
+                ),
+                "solve_started=$(date +%s)",
+                f"cat > {shlex.quote(compose_file)} <<'LOOM_COMPOSE_EOF'",
+                compose_yaml,
+                "LOOM_COMPOSE_EOF",
+                "set +e",
+                (
+                    f"timeout -s TERM -k 10 {build_timeout_seconds} "
+                    f"docker compose -f {shlex.quote(compose_file)} --progress plain build"
+                ),
+                "rc=$?",
+                "set -e",
+                "solve_ended=$(date +%s)",
+                "if [ \"$rc\" -ne 0 ]; then",
+                # Shell: echo '{"…","exit":'"$rc"',"duration_ms":'"$((…))"'}'
+                (
+                    f'  echo \'{{"loom_task_image_stage":"solve","event":"end",'
+                    f'"component_index":{index},"failed":true,"exit":\'"$rc"\''
+                    f',"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
+                ),
+                "  case $rc in 124) exit 124 ;; *) exit 1 ;; esac",
+                "fi",
+                (
+                    f'echo \'{{"loom_task_image_stage":"solve","event":"end",'
+                    f'"component_index":{index},"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
+                ),
+                (
+                    f'echo \'{{"loom_task_image_stage":"oci_export","event":"start",'
+                    f'"component_index":{index}}}\''
+                ),
+                "export_started=$(date +%s)",
+                f"rm -f -- {shlex.quote(output)}",
+                (
+                    "skopeo copy --quiet "
+                    f"docker-daemon:{shlex.quote(image_tag)} "
+                    f"oci-archive:{shlex.quote(output)}"
+                ),
+                f"bytes=$(wc -c < {shlex.quote(output)})",
+                "export_ended=$(date +%s)",
+                (
+                    f'echo \'{{"loom_task_image_stage":"oci_export","event":"end",'
+                    f'"component_index":{index},"bytes":\'"$bytes"\''
+                    f',"duration_ms":\'"$(( (export_ended - export_started) * 1000 ))"\'}}\''
+                ),
+                f"docker image rm -f {shlex.quote(image_tag)} >/dev/null 2>&1 || true",
+            ]
+        )
+    lines.append("docker builder prune -af >/dev/null 2>&1 || true")
+    return "\n".join(lines) + "\n"
+
+
 def render_task_image_job(
     *,
     materialization_id: UUID,
@@ -309,7 +474,8 @@ def render_task_image_job(
             {"name": f"{phase_name}-tmp", "mountPath": "/tmp"},
         ]
         roles = ["source"] if phase_name == "prepare" else ["registry"]
-        if config.cache_secret_name is not None:
+        # BuildKit S3 cache only; compose engine never mounts it (settings reject).
+        if config.cache_secret_name is not None and config.builder_engine == "buildkit":
             roles.append("cache")
         mounts.extend(
             {"name": role, "mountPath": f"{_CREDENTIALS}/{role}", "readOnly": True}
@@ -340,29 +506,58 @@ def render_task_image_job(
             "terminationMessagePolicy": "File",
         }
 
-    builder = {
-        "name": "build",
-        "image": config.buildkit_image,
-        "imagePullPolicy": "IfNotPresent",
-        "command": [
-            "sh",
-            "-c",
-            _build_script(
-                checked,
-                platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
-                max_processes=config.max_processes,
-                cache_enabled=config.cache_secret_name is not None,
-                build_timeout_seconds=(
-                    math.ceil(environment.build_timeout_sec)
-                    if environment else config.active_deadline_seconds
-                ),
-                build_args=environment.docker_build_args if environment else None,
-                build_target=environment.docker_build_target if environment else None,
-                export_cache_mode=config.export_cache_mode,
-                oci_export_format=config.oci_export_format,
-            ),
-        ],
-        "env": [
+    build_timeout_seconds = (
+        math.ceil(environment.build_timeout_sec)
+        if environment
+        else config.active_deadline_seconds
+    )
+    build_args = environment.docker_build_args if environment else None
+    build_target = environment.docker_build_target if environment else None
+    compose = config.builder_engine == "compose"
+    if compose:
+        builder_command = _compose_build_script(
+            checked,
+            platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
+            max_processes=config.max_processes,
+            build_timeout_seconds=build_timeout_seconds,
+            build_args=build_args,
+            build_target=build_target,
+        )
+        builder_image = config.compose_image
+        builder_env = [
+            {"name": "TMPDIR", "value": "/scratch/tmp"},
+            {"name": "DOCKER_CONFIG", "value": "/scratch/docker-config"},
+            {"name": "XDG_RUNTIME_DIR", "value": "/run/user/1000"},
+            {"name": "DOCKER_HOST", "value": "unix:///scratch/docker-exec/docker.sock"},
+        ]
+        builder_security = {
+            **security,
+            "allowPrivilegeEscalation": True,
+            "capabilities": {"drop": ["ALL"], "add": ["SETUID", "SETGID"]},
+            "seccompProfile": {"type": "Unconfined"},
+            "appArmorProfile": {"type": "Unconfined"},
+            "procMount": "Unmasked",
+        }
+        builder_mounts = [
+            shared_mount,
+            {"name": "builder-tmp", "mountPath": "/scratch"},
+            {"name": "builder-tmp", "mountPath": "/tmp"},
+            {"name": "run-user", "mountPath": "/run/user/1000"},
+        ]
+    else:
+        builder_command = _build_script(
+            checked,
+            platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
+            max_processes=config.max_processes,
+            cache_enabled=config.cache_secret_name is not None,
+            build_timeout_seconds=build_timeout_seconds,
+            build_args=build_args,
+            build_target=build_target,
+            export_cache_mode=config.export_cache_mode,
+            oci_export_format=config.oci_export_format,
+        )
+        builder_image = config.buildkit_image
+        builder_env = [
             {"name": "TMPDIR", "value": "/scratch/tmp"},
             {"name": "DOCKER_CONFIG", "value": "/scratch/docker-config"},
             {"name": "XDG_RUNTIME_DIR", "value": "/scratch/runtime"},
@@ -373,22 +568,31 @@ def render_task_image_job(
                     f"--oci-worker-snapshotter={config.snapshotter}"
                 ),
             },
-        ],
-        "resources": {"requests": resources.copy(), "limits": resources.copy()},
-        "securityContext": {
+        ]
+        builder_security = {
             **security,
             "allowPrivilegeEscalation": True,
             "capabilities": {"drop": ["ALL"], "add": ["SETUID", "SETGID"]},
             "seccompProfile": {"type": "Unconfined"},
             "appArmorProfile": {"type": "Unconfined"},
-        },
-        "volumeMounts": [
+        }
+        builder_mounts = [
             shared_mount,
             {"name": "builder-tmp", "mountPath": "/scratch"},
             # rootlesskit also creates bind0 under literal
             # /tmp even when TMPDIR points into /scratch.
             {"name": "builder-tmp", "mountPath": "/tmp"},
-        ],
+        ]
+
+    builder = {
+        "name": "build",
+        "image": builder_image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["sh", "-c", builder_command],
+        "env": builder_env,
+        "resources": {"requests": resources.copy(), "limits": resources.copy()},
+        "securityContext": builder_security,
+        "volumeMounts": builder_mounts,
         "terminationMessagePath": "/dev/termination-log",
         "terminationMessagePolicy": "File",
     }
@@ -411,12 +615,16 @@ def render_task_image_job(
             )
         ),
     ]
+    if compose:
+        volumes.append({"name": "run-user", "emptyDir": {"medium": "Memory", "sizeLimit": "32Mi"}})
     for role, secret_name in (
         ("source", config.source_secret_name),
         ("cache", config.cache_secret_name),
         ("registry", config.registry_secret_name),
     ):
         if secret_name is not None:
+            if role == "cache" and compose:
+                continue
             keys = (
                 (
                     ("credentials.json",)
@@ -476,6 +684,9 @@ def render_task_image_job(
         "initContainers": [phase("prepare"), builder],
         "containers": [phase("publish")],
     }
+    if compose:
+        # Nested rootless dockerd requires a user namespace (compose probes).
+        pod["hostUsers"] = False
     if target.runtime_class_name is not None:
         pod["runtimeClassName"] = target.runtime_class_name
     job = {

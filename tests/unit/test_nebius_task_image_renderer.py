@@ -496,3 +496,112 @@ def test_native_selector_rejects_conflicting_target_constraints(inputs, constrai
     inputs["target"] = replace(inputs["target"], node_selector={constraint: value})
     with pytest.raises(ValueError, match="architecture conflicts"):
         render_task_image_job(**inputs)
+
+
+def test_compose_engine_renders_dockerd_job_without_buildkit(inputs) -> None:
+    from loom_execution_actuator.task_image_renderer import COMPOSE_BUILDER_IMAGE
+
+    inputs["config"] = replace(
+        inputs["config"],
+        builder_engine="compose",
+        cache_secret_name=None,
+    )
+    _, job = render_task_image_job(**inputs)
+    pod = job["spec"]["template"]["spec"]
+    assert pod["hostUsers"] is False
+    prepare, builder = pod["initContainers"]
+    (publish,) = pod["containers"]
+    assert builder["image"] == COMPOSE_BUILDER_IMAGE
+    assert "BUILDKITD_FLAGS" not in {entry["name"] for entry in builder["env"]}
+    script = builder["command"][-1]
+    assert "dockerd --rootless" in script
+    assert "docker compose" in script
+    assert "skopeo copy" in script
+    assert "buildctl-daemonless.sh" not in script
+    assert "DOCKER_DEFAULT_PLATFORM=linux/amd64" in script
+    assert "dockerfile: Dockerfile" in script
+    assert "dockerfile: Dockerfile.db" in script
+    assert builder["securityContext"]["procMount"] == "Unmasked"
+    assert {mount["name"] for mount in prepare["volumeMounts"]} & {"cache"} == set()
+    assert {mount["name"] for mount in publish["volumeMounts"]} & {"cache"} == set()
+    assert next(v for v in pod["volumes"] if v["name"] == "run-user")["emptyDir"]["medium"] == "Memory"
+    assert any(m["name"] == "build" and m.get("readOnly") for m in publish["volumeMounts"])
+
+
+def test_compose_engine_nested_dockerfile_is_relative_to_context(inputs) -> None:
+    inputs["components"] = (
+        TaskImageBuildComponentV1(
+            name="task",
+            dockerfile_path="root/docker/Dockerfile",
+            context_path="root",
+            oci_output_path="oci/0000.tar",
+        ),
+    )
+    inputs["config"] = replace(
+        inputs["config"],
+        builder_engine="compose",
+        cache_secret_name=None,
+    )
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    assert "context: /loom/build/context/root" in script
+    assert "dockerfile: docker/Dockerfile" in script
+
+
+def test_compose_engine_stage_echoes_are_valid_json(inputs) -> None:
+    import json
+    import subprocess
+
+    inputs["config"] = replace(
+        inputs["config"],
+        builder_engine="compose",
+        cache_secret_name=None,
+    )
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    echo_lines = [
+        line.strip()
+        for line in script.splitlines()
+        if "loom_task_image_stage" in line and line.strip().lstrip().startswith("echo ")
+    ]
+    assert len(echo_lines) >= 5
+    # Evaluate each echo under bash with stub expansions; require parseable JSON.
+    for line in echo_lines:
+        out = subprocess.check_output(
+            [
+                "bash",
+                "-c",
+                "rc=7; bytes=99; dockerd_started=1; dockerd_ended=2; "
+                "solve_started=3; solve_ended=5; export_started=6; export_ended=8; "
+                + line,
+            ],
+            text=True,
+        ).strip()
+        payload = json.loads(out)
+        assert payload["loom_task_image_stage"] in {"dockerd", "solve", "oci_export"}
+
+
+def test_compose_engine_rejects_cache_secret(inputs) -> None:
+    with pytest.raises(ValueError, match="compose builder cannot mount"):
+        replace(inputs["config"], builder_engine="compose", cache_secret_name="cache-access")
+
+
+def test_native_settings_compose_rejects_buildkit_cache_knobs() -> None:
+    from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+
+    base = dict(
+        namespace="loom-builds",
+        service_image="registry.example/service@sha256:" + "a" * 64,
+        storage_endpoint="https://storage.example",
+        storage_region="eu-north1",
+        source_bucket="artifacts",
+        registry_repository="cr.eu-north1.nebius.cloud/test/task-images",
+        builder_engine="compose",
+    )
+    NativeTaskImageSettings(**base)
+    with pytest.raises(ValueError, match="BuildKit S3 cache"):
+        NativeTaskImageSettings(**base, cache_bucket="cache")
+    with pytest.raises(ValueError, match="compatible_revision_cache"):
+        NativeTaskImageSettings(**base, compatible_revision_cache="same_task")
+    with pytest.raises(ValueError, match="snapshotter"):
+        NativeTaskImageSettings(**base, snapshotter="native")
