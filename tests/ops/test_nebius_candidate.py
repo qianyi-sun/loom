@@ -159,6 +159,9 @@ def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path, enabled: boo
     )
     assert create.returncode == 0, create.stderr
     profile = json.loads((output / "runtime-profile.json").read_text())
+    assert profile["execution_class_id"] == (
+        "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+    )
     for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
         if enabled:
             assert profile[capability] is True
@@ -430,6 +433,9 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     else:
         manifest = json.loads((output / "candidate.json").read_text())
         profile = json.loads((output / "runtime-profile.json").read_text())
+        assert profile["execution_class_id"] == (
+            "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+        )
         assert "worker" not in manifest["images"]
         assert "tb90_task" not in manifest["images"]
         assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
