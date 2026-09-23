@@ -49,8 +49,10 @@ from loom.db.schema import (
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
+    NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
     CapacityEvidenceKind,
     ExecutionAdapterKind,
+    ExecutionClassV1,
     ExecutionRouteCandidateV1,
     ExecutionRoutingDecisionV1,
     ExecutionRoutingReason,
@@ -240,7 +242,10 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
             )
             await session.execute(
                 delete(ServiceExecutionClass).where(
-                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id
+                    ServiceExecutionClass.id.in_((
+                        NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1.class_id,
+                    ))
                 )
             )
             await session.execute(
@@ -342,11 +347,15 @@ class _FakeKubernetesJobApi:
         return events
 
 
-def _target(suffix: str) -> ExecutionTargetV1:
+def _target(
+    suffix: str,
+    *,
+    execution_class_id: str = NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+) -> ExecutionTargetV1:
     return ExecutionTargetV1(
         target_id=f"nebius-staging-{suffix}",
         logical_pool_id="nebius-cpu",
-        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        execution_class_id=execution_class_id,
         cluster_scope_id="nebius-eu-north1-shared",
         environment="staging",
         provider="nebius",
@@ -395,6 +404,7 @@ def _requirements(
 
 def _runtime_contract(
     *,
+    execution_class_id: str = NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
     execution_role: str = "attempt",
     verifier_execution: str = "in_attempt",
     now: datetime | None = None,
@@ -411,7 +421,7 @@ def _runtime_contract(
         task_revision_sha256="sha256:" + "2" * 64,
         command_identity_sha256="sha256:" + "3" * 64,
         execution_role=execution_role,
-        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        execution_class_id=execution_class_id,
         composition="init_payload",
         task_image_ref=task_image_ref,
         runtime_image_ref=runtime_image_ref,
@@ -533,12 +543,13 @@ async def _seed_ready_trial(
     *,
     now: datetime,
     task_id: str | None = None,
+    execution_class: ExecutionClassV1 = NEBIUS_CPU_EXECUTION_CLASS_V1,
 ) -> tuple[UUID, ExecutionTargetV1]:
     suffix = uuid4().hex[:12]
     team_id = uuid4()
     trial_id = uuid4()
     task_id = task_id or f"service-execution/{suffix}"
-    target = _target(suffix)
+    target = _target(suffix, execution_class_id=execution_class.class_id)
     session.add_all(
         (
             Team(id=team_id, name=f"service-execution-{suffix}"),
@@ -560,7 +571,7 @@ async def _seed_ready_trial(
     )
     await persist_execution_catalog(
         session,
-        execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1,
+        execution_class=execution_class,
         targets=(target,),
     )
     await set_execution_target_health(
@@ -683,10 +694,12 @@ async def _reserve(
         session,
         request_id=request_id or uuid4(),
         trial_id=trial_id,
-        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        execution_class_id=target.execution_class_id,
         target_id=target.target_id,
         requirements=requirements or _requirements(),
-        runtime_contract=runtime_contract or _runtime_contract(now=now),
+        runtime_contract=runtime_contract or _runtime_contract(
+            now=now, execution_class_id=target.execution_class_id,
+        ),
         image_admission_keyring=IMAGE_ADMISSION_KEYRING,
         parent_lease_id=parent_lease_id,
         deadline_at=now + timedelta(seconds=deadline_seconds),
