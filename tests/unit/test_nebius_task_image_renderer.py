@@ -516,8 +516,10 @@ def test_compose_engine_renders_dockerd_job_without_buildkit(inputs) -> None:
     script = builder["command"][-1]
     assert "dockerd --rootless" in script
     assert "docker compose" in script
+    assert "docker buildx create" in script
     assert "skopeo copy" in script
     assert "buildctl-daemonless.sh" not in script
+    assert "cache_to:" not in script
     assert "DOCKER_DEFAULT_PLATFORM=linux/amd64" in script
     assert "dockerfile: Dockerfile" in script
     assert "dockerfile: Dockerfile.db" in script
@@ -581,12 +583,31 @@ def test_compose_engine_stage_echoes_are_valid_json(inputs) -> None:
         assert payload["loom_task_image_stage"] in {"dockerd", "solve", "oci_export"}
 
 
-def test_compose_engine_rejects_cache_secret(inputs) -> None:
-    with pytest.raises(ValueError, match="compose builder cannot mount"):
-        replace(inputs["config"], builder_engine="compose", cache_secret_name="cache-access")
+def test_compose_engine_shared_cache_wires_buildx_local_export(inputs) -> None:
+    inputs["config"] = replace(
+        inputs["config"],
+        builder_engine="compose",
+        cache_secret_name="cache-access",
+        export_cache_mode="min",
+    )
+    _, job = render_task_image_job(**inputs)
+    pod = job["spec"]["template"]["spec"]
+    prepare, builder = pod["initContainers"]
+    (publish,) = pod["containers"]
+    assert "cache" in {mount["name"] for mount in prepare["volumeMounts"]}
+    assert "cache" in {mount["name"] for mount in publish["volumeMounts"]}
+    assert "cache" not in {mount["name"] for mount in builder["volumeMounts"]}
+    assert any(v["name"] == "cache" for v in pod["volumes"])
+    script = builder["command"][-1]
+    assert "docker buildx create --name loom-compose --driver docker-container --use" in script
+    assert "cache_to:" in script
+    assert "type=local,dest=/loom/build/cache-out/0,mode=min" in script
+    assert "type=local,src=/loom/build/cache-in/0" in script
+    assert "cache_export_missing" in script
+    assert "--builder loom-compose build --load" in script
 
 
-def test_native_settings_compose_rejects_buildkit_cache_knobs() -> None:
+def test_native_settings_compose_allows_s3_cache_knobs() -> None:
     from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 
     base = dict(
@@ -597,11 +618,13 @@ def test_native_settings_compose_rejects_buildkit_cache_knobs() -> None:
         source_bucket="artifacts",
         registry_repository="cr.eu-north1.nebius.cloud/test/task-images",
         builder_engine="compose",
+        cache_bucket="cache",
+        compatible_revision_cache="same_task",
+        export_cache_mode="min",
+        cache_transfer="tar",
     )
     NativeTaskImageSettings(**base)
-    with pytest.raises(ValueError, match="BuildKit S3 cache"):
-        NativeTaskImageSettings(**base, cache_bucket="cache")
-    with pytest.raises(ValueError, match="compatible_revision_cache"):
-        NativeTaskImageSettings(**base, compatible_revision_cache="same_task")
     with pytest.raises(ValueError, match="snapshotter"):
         NativeTaskImageSettings(**base, snapshotter="native")
+    with pytest.raises(ValueError, match="oci_export_format"):
+        NativeTaskImageSettings(**{**base, "oci_export_format": "directory"})

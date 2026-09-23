@@ -240,15 +240,26 @@ def test_task_image_builder_compose_engine_allowlist(platform_inputs: tuple) -> 
     assert settings.get("cache_bucket") is None
 
 
-def test_task_image_builder_compose_rejects_cache_bucket(platform_inputs: tuple) -> None:
+def test_task_image_builder_compose_allows_cache_bucket(platform_inputs: tuple) -> None:
     config, candidate, profile = platform_inputs
     config["task_image_builder"] = {
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         "builder_engine": "compose",
         "cache_bucket": "loom-integration-artifacts-cache",
+        "compatible_revision_cache": "same_task",
+        "export_cache_mode": "min",
     }
-    with pytest.raises(NebiusPlatformError, match="compose builder cannot use BuildKit S3 cache"):
-        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    actuator = next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "Deployment")
+    env = {
+        row["name"]: row.get("value")
+        for row in actuator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    settings = json.loads(env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"])
+    assert settings["builder_engine"] == "compose"
+    assert settings["cache_bucket"] == "loom-integration-artifacts-cache"
+    assert settings["compatible_revision_cache"] == "same_task"
+    assert settings["export_cache_mode"] == "min"
 
 
 @pytest.fixture

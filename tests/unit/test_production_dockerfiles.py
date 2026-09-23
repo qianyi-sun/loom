@@ -106,7 +106,7 @@ def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -
 
 
 def test_task_image_compose_builder_installs_skopeo_on_pinned_dind_rootless() -> None:
-    """Compose Jobs need skopeo in the build image; upstream dind-rootless does not ship it."""
+    """Compose Jobs need skopeo + buildx in the build image; upstream dind lacks skopeo."""
     from loom_execution_actuator.task_image_renderer import COMPOSE_BUILDER_IMAGE
 
     text = (ROOT / "deploy" / "Dockerfile.task-image-compose-builder").read_text()
@@ -116,4 +116,6 @@ def test_task_image_compose_builder_installs_skopeo_on_pinned_dind_rootless() ->
     assert "apk add --no-cache skopeo" in text
     assert "command -v skopeo" in text
     assert "docker compose version" in text
+    assert "docker buildx version" in text
     assert "USER 1000:1000" in text
+    assert "docker-container" in text
