@@ -5,25 +5,36 @@ Generation publication is not a Kubernetes write or a public routing cutover.
 """
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
+import shlex
+import signal
 import ssl
 import stat
+import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
+
+ROOT = Path(__file__).resolve().parents[2]
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(ROOT))
 
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 _GENERATION = re.compile(r"[0-9a-f]{64}")
@@ -166,6 +177,16 @@ def _write_private(path: Path, value: bytes) -> None:
         os.fsync(stream.fileno())
 
 
+def _atomic_json(path: Path, value: dict[str, Any]) -> None:
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".selection-", delete=False) as stream:
+        pending = Path(stream.name)
+        stream.write(json.dumps(value, sort_keys=True).encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(pending, path)
+    _sync_directory(path.parent)
+
+
 def _publish(root: Path, chain: bytes, key: bytes, report: dict[str, Any]) -> dict[str, Any]:
     previous = _selected(root)
     if previous is not None and previous["sans"] != report["sans"]:
@@ -192,13 +213,7 @@ def _publish(root: Path, chain: bytes, key: bytes, report: dict[str, Any]) -> di
                 "previous_generation": previous["generation"] if previous else None, **report}
     # Keep partially written generations for private recovery, but never select
     # them. Only the atomic manifest replacement changes the deliverable result.
-    with tempfile.NamedTemporaryFile(dir=root, prefix=".selection-", delete=False) as stream:
-        pending = Path(stream.name)
-        stream.write(json.dumps(selected, sort_keys=True).encode())
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(pending, root / "selected.json")
-    _sync_directory(root)
+    _atomic_json(root / "selected.json", selected)
     return selected
 
 
@@ -209,3 +224,203 @@ def publish_certificate(root: Path, chain: bytes, key: bytes, *, child_domain: s
                                   management_host=management_host, now=now, roots=roots)
     with _locked_state(root):
         return _publish(root, chain, key, report)
+
+
+def load_installation(path: Path) -> dict[str, Any]:
+    try:
+        if not path.is_absolute() or path != path.resolve():
+            raise CertificateError("protected certificate configuration must use an absolute private path")
+        value = json.loads(_private_read(path, limit=16_384))
+        fields = {"schema", "installation_id", "zone", "child_domain", "management_host", "credential_file", "state_dir", "email"}
+        if (not isinstance(value, dict) or set(value) != fields
+                or value["schema"] != "loom.nebius-certificate-installation.v1"
+                or not all(isinstance(value[field], str) for field in fields - {"email"})
+                or UUID(value["installation_id"]).int == 0):
+            raise CertificateError("invalid protected certificate configuration")
+        names = certificate_names(value["child_domain"], value["management_host"])
+        if not _HOST.fullmatch(value["zone"]) or not all(name.endswith("." + value["zone"]) for name in names):
+            raise CertificateError("certificate subjects must belong to the protected DNS zone")
+        if value["email"] is not None and (not isinstance(value["email"], str)
+                or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9.-]{1,253}", value["email"])):
+            raise CertificateError("invalid ACME contact")
+        for field in ("state_dir", "credential_file"):
+            candidate = Path(value[field])
+            if not candidate.is_absolute() or candidate != candidate.resolve():
+                raise CertificateError("certificate paths must be absolute and not traverse symlinks")
+        return value
+    except CertificateError:
+        raise
+    except (OSError, ValueError, TypeError, RecursionError):
+        raise CertificateError("protected certificate configuration unavailable") from None
+
+
+def _bind_installation(root: Path, config: dict[str, Any]) -> None:
+    path = root / "installation.json"
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        _atomic_json(path, config)
+    else:
+        if load_installation(path) != config:
+            raise CertificateError("certificate state belongs to a different installation")
+
+
+def _clean_challenges(root: Path, config: dict[str, Any]) -> None:
+    challenges = root / "challenges"
+    _private_directory(challenges)
+    entries: list[Path] = []
+    for entry in challenges.iterdir():
+        if len(entries) >= 4096:
+            raise CertificateError("certificate challenge journal exceeds bound")
+        entries.append(entry)
+    for path in entries:
+        raw = _private_read(path, limit=262_144)
+        if re.fullmatch(r"[0-9a-f]{64}\.lock", path.name) and not raw:
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}\.json", path.name):
+            raise CertificateError("unknown challenge state requires reconciliation")
+        try:
+            value = json.loads(raw)
+            if not isinstance(value, dict) or value.get("stage") != "deleted":
+                raise CertificateError("unresolved DNS challenge requires reconciliation")
+            identity = {key: value[key] for key in ("schema", "zone", "domain", "validation")}
+            if (identity["schema"] != "loom.dns-challenge.v1" or identity["zone"] != config["zone"]
+                    or identity["domain"] not in {config["child_domain"], config["management_host"]}
+                    or not isinstance(identity["validation"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{43}", identity["validation"])
+                    or hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() != path.stem):
+                raise CertificateError("unknown challenge ownership requires reconciliation")
+        except (ValueError, KeyError, TypeError, RecursionError):
+            raise CertificateError("invalid challenge state requires reconciliation") from None
+
+
+def _certbot_version() -> str:
+    try:
+        return importlib.metadata.version("certbot")
+    except importlib.metadata.PackageNotFoundError:
+        raise CertificateError("pinned certificate client unavailable") from None
+
+
+def _run_client(args: list[str], *, timeout: int, start_new_session: bool,
+                stdout: int, stderr: int) -> subprocess.CompletedProcess[bytes]:
+    # No ambient proxy, Python module path or TLS-root override reaches Certbot
+    # or its hooks. Logs are private files controlled by --logs-dir.
+    environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
+    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                               env=environment, start_new_session=start_new_session, umask=0o077)
+    try:
+        result = process.wait(timeout=timeout)
+    except BaseException:
+        # Certbot invokes child hooks. Kill the entire process group before
+        # releasing our lock, including after timeout or operator interruption.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        raise
+    return subprocess.CompletedProcess(args, result)
+
+
+def _lineage_material(root: Path) -> tuple[bytes, bytes]:
+    archive = root / "acme" / "archive" / "loom-managed"
+    if archive != archive.resolve():
+        raise CertificateError("certificate archive must not traverse symlinks")
+    result = []
+    for name, limit in (("fullchain", 65_536), ("privkey", 16_384)):
+        live = root / "acme" / "live" / "loom-managed" / (name + ".pem")
+        resolved = live.resolve(strict=True)
+        if resolved.parent != archive or not re.fullmatch(name + r"[1-9][0-9]*\.pem", resolved.name):
+            raise CertificateError("certificate lineage escapes the owned archive")
+        result.append(_private_read(resolved, limit=limit))
+    return result[0], result[1]
+
+
+def issue_certificate(config_path: Path, *, now: datetime | None = None,
+                      roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
+    config = load_installation(config_path)
+    root = Path(config["state_dir"])
+    now = now or datetime.now(UTC)
+    try:
+        with _locked_state(root):
+            _bind_installation(root, config)
+            if _certbot_version() != "5.8.0":
+                raise CertificateError("certificate client version differs from qualified pin")
+            journal = root / "issuance.json"
+            if journal.exists() or journal.is_symlink():
+                value = json.loads(_private_read(journal))
+                if (not isinstance(value, dict) or value.get("schema") != "loom.nebius-issuance.v1"
+                        or value.get("stage") != "complete"):
+                    raise CertificateError("unresolved issuance requires reconciliation; no automatic retry")
+            _clean_challenges(root, config)
+            for directory in ("acme", "work", "logs"):
+                _private_directory(root / directory)
+            hook = [sys.executable, str(Path(__file__).resolve()), "hook"]
+            args = [sys.executable, "-c", "from certbot.main import main; raise SystemExit(main())",
+                    "certonly", "--config", "/dev/null", "--non-interactive",
+                    "--agree-tos", "--server", "https://acme-v02.api.letsencrypt.org/directory", "--manual",
+                    "--preferred-challenges", "dns", "--cert-name", "loom-managed", "--keep-until-expiring",
+                    "--no-directory-hooks", "--config-dir", str(root / "acme"), "--work-dir", str(root / "work"),
+                    "--logs-dir", str(root / "logs"), "--max-log-backups", "3", "--key-type", "ecdsa",
+                    "--manual-auth-hook", shlex.join([*hook, "auth", "--config", str(root / "installation.json")]),
+                    "--manual-cleanup-hook", shlex.join([*hook, "cleanup", "--config", str(root / "installation.json")])]
+            args += ["--email", config["email"]] if config["email"] else ["--register-unsafely-without-email"]
+            for name in certificate_names(config["child_domain"], config["management_host"]):
+                args += ["--domain", name]
+            intent = {"schema": "loom.nebius-issuance.v1", "stage": "running", "started_at": now.isoformat()}
+            _atomic_json(journal, intent)
+            # A failed process or failed validation deliberately leaves running
+            # intent. A later run must reconcile, never silently repeat a write.
+            result = _run_client(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 timeout=1800, start_new_session=True)
+            if result.returncode:
+                raise CertificateError("ACME client failed; preserve private logs and reconcile")
+            _clean_challenges(root, config)
+            chain, key = _lineage_material(root)
+            report = validate_certificate(chain, key, child_domain=config["child_domain"],
+                                          management_host=config["management_host"], now=now, roots=roots)
+            selected = _publish(root, chain, key, report)
+            _atomic_json(journal, {**intent, "stage": "complete", "generation": selected["generation"]})
+            return {"status": "qualified", "installation_id": config["installation_id"], **selected}
+    except CertificateError:
+        raise
+    except Exception:
+        raise CertificateError("certificate issuance failed; preserve private state and reconcile") from None
+
+
+def certificate_hook(config_path: Path, action: str) -> str:
+    config = load_installation(config_path)
+    domain = os.environ.get("CERTBOT_DOMAIN", "")
+    allowed = {config["child_domain"], "*." + config["child_domain"], config["management_host"]}
+    if domain not in allowed or action not in {"auth", "cleanup"}:
+        raise CertificateError("certificate hook is outside the protected subject allowlist")
+    # Imported only after scope checks; this module is an operations dependency,
+    # not a provider SDK available to application-mode code.
+    from scripts.ops.nebius_dns_challenge import GoDaddyDNS, load_token, run_hook, wait_for_txt
+
+    with GoDaddyDNS(config["zone"], domain.removeprefix("*."), load_token(Path(config["credential_file"]))) as provider:
+        return run_hook(provider, state_dir=Path(config["state_dir"]) / "challenges", action=action,
+                        certbot_domain=domain, validation=os.environ.get("CERTBOT_VALIDATION", ""), wait=wait_for_txt)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="operation", required=True)
+    issue = sub.add_parser("issue")
+    issue.add_argument("--config", type=Path, required=True)
+    hook = sub.add_parser("hook")
+    hook.add_argument("action", choices=("auth", "cleanup"))
+    hook.add_argument("--config", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = (issue_certificate(args.config) if args.operation == "issue"
+                  else {"status": certificate_hook(args.config, args.action)})
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Exception:
+        print("certificate operation failed; preserve private state and reconcile", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

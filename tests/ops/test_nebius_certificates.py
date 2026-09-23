@@ -5,8 +5,10 @@ import importlib
 import json
 import os
 import subprocess
-from pathlib import Path
+import sys
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from cryptography import x509
@@ -227,6 +229,12 @@ def test_issuer_pins_client_and_scope_then_publishes_only_validated_output(tmp_p
 
     def client(args, **kwargs):
         calls.append(args)
+        # An actual isolated client check catches nonexistent module entrypoints
+        # without calling ACME or requiring Certbot in the application test env.
+        if executable := os.environ.get("LOOM_TEST_CERTBOT_PYTHON"):
+            help_result = subprocess.run([executable, *args[1:3], "--help", "all"], capture_output=True, timeout=30)
+            assert help_result.returncode == 0, help_result.stderr.decode()
+            assert b"--no-directory-hooks" in help_result.stdout
         assert kwargs["stdout"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.DEVNULL
         assert kwargs["timeout"] == 1800 and kwargs["start_new_session"] is True
         assert "--force-renewal" not in args and "--run-deploy-hooks" not in args
@@ -320,3 +328,76 @@ def test_certbot_live_symlink_cannot_export_foreign_private_file(tmp_path, monke
     with pytest.raises(module().CertificateError):
         module().issue_certificate(config, now=NOW, roots=roots)
     assert not (tmp_path / "certificate-state" / "selected.json").exists()
+
+
+def test_real_client_process_keeps_files_private_and_drops_ambient_credentials(tmp_path, monkeypatch):
+    output = tmp_path / "child-state.json"
+    monkeypatch.setenv("LOOM_PRIVATE_SENTINEL", "private-credential")
+    script = "import os,json,sys; open(sys.argv[1], 'w').write(json.dumps(dict(os.environ)))"
+    result = module()._run_client([sys.executable, "-c", script, str(output)], timeout=10,
+                                  start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    assert result.returncode == 0
+    assert output.stat().st_mode & 0o077 == 0
+    assert "private-credential" not in output.read_text()
+
+
+def test_real_client_timeout_terminates_descendant_hook_before_unlocking(tmp_path):
+    pid_file = tmp_path / "pid"
+    script = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(90)']); "
+              "open(sys.argv[1],'w').write(str(p.pid)); time.sleep(90)")
+    with pytest.raises(subprocess.TimeoutExpired):
+        module()._run_client([sys.executable, "-c", script, str(pid_file)], timeout=1,
+                              start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pid = int(pid_file.read_text())
+    for _ in range(50):
+        status = Path(f"/proc/{pid}/stat")
+        if not status.exists() or status.read_text().split()[2] in {"Z", "X"}:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("timed-out Certbot left a live hook process")
+
+
+def test_two_issuers_cannot_enter_same_state(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    with module()._locked_state(tmp_path / "certificate-state"), pytest.raises(module().CertificateError):
+        module().issue_certificate(config, now=NOW)
+
+
+@pytest.mark.parametrize("domain", ["dev.example.test", "*.dev.example.test", "management.example.test"])
+def test_hook_adds_and_cleans_only_selected_subject_through_real_dns_boundary(tmp_path, monkeypatch, domain):
+    import httpx
+    from scripts.ops import nebius_dns_challenge as dns
+
+    config = installation(tmp_path)
+    state = tmp_path / "certificate-state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv("CERTBOT_DOMAIN", domain)
+    monkeypatch.setenv("CERTBOT_VALIDATION", "v" * 43)
+    record_name = "_acme-challenge." + domain.removeprefix("*.").removesuffix(".example.test")
+    records = [{"recordId": "foreign", "name": record_name, "type": "TXT", "ttl": 600, "data": "foreign"}]
+    factory = dns.GoDaddyDNS
+
+    def provider(zone, subject, token):
+        assert subject == domain.removeprefix("*.") and zone == "example.test" and token == "private-pat"
+
+        def transport(request):
+            if request.method == "GET":
+                return httpx.Response(200, json={"items": records[:]})
+            if request.method == "POST":
+                records.append({"recordId": "owned", **json.loads(request.content)})
+                return httpx.Response(201, json=records[-1])
+            assert request.method == "DELETE" and request.url.path.endswith("/owned")
+            records.pop()
+            return httpx.Response(204)
+
+        return factory(zone, subject, token, transport=httpx.MockTransport(transport))
+
+    monkeypatch.setattr(dns, "GoDaddyDNS", provider)
+    monkeypatch.setattr(dns, "wait_for_txt", lambda *args: None)
+    assert module().certificate_hook(config, "auth") == "present"
+    with pytest.raises(module().CertificateError):
+        module()._clean_challenges(state, module().load_installation(config))
+    assert module().certificate_hook(config, "cleanup") == "cleaned"
+    assert [row["recordId"] for row in records] == ["foreign"]
+    module()._clean_challenges(state, module().load_installation(config))
