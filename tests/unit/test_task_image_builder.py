@@ -262,12 +262,12 @@ async def test_builder_rejects_storage_before_client_construction_or_claim(
     assert client_constructed is False
 
 
-async def test_materialization_rejects_non_native_builder_architecture(
+async def test_materialization_rejects_non_execution_builder_architecture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(task_image_builder, "host_cpu_arch", lambda: "x86_64")
 
-    with pytest.raises(RuntimeError, match="native architecture"):
+    with pytest.raises(RuntimeError, match="execution architecture"):
         await task_image_builder.materialize_and_publish_task_images(
             _claim(cpu_arch="arm64"),
             _settings(),  # type: ignore[arg-type]

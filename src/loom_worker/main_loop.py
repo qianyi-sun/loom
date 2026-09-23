@@ -151,6 +151,13 @@ def _tb21_workspace_staging_policy_from_provenance(
 
 
 def _host_cpu_arch() -> str:
+    # Disposable local Compose runs on Apple Silicon but publishes/runs the
+    # supported execution architecture (x86_64) via Docker Desktop qemu (#1462).
+    from loom.execution_architecture import execution_cpu_arch
+    from loom.service_execution_backend import local_execution_enabled
+
+    if local_execution_enabled():
+        return execution_cpu_arch("any")
     machine = platform.machine().lower()
     if machine in {"aarch64", "arm64"}:
         return "arm64"

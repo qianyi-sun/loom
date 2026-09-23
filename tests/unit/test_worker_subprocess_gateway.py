@@ -8,6 +8,7 @@ from loom_worker.main_loop import (
 
 
 def test_host_cpu_arch_normalizes_arm64_names(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
     monkeypatch.setattr("loom_worker.main_loop.platform.machine", lambda: "aarch64")
     assert _host_cpu_arch() == "arm64"
 
@@ -15,7 +16,16 @@ def test_host_cpu_arch_normalizes_arm64_names(monkeypatch) -> None:  # type: ign
     assert _host_cpu_arch() == "arm64"
 
 
+def test_local_execution_advertises_x86_64_on_apple_silicon(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
+    monkeypatch.setattr("loom_worker.main_loop.platform.machine", lambda: "arm64")
+    assert _host_cpu_arch() == "x86_64"
+
+
 def test_host_cpu_arch_normalizes_x86_64(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
     monkeypatch.setattr("loom_worker.main_loop.platform.machine", lambda: "x86_64")
     assert _host_cpu_arch() == "x86_64"
 
@@ -24,6 +34,7 @@ def test_host_cpu_arch_normalizes_x86_64(monkeypatch) -> None:  # type: ignore[n
 
 
 def test_host_cpu_arch_rejects_unknown_architecture(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
     monkeypatch.setattr("loom_worker.main_loop.platform.machine", lambda: "riscv64")
     with pytest.raises(RuntimeError, match="unsupported"):
         _host_cpu_arch()

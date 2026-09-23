@@ -210,13 +210,9 @@ def _wait_task_image_materialization_ready(
     *,
     timeout_sec: float,
 ) -> None:
-    machine = platform.machine().lower()
-    if machine in {"x86_64", "amd64"}:
-        cpu_arch = "x86_64"
-    elif machine in {"aarch64", "arm64"}:
-        cpu_arch = "arm64"
-    else:
-        raise RuntimeError(f"unsupported system-smoke builder architecture {machine!r}")
+    # Local compose publishes the supported execution architecture (x86_64),
+    # including on Apple Silicon hosts that cross-build via Docker Desktop.
+    cpu_arch = "x86_64"
 
     engine = create_engine(DB_URL)
     deadline = time.monotonic() + timeout_sec
