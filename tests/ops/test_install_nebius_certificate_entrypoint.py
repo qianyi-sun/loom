@@ -106,3 +106,14 @@ def test_incomplete_or_changed_installed_tooling_does_not_authorize_key(inputs):
         module().install(bundle, expected_sha256=digest, public_key=key, apply=True)
     assert keys.read_bytes() == before
     assert os.stat(keys).st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("separator", ["\t", "  ", " \t "])
+def test_existing_same_key_with_ssh_whitespace_cannot_keep_broader_authority(inputs, separator):
+    root, keys, key, bundle, digest = inputs
+    fields = key.split()
+    keys.write_text(keys.read_text() + fields[0] + separator + fields[1] + " unrestricted\n")
+    before = keys.read_bytes()
+    with pytest.raises(module().InstallError, match="different authority"):
+        module().install(bundle, expected_sha256=digest, public_key=key, apply=True)
+    assert keys.read_bytes() == before and not root.exists()
