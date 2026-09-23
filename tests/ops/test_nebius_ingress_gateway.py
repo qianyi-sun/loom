@@ -5,6 +5,7 @@ import copy
 import importlib
 import json
 import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -302,3 +303,62 @@ def test_new_selected_pod_during_tls_probe_prevents_qualification(controller):
     api.probe_tls = probe
     with pytest.raises(module().IngressError):
         module().qualify_controller(**arguments)
+
+
+@pytest.mark.parametrize("wrong_certificate", [False, True])
+def test_real_tls_probe_uses_verified_hostname_and_stops_forwarder(inputs, tmp_path, monkeypatch, wrong_certificate):
+    import hashlib
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    binding = inputs[1]
+    chain, key, roots = material(names=("*.dev.example.test", "foreign.example.test") if wrong_certificate else (
+        "*.dev.example.test", "management.example.test"))
+    certificate, private = tmp_path / "server.crt", tmp_path / "server.key"
+    certificate.write_bytes(chain)
+    private.write_bytes(key)
+    private.chmod(0o600)
+    fixture = tmp_path / "kubectl-fixture"
+    fixture.write_text(f'''#!{sys.executable}
+import socket, ssl, time
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain({str(certificate)!r}, {str(private)!r})
+with socket.socket() as server:
+    server.bind(("127.0.0.1", 0)); server.listen()
+    print("Forwarding from 127.0.0.1:%d -> 8443" % server.getsockname()[1], flush=True)
+    connection, address = server.accept()
+    try:
+        with context.wrap_socket(connection, server_side=True) as stream:
+            stream.recv(1)
+    except ssl.SSLError:
+        connection.close()
+    time.sleep(30)
+''')
+    fixture.chmod(0o700)
+    config = tmp_path / "kubeconfig"
+    config.write_text("private fixture configuration")
+    config.chmod(0o600)
+    context = ssl.create_default_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode())
+    monkeypatch.setattr(ssl, "create_default_context", lambda: context)
+    api = module().KubectlControllerAPI(config, binding=binding, executable=fixture)
+    uid = str(uuid4())
+    monkeypatch.setattr(api, "get_pod", lambda namespace, name: {"metadata": {"uid": uid}})
+    processes = []
+    original = subprocess.Popen
+
+    def start(argv, **kwargs):
+        assert argv[4:] == ["port-forward", "--address=127.0.0.1", "-n", binding.namespace, "pod/ingress", ":8443"]
+        child = original(argv, **kwargs)
+        processes.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    if wrong_certificate:
+        with pytest.raises(module().IngressError):
+            api.probe_tls(binding.namespace, "ingress", uid, binding.management_host)
+    else:
+        expected = hashlib.sha256(x509.load_pem_x509_certificate(chain).public_bytes(serialization.Encoding.DER)).hexdigest()
+        assert api.probe_tls(binding.namespace, "ingress", uid, binding.management_host) == expected
+    assert len(processes) == 1 and processes[0].returncode is not None
