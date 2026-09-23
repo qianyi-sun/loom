@@ -37,6 +37,10 @@ from scripts.ops.nebius_registry_auth import refresh_registry_auth
 from scripts.validate_trivy_release_report import validate_trivy_release_report
 from scripts.write_trivy_release_policy import write_release_policy
 
+from loom.execution_contract import (
+    NEBIUS_CPU_EXECUTION_CLASS_V1,
+    NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+)
 from loom.execution_image_admission import (
     ExecutionImageAdmissionBundleV1,
     ImageAdmissionKeyring,
@@ -264,7 +268,10 @@ def create_candidate(
     ]
     profile = ServiceExecutionRuntimeProfileV1(
         candidate_sha=document["candidate_sha"],
-        execution_class_id="linux-amd64-cpu-pod-v1",
+        execution_class_id=(
+            NEBIUS_CPU_WEB_EXECUTION_CLASS_V1.class_id if supports_task_web_egress
+            else NEBIUS_CPU_EXECUTION_CLASS_V1.class_id
+        ),
         controller_resources=ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
         task_image_ref=document["images"]["service"]["image_ref"],
         runtime_image_ref=document["images"]["execution_runtime"]["image_ref"],
