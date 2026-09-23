@@ -144,8 +144,9 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
 
     def check_keys() -> bytes:
         previous = _read(keys, 1024 * 1024)
+        same_key = re.compile(rb"(?:^|[ \t])ssh-ed25519[ \t]+" + re.escape(key.split()[1].encode()) + rb"(?:[ \t]|$)")
         for existing in previous.splitlines():
-            if key.encode() in existing and existing != line.rstrip(b"\n"):
+            if same_key.search(existing) and existing != line.rstrip(b"\n"):
                 raise InstallError("public key already has different authority")
         return previous
 
