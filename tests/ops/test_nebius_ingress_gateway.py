@@ -179,13 +179,14 @@ def test_kubectl_transport_checks_identity_before_secret_create(inputs, tmp_path
     writes = []
 
     def run(argv, **kwargs):
-        assert argv[:4] == ["/usr/bin/kubectl", "--kubeconfig", str(config), "--request-timeout=30s"]
+        assert argv[:6] == ["/usr/bin/kubectl", "--kubeconfig", str(config), "--request-timeout=30s",
+                           "--cache-dir", str(tmp_path / ".loom-ingress-kubectl-cache")]
         assert kwargs["capture_output"] and kwargs["timeout"] == 40
         assert kwargs["env"] == {"PATH": "/bin:/usr/bin", "LANG": "C.UTF-8"}
         if "create" in argv:
             writes.append(json.loads(kwargs["input"]))
             return subprocess.CompletedProcess(argv, 0, b"secret/fixture", b"")
-        name = argv[6]
+        name = argv[8]
         uid = binding.kube_system_uid if name == "kube-system" else binding.namespace_uid
         if case == "foreign-cluster" and name == "kube-system":
             uid = str(uuid4())
@@ -200,6 +201,7 @@ def test_kubectl_transport_checks_identity_before_secret_create(inputs, tmp_path
     if case == "matching":
         api.create_secret(document)
         assert writes == [document]
+        assert (tmp_path / ".loom-ingress-kubectl-cache").stat().st_mode & 0o077 == 0
     else:
         with pytest.raises(module().IngressError) as error:
             api.create_secret(document)
@@ -369,7 +371,7 @@ with socket.socket() as server:
     original = subprocess.Popen
 
     def start(argv, **kwargs):
-        assert argv[4:] == ["port-forward", "--address=127.0.0.1", "-n", binding.namespace, "pod/ingress", ":8443"]
+        assert argv[6:] == ["port-forward", "--address=127.0.0.1", "-n", binding.namespace, "pod/ingress", ":8443"]
         child = original(argv, **kwargs)
         processes.append(child)
         return child
