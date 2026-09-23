@@ -237,7 +237,6 @@ def test_wait_materialization_fails_fast_when_builder_container_exits(
 
     clock = iter((0.0, 0.0, 2.0))
     monkeypatch.setattr(docker_compose, "create_engine", lambda _url: _Engine())
-    monkeypatch.setattr(docker_compose.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(docker_compose.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(docker_compose.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
