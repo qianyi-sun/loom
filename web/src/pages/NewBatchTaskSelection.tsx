@@ -39,7 +39,18 @@ export function NewBatchTaskSelection({
 }: NewBatchViewState): JSX.Element {
   return (
     <Card>
-      <Card.Header title="Task selection" description="Pick a purpose, then choose sources for this batch." />
+      <Card.Header
+        title="Task selection"
+        description="Pick a purpose, then choose sources for this batch."
+        actions={
+          <Link
+            to="/task-sets/new"
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+          >
+            + Submit Task Set
+          </Link>
+        }
+      />
       <Card.Body className="min-w-0 space-y-5">
         <fieldset className="min-w-0">
           <legend className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-500">
@@ -84,17 +95,9 @@ export function NewBatchTaskSelection({
         >
           {batchPurpose === "trajectory_generation" ? (
             <div className="min-w-0">
-              <div className="flex min-w-0 items-center justify-between gap-2">
-                <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "primary"}>
-                  TaskSets
-                </FieldLabel>
-                <Link
-                  to="/task-sets"
-                  className="mb-1 shrink-0 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
-                >
-                  Manage TaskSets
-                </Link>
-              </div>
+              <FieldLabel hint={subsetKind === "explicit" ? "implied by ids" : "primary"}>
+                TaskSets
+              </FieldLabel>
               <BenchmarkPicker
                 items={(evalTaskSets.data?.items ?? [])
                   .filter((ts) => ts.status === "ready" || ts.status === "partial")

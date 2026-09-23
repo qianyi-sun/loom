@@ -1266,6 +1266,9 @@ describe("NewBatch", () => {
     expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
     expect(screen.queryByText(/^TaskSets$/i)).not.toBeInTheDocument();
     expect(
+      screen.getByRole("link", { name: "+ Submit Task Set" }),
+    ).toHaveAttribute("href", "/task-sets/new");
+    expect(
       screen.queryByRole("link", { name: "Manage TaskSets" }),
     ).not.toBeInTheDocument();
     expect(
@@ -1284,8 +1287,11 @@ describe("NewBatch", () => {
     );
     expect(screen.getByText(/^TaskSets$/i)).toBeInTheDocument();
     expect(
-      screen.getByRole("link", { name: "Manage TaskSets" }),
-    ).toHaveAttribute("href", "/task-sets");
+      screen.queryByRole("link", { name: "Manage TaskSets" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "+ Submit Task Set" }),
+    ).toHaveAttribute("href", "/task-sets/new");
     expect(screen.getByText(/^Official benchmarks$/i)).toBeInTheDocument();
     expect(
       screen.getByText(/^Official benchmarks$/i).parentElement,

@@ -8,7 +8,16 @@ import { expect, test } from "./fixtures/guardedTest";
 // never submit a batch, contact a model, or navigate to the external docs.
 test.use({ contextOptions: { reducedMotion: "reduce" } });
 
-const coreNavigation = ["Home", "New batch", "Monitor", "Pipelines", "Run Library", "Providers", "Task sets", "Settings"];
+const coreNavigation = [
+  "Home",
+  "New batch",
+  "Monitor",
+  "Pipelines",
+  "Run Library",
+  "Providers",
+  "Getting started",
+  "Settings",
+];
 const member = { id: "team-eai", name: "EAI", role: "member" };
 const memberAuth = {
   user: { id: "quickstart-member", username: "Member", email: "member@example.test", display_name: "Member", is_platform_admin: false },
