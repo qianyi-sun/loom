@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.auth import verify_step_jwt
 from loom.db.schema import AdminAuditEvent, GatewayDispatchReceipt, ProviderConnection, Trial
-from loom_control_plane.service_execution_output import mint_service_execution_peer_token
+from loom_control_plane.service_execution_output import (
+    ServiceExecutionPeerV1,
+    authorize_service_execution_peer,
+    mint_service_execution_peer_token,
+)
 from loom_llm_gateway.deadline_canary_receipts import resolve_receipt
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
@@ -18,9 +22,26 @@ from tests.integration.test_service_execution_leases import (
 )
 
 
-@pytest.mark.parametrize("tamper", ["grant", "generation", "revoked", "provider"])
+@pytest.mark.parametrize("observed_state", ["creating", "running"])
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "grant",
+        "generation",
+        "revoked",
+        "provider",
+        "missing_pod",
+        "replaced_pod",
+        "actor",
+        "deadline",
+        "resource_generation",
+        "deleted",
+        "delivery",
+        "expired_grant",
+    ],
+)
 async def test_native_receipt_requires_real_mint_and_current_lease(
-    postgres_url: str, tamper: str
+    postgres_url: str, tamper: str, observed_state: str
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -30,7 +51,9 @@ async def test_native_receipt_requires_real_mint_and_current_lease(
         async with sessions() as session:
             tid, target = await _seed_ready_trial(session, now=now)
             lease = await _reserve(session, trial_id=tid, target=target, now=now)
-            lease.observed_state = "running"
+            lease.observed_state = observed_state
+            lease.pod_uid = str(uuid4())
+            lease.pod_ip = "10.24.7.19"
             trial = await session.get(Trial, tid)
             session.add(
                 ProviderConnection(
@@ -47,6 +70,16 @@ async def test_native_receipt_requires_real_mint_and_current_lease(
             )
             await session.flush()
             trial.provider_connection_id = provider_id
+            await session.flush()
+            lease = await authorize_service_execution_peer(
+                session,
+                peer_ip=str(lease.pod_ip),
+                identity=ServiceExecutionPeerV1(
+                    lease_id=lease.id,
+                    generation=lease.generation,
+                    execution_role="attempt",
+                ),
+            )
             token, _, grant_id = await mint_service_execution_peer_token(
                 session,
                 lease=lease,
@@ -94,18 +127,45 @@ async def test_native_receipt_requires_real_mint_and_current_lease(
                 lease.generation += 1
             elif tamper == "revoked":
                 lease.revoked_at = now
+            elif tamper == "resource_generation":
+                # The resource generation is immutable. Advance the lease and
+                # audit together to isolate its older Pod resource fence.
+                lease.generation += 1
+                grant = await session.scalar(
+                    select(AdminAuditEvent).where(
+                        AdminAuditEvent.event_metadata["step_jwt_id"].astext == str(grant_id),
+                    )
+                )
+                grant.event_metadata = {**grant.event_metadata, "generation": lease.generation}
+            elif tamper == "deleted":
+                lease.deleted_at = now
+                lease.observed_state = "deleted"
+                lease.desired_state = "deleted"
+            elif tamper == "missing_pod":
+                lease.pod_uid = None
+            elif tamper == "replaced_pod":
+                lease.pod_uid = str(uuid4())
+            elif tamper == "deadline":
+                row.attempt_deadline_wall_clock = now - timedelta(seconds=1)
             else:
                 grant = await session.scalar(
                     select(AdminAuditEvent).where(
                         AdminAuditEvent.event_metadata["step_jwt_id"].astext == str(grant_id),
                     )
                 )
-                grant.event_metadata = {
-                    **grant.event_metadata,
-                    "provider_connection_id": str(uuid4()),
-                }
+                if tamper == "actor":
+                    grant.actor = "service-execution-pod:" + str(uuid4())
+                elif tamper == "delivery":
+                    grant.event_metadata = {**grant.event_metadata, "credential_delivery": "other"}
+                elif tamper == "expired_grant":
+                    grant.created_at = now - timedelta(seconds=481)
+                else:
+                    grant.event_metadata = {
+                        **grant.event_metadata,
+                        "provider_connection_id": str(uuid4()),
+                    }
             await session.flush()
-            with pytest.raises(ValueError, match=r"grant|lease"):
+            with pytest.raises(ValueError, match=r"grant|lease|receipt"):
                 await resolve_receipt(session, **args)
             await session.rollback()
     finally:

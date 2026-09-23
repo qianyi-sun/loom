@@ -19,6 +19,13 @@ fabricated legacy `agent_attempt_id`. Missing, replaced, foreign or expired
 authority fails closed. Rotation may change the grant ID, but cannot extend the
 phase or transfer the request to another lease.
 
+The lifecycle readback may still say `creating` after the Pod authenticates and
+starts a request. The reader accepts `creating` or `running` only when the real
+mint audit names the current observed Pod, uses `observed_pod_peer` delivery,
+and matches the current lease and resource generation. A missing/replaced Pod,
+deleted lease or stale generation still fails closed; lifecycle state alone
+does not prove authority.
+
 Collect the actual phase start/end, configured budget and termination grace;
 measure output persistence separately. Join runtime result, Trial, canonical
 trajectory/ATIF and Gateway call/receipt records. Verify the exact lease's

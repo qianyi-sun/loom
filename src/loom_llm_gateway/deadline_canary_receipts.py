@@ -81,14 +81,24 @@ async def resolve_receipt(
             raise ValueError("native receipt grant is not eligible")
         grant = grants[0]
         metadata = grant.event_metadata
-        lease = await session.get(ServiceExecutionLease, UUID(grant.target_id))
+        lease = await session.get(
+            ServiceExecutionLease, UUID(grant.target_id), populate_existing=True
+        )
         if (
             lease is None
             or lease.trial_id != trial_id
             or lease.team_id != team_id
             or lease.execution_role != "attempt"
             or row.step_id != "agent"
-            or lease.observed_state != "running"
+            # Pod peer authorization can mint while asynchronous lifecycle
+            # observation still says creating. Bind that proof to the current
+            # Pod and resource generation instead of waiting for running.
+            or lease.observed_state not in {"creating", "running"}
+            or not lease.pod_uid
+            or grant.actor != f"service-execution-pod:{lease.pod_uid}"
+            or metadata.get("credential_delivery") != "observed_pod_peer"
+            or lease.resource_generation != lease.generation
+            or lease.deleted_at is not None
             or lease.revoked_at is not None
             or lease.desired_state not in {"create", "start"}
             or metadata.get("generation") != lease.generation
