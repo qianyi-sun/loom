@@ -36,7 +36,7 @@ REPOSITORY = f"loom-task-image-attempts/arm64/{ATTEMPT_ID}/task"
 
 
 def _config(postgres_url: str) -> Config:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", postgres_url)
     return config
 

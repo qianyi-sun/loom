@@ -1199,7 +1199,7 @@ def test_service_release_selects_exact_nebius_runtime_companion() -> None:
 
     matrix = component_ownership.select_release_image_matrix(
         manifest,
-        changed_paths=("migrations/versions/0129_service_execution_materialization.py",),
+        changed_paths=("database/migrations/versions/0129_service_execution_materialization.py",),
         force_all=False,
     )
 

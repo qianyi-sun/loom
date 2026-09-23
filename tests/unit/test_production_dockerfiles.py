@@ -54,7 +54,7 @@ def test_db_facing_images_include_migrations_for_schema_startup() -> None:
 
     for dockerfile in dockerfiles:
         text = dockerfile.read_text()
-        assert "COPY migrations ./migrations" in text, dockerfile
+        assert "COPY database/migrations ./database/migrations" in text, dockerfile
 
 
 def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
@@ -71,7 +71,7 @@ def test_service_image_exposes_immutable_build_revision_to_runtime() -> None:
 def test_control_plane_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.control-plane").read_text()
 
-    assert "chmod -R a+rX ./src ./migrations ./database/capacity_guard_migrations" in text
+    assert "chmod -R a+rX ./src ./database/migrations ./database/capacity_guard_migrations" in text
 
 
 def test_control_plane_image_contains_capacity_guard_migrations() -> None:
@@ -83,13 +83,13 @@ def test_control_plane_image_contains_capacity_guard_migrations() -> None:
 def test_gateway_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.gateway").read_text()
 
-    assert "chmod -R a+rX ./src ./migrations" in text
+    assert "chmod -R a+rX ./src ./database/migrations" in text
 
 
 def test_service_source_is_readable_by_declared_nonroot_workloads() -> None:
     text = (ROOT / "deploy" / "Dockerfile.service").read_text()
 
-    assert "chmod -R a+rX ./src ./packages ./migrations ./database/capacity_guard_migrations" in text
+    assert "chmod -R a+rX ./src ./packages ./database/migrations ./database/capacity_guard_migrations" in text
 
 
 def test_service_image_contains_capacity_guard_migrations() -> None:

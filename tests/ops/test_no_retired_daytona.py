@@ -29,9 +29,9 @@ def _tracked_text_files() -> list[Path]:
         "web/coverage/",
     )
     ignored_files = {
-        "migrations/versions/0008_cloud_compute_records.py",
-        "migrations/versions/0106_" + "day" + "tona_service_worker.py",
-        "migrations/versions/0111_retire_" + "day" + "tona_sandbox_ledger.py",
+        "database/migrations/versions/0008_cloud_compute_records.py",
+        "database/migrations/versions/0106_" + "day" + "tona_service_worker.py",
+        "database/migrations/versions/0111_retire_" + "day" + "tona_sandbox_ledger.py",
         "tests/ops/test_no_retired_" + "day" + "tona.py",
     }
     return [

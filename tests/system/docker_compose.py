@@ -38,7 +38,7 @@ from loom.security.redaction import redact_text
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
-ALEMBIC_CONFIG = REPO_ROOT / "migrations" / "alembic.ini"
+ALEMBIC_CONFIG = REPO_ROOT / "database" / "migrations" / "alembic.ini"
 DB_URL = "postgresql+psycopg://loom:loom@localhost:55432/loom"
 CONTROL_PLANE_URL = "http://localhost:58080"
 DIAGNOSTICS_ENV = "LOOM_SYSTEM_SMOKE_DIAGNOSTICS"

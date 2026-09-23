@@ -54,7 +54,7 @@ spec:
           command:
             - alembic
             - "-c"
-            - migrations/alembic.ini
+            - database/migrations/alembic.ini
             - upgrade
             - head
 {% if application_owner_role %}
@@ -63,7 +63,7 @@ spec:
           volumeMounts: {{ application_authority.volumeMounts | tojson }}
 {% else %}
           env:
-            # Alembic reads LOOM_DB_URL per migrations/env.py; the
+            # Alembic reads LOOM_DB_URL per database/migrations/env.py; the
             # control-plane uses LOOM_CP_DB_URL. Reusing the same
             # `cp-db-url` secret is intentional (Alembic needs the same
             # permissions the control-plane needs at startup, and a

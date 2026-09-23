@@ -9,8 +9,8 @@ from sqlalchemy import create_engine, inspect, text
 
 def _config(url: str) -> AlembicConfig:
     repo_root = Path(__file__).resolve().parents[2]
-    config = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
-    config.set_main_option("script_location", str(repo_root / "migrations"))
+    config = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(repo_root / "database" / "migrations"))
     config.set_main_option("sqlalchemy.url", url)
     return config
 

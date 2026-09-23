@@ -78,7 +78,7 @@ def test_scheduled_regression_requests_every_ci_test_lane_and_coverage():
 @pytest.mark.parametrize("changes,retained", [
     (("src/loom_service/api/routes/batches.py",), False),
     (("src/loom_llm_gateway/config.py",), False),
-    (("migrations/versions/new.py",), True),
+    (("database/migrations/versions/new.py",), True),
     (("src/loom/db/schema.py",), True),
     (("src/loom_cli/rollout/readonly_database_bootstrap.py",), True),
     (("unknown/input.bin",), True),
@@ -129,7 +129,7 @@ def test_cli_component_selection_preserves_full_and_affected_modes():
 
     root = Path(__file__).resolve().parents[2]
     heavy = "tests/integration/test_application_schema_reference.py"
-    for changes, expected in [([], True), (["migrations/versions/new.py"], True),
+    for changes, expected in [([], True), (["database/migrations/versions/new.py"], True),
                               (["src/loom_service/api/routes/batches.py"], False)]:
         run = subprocess.run([sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "integration",
                               "--changed-paths-json", json.dumps(changes)], cwd=root, capture_output=True, text=True)

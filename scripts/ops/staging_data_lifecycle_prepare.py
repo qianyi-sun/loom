@@ -80,12 +80,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         verify_lifecycle_source(root, source)
         migration = inspect_migration_plan(
-            root / "migrations" / "alembic.ini",
+            root / "database" / "migrations" / "alembic.ini",
             policy_path=migration_policy,
         )
         preparer = SqlAlchemyLifecyclePreparer(
             engine,
-            alembic_config_path=root / "migrations" / "alembic.ini",
+            alembic_config_path=root / "database" / "migrations" / "alembic.ini",
             source=source,
             migration_policy_sha256=migration.policy_digest,
             migration_plan_sha256=migration.plan_digest,
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             # as a time-of-check/time-of-use shortcut.
             verify_lifecycle_source(root, source)
             current_migration = inspect_migration_plan(
-                root / "migrations" / "alembic.ini",
+                root / "database" / "migrations" / "alembic.ini",
                 policy_path=migration_policy,
             )
             if current_migration != migration:

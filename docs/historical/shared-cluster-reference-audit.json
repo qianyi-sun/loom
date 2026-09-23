@@ -280,97 +280,97 @@
       "reason": "Historical evidence or an explicit retirement boundary in current documentation; not an available backend."
     },
     {
-      "path": "migrations/versions/0038_slurm_worker_jobs.py",
+      "path": "database/migrations/versions/0038_slurm_worker_jobs.py",
       "matching_lines": 18,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0043_gb10_worker_lifecycle.py",
+      "path": "database/migrations/versions/0043_gb10_worker_lifecycle.py",
       "matching_lines": 27,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0044_worker_pool_autoscaler.py",
+      "path": "database/migrations/versions/0044_worker_pool_autoscaler.py",
       "matching_lines": 17,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0049_gb10_source_provenance.py",
+      "path": "database/migrations/versions/0049_gb10_source_provenance.py",
       "matching_lines": 5,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0059_gb10_desired_source_git.py",
+      "path": "database/migrations/versions/0059_gb10_desired_source_git.py",
       "matching_lines": 8,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0066_autoscaler_policy_prod_pressure_state.py",
+      "path": "database/migrations/versions/0066_autoscaler_policy_prod_pressure_state.py",
       "matching_lines": 1,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0067_rename_pool_gb10arm64_to_gb10.py",
+      "path": "database/migrations/versions/0067_rename_pool_gb10arm64_to_gb10.py",
       "matching_lines": 17,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0073_reconcile_renumbered_lineage.py",
+      "path": "database/migrations/versions/0073_reconcile_renumbered_lineage.py",
       "matching_lines": 14,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0074_slurm_worker_containment_identity.py",
+      "path": "database/migrations/versions/0074_slurm_worker_containment_identity.py",
       "matching_lines": 37,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0079_pipeline_orchestrator.py",
+      "path": "database/migrations/versions/0079_pipeline_orchestrator.py",
       "matching_lines": 12,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0089_pipeline_gpu_admission.py",
+      "path": "database/migrations/versions/0089_pipeline_gpu_admission.py",
       "matching_lines": 42,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0108_task_image_builder_phase2_foundation.py",
+      "path": "database/migrations/versions/0108_task_image_builder_phase2_foundation.py",
       "matching_lines": 24,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0110_register_failed_smoke_storage_objects.py",
+      "path": "database/migrations/versions/0110_register_failed_smoke_storage_objects.py",
       "matching_lines": 3,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0123_personal_dev_native_builder.py",
+      "path": "database/migrations/versions/0123_personal_dev_native_builder.py",
       "matching_lines": 2,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0125_task_image_builder_projection_authority.py",
+      "path": "database/migrations/versions/0125_task_image_builder_projection_authority.py",
       "matching_lines": 4,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."
     },
     {
-      "path": "migrations/versions/0143_task_image_grant_cleanup.py",
+      "path": "database/migrations/versions/0143_task_image_grant_cleanup.py",
       "matching_lines": 5,
       "category": 1,
       "reason": "Published schema lineage and disposable reconstruction; no retired runtime is launched."

@@ -10,7 +10,7 @@
 # Manual equivalent:
 #   loom service init-admin --secret-file .loom/admin/secrets.toml
 #   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d postgres minio
-#   alembic -c migrations/alembic.ini upgrade head
+#   alembic -c database/migrations/alembic.ini upgrade head
 #   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d
 #   python scripts/seed_test_data.py --mode dev --print all
 #   # Put the printed team/worker/builder tokens in .env. Keep the admin token

@@ -36,7 +36,7 @@ COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admissi
     ./src/loom_control_plane/
 COPY src/loom_execution_actuator ./src/loom_execution_actuator
 COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
-COPY migrations ./migrations
+COPY database/migrations ./database/migrations
 USER 65532:65532
 # Source admission is imported lazily on the first claim, not at startup.
 # Exercise its dependency closure too, without credentials or connections.

@@ -34,7 +34,7 @@ def test_unreferenced_test_edit_selects_only_that_test(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("change", ["src/loom/service.py", "tests/conftest.py", "tests/support/helper.py",
-                                   "migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md"])
+                                   "database/migrations/new.py", "unknown/file.bin", "tests/unit/deleted.py", "docs/usage.md"])
 def test_shared_runtime_unknown_or_deleted_change_keeps_full_lane(tmp_path: Path, change: str) -> None:
     tracked = _repository(tmp_path)
     paths = (tracked[0], tracked[1])

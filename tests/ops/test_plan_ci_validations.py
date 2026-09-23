@@ -37,7 +37,7 @@ def test_frontend_changes_do_not_select_unrelated_python_integration(path: str) 
     "src/loom/task_image_materialization.py",
     "src/loom/db/schema.py",
     "src/loom/security/secret_store.py",
-    "migrations/versions/new_task_image_schema.py",
+    "database/migrations/versions/new_task_image_schema.py",
     "tests/support/minio_images.py",
 ])
 def test_image_materialization_and_fixture_dependencies_keep_heavy_coverage(path):
@@ -599,7 +599,7 @@ def test_codeowners_is_not_static_documentation() -> None:
 
 def test_migration_change_selects_both_integration_tiers_images_and_staging() -> None:
     plan = plan_validations(
-        changed_paths=["migrations/versions/1234_add_runtime_state.py"],
+        changed_paths=["database/migrations/versions/1234_add_runtime_state.py"],
         labels=set(),
         event_name="pull_request",
     )
@@ -724,7 +724,7 @@ def test_nebius_publication_authority_and_unknown_paths_keep_full_validation(pat
 
 def test_nebius_scoped_routing_cannot_remove_mixed_path_or_label_requirements():
     plan = plan_validations(
-        changed_paths=["scripts/ops/verify_nebius_restore.py", "migrations/new_revision.py"],
+        changed_paths=["scripts/ops/verify_nebius_restore.py", "database/migrations/new_revision.py"],
         labels={"cluster-smoke"}, event_name="pull_request",
     )
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)

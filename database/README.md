@@ -1,9 +1,39 @@
-# Retained database migration packages
+# Database schema histories
 
-This directory groups the published migration histories of Loom's retired
-shared-cluster capacity system. They are compatibility resources, not supported
-execution services or deployment options. The active application migration
-chain remains in [`../migrations/`](../migrations/).
+This directory owns Loom's four independent Alembic migration chains. The
+application chain supports the current Nebius platform and local development;
+the capacity chains preserve historical schema and recovery compatibility.
+Keeping them together does not combine their revision graphs or enable retired
+execution backends.
+
+| Chain | Role | Configuration |
+| --- | --- | --- |
+| [migrations](migrations/) | Active application schema: teams, trials, artifacts, providers and execution authority | `database/migrations/alembic.ini` |
+| [capacity_migrations](capacity_migrations/) | Historical management database | `database/capacity_migrations/alembic.ini` |
+| [capacity_guard_migrations](capacity_guard_migrations/) | Historical environment guard schema | `database/capacity_guard_migrations/alembic.ini` |
+| [capacity_build_guard_migrations](capacity_build_guard_migrations/) | Historical build guard schema | `database/capacity_build_guard_migrations/alembic.ini` |
+
+## Application migrations
+
+From the repository root, with the intended database URL configured:
+
+```bash
+uv run alembic -c database/migrations/alembic.ini current
+uv run alembic -c database/migrations/alembic.ini upgrade head
+```
+
+The application chain is copied into deployment images at the same relative
+path. Startup checks, migration jobs and local development use that configuration.
+The configuration resolves its scripts relative to itself, so an absolute config
+path also works from another working directory. Published revisions remain
+unchanged; schema changes require a new forward revision.
+
+The qualified historical Nebius conversion helper is
+`python -m database.migrations.nebius_lineage`; follow the
+[lineage conversion runbook](../docs/runbooks/nebius-lineage-conversion.md)
+before using it. It is not part of ordinary upgrades.
+
+## Retained capacity histories
 
 | Package | Historical responsibility | Published head |
 | --- | --- | --- |
@@ -11,7 +41,7 @@ chain remains in [`../migrations/`](../migrations/).
 | `capacity_guard_migrations` | Per-environment `loom_capacity_guard` schema: protected trial/worker admission, fencing and release records | `guard_0035` |
 | `capacity_build_guard_migrations` | `loom_capacity_build_guard` schema: task-image build authorization, assignments, publication and release evidence | `build_guard_0032` |
 
-## Why these remain
+### Why these remain
 
 Published revisions preserve database lineage and the interpretation of retained
 records. Disposable schema reconstruction, historical migration tests and
@@ -19,7 +49,7 @@ qualified recovery still consume these packages. Their presence does not enable
 retired controllers, workers or autoscalers. See the
 [retirement record](../docs/historical/shared-cluster-retirement-2026-09.md).
 
-The source directories are grouped here while Python package names and installed
+The capacity source directories are grouped here while Python package names and installed
 wheel paths remain unchanged. Revisions can continue importing historical SQL
 helpers by those names. Each `alembic.ini` locates its scripts relative to itself;
 repository tooling uses `database/<package>/alembic.ini`. Migration environment

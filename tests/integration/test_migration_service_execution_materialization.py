@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 def _config(url: str) -> Config:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     return config
 

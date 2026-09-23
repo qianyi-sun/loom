@@ -44,7 +44,7 @@ def postgres_url() -> str:
         repo_root = Path(__file__).resolve().parents[2]
         subprocess.run(
             [sys.executable, "-m", "alembic", "-c",
-             "migrations/alembic.ini", "upgrade", "head"],
+             "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=repo_root, check=True,
         )
         yield sync_url

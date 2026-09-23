@@ -59,13 +59,13 @@ class TestRenderMigrationManifest:
         assert container["command"] == [
             "alembic",
             "-c",
-            "migrations/alembic.ini",
+            "database/migrations/alembic.ini",
             "upgrade",
             "head",
         ]
 
     def test_db_url_is_pulled_from_the_control_plane_secret_key(self) -> None:
-        """Alembic reads LOOM_DB_URL per `migrations/env.py`; the
+        """Alembic reads LOOM_DB_URL per `database/migrations/env.py`; the
         secret key we source it from is still `cp-db-url` because
         Alembic needs the same DB perms as the control plane and a
         separate migration credential would just be another rotation

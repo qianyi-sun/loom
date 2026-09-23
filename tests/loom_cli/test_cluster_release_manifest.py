@@ -44,7 +44,7 @@ def _migration_revision(path: Path) -> str:
 
 
 def test_alembic_migration_revisions_are_unique() -> None:
-    migrations = sorted((REPO_ROOT / "migrations" / "versions").glob("*.py"))
+    migrations = sorted((REPO_ROOT / "database" / "migrations" / "versions").glob("*.py"))
     revisions = [_migration_revision(path) for path in migrations]
     duplicates = {revision: count for revision, count in Counter(revisions).items() if count > 1}
     assert duplicates == {}

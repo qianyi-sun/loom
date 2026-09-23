@@ -15,7 +15,7 @@ from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from migrations.nebius_lineage import convert_lineage, inspect_lineage
+from database.migrations.nebius_lineage import convert_lineage, inspect_lineage
 from sqlalchemy import MetaData, Table, create_engine, text
 from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import DBAPIError
@@ -24,11 +24,11 @@ from loom.db.schema_startup import service_schema_head
 
 
 def _scripts() -> ScriptDirectory:
-    return ScriptDirectory.from_config(Config("migrations/alembic.ini"))
+    return ScriptDirectory.from_config(Config("database/migrations/alembic.ini"))
 
 
 def _historical(url: str, revision: str) -> None:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     command.downgrade(config, "0132")
     engine = create_engine(url)
@@ -206,7 +206,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             assert connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one() == "0150"
         # Conversion is pinned to its audited dev checkpoint; normal Alembic
         # migrations advance that lineage to the current release afterward.
-        config = Config("migrations/alembic.ini")
+        config = Config("database/migrations/alembic.ini")
         config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
         command.upgrade(config, "head")
         with engine.connect() as connection:
@@ -234,7 +234,7 @@ def test_conversion_preserves_history_and_reaches_dev(
             # A repeat or wrong-lineage invocation cannot reinterpret dev history.
             with pytest.raises(ValueError, match="revision"):
                 inspect_lineage(connection, revision)
-        config = Config("migrations/alembic.ini")
+        config = Config("database/migrations/alembic.ini")
         config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
         command.upgrade(config, "head")
     finally:
@@ -321,7 +321,7 @@ def test_job_command_inspects_applies_and_sanitizes_rejection(
         .set(drivername="postgresql")
         .render_as_string(hide_password=False),
     )
-    argv = [sys.executable, "-m", "migrations.nebius_lineage", "--expected-revision", "0135"]
+    argv = [sys.executable, "-m", "database.migrations.nebius_lineage", "--expected-revision", "0135"]
     engine = create_engine(url)
     try:
         result = subprocess.run(argv, env=environment, capture_output=True, text=True, timeout=60)

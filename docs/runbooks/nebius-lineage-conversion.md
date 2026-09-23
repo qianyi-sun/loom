@@ -7,7 +7,7 @@ observations, and native task-image attempt evidence. Those changes are
 added native resource usage at `0136`; dev retains its published migrations
 through `0149` and appends native usage as `0150`.
 
-`migrations/nebius_lineage.py` converts that fork to **0150**. Normal Alembic
+`database/migrations/nebius_lineage.py` converts that fork to **0150**. Normal Alembic
 upgrades continue to reject ambiguous historical revision numbers. The converter
 checks the exact expected revision, absence of dev-only tables, the native-build
 column definition, the historical quota constraint, and the complete native
@@ -61,8 +61,8 @@ Inside the isolated restore or protected migration Job only:
 
 ```sh
 # Substitute the source revision established by readback: 0133, 0134, 0135, or 0136.
-python -m migrations.nebius_lineage --expected-revision 0136
-python -m migrations.nebius_lineage --expected-revision 0136 --apply
+python -m database.migrations.nebius_lineage --expected-revision 0136
+python -m database.migrations.nebius_lineage --expected-revision 0136 --apply
 ```
 
 The command takes the connection only from `LOOM_DB_URL`, never a command-line

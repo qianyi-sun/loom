@@ -179,8 +179,8 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
                 f"GRANT CREATE ON DATABASE {quoted_database} TO {quoted_owner}"
             )
 
-        application_cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
-        application_cfg.set_main_option("script_location", str(repo_root / "migrations"))
+        application_cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+        application_cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
         application_cfg.set_main_option(
             "sqlalchemy.url", environment_admin_url.render_as_string(hide_password=False)
         )
@@ -718,8 +718,8 @@ def _isolated_migration_database(
         )
         if prepare_template:
             repo_root = Path(__file__).resolve().parents[2]
-            cfg = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
-            cfg.set_main_option("script_location", str(repo_root / "migrations"))
+            cfg = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+            cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
             cfg.set_main_option("sqlalchemy.url", isolated_url)
             command.upgrade(cfg, "head")
             with admin_engine.connect() as conn:

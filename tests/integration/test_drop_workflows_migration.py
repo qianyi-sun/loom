@@ -20,7 +20,7 @@ from sqlalchemy import create_engine, inspect
 
 
 def _cfg(url: str) -> Config:
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", url)
     return cfg
 

@@ -291,7 +291,7 @@ def test_gateway_runtime_apply_migrates_before_rolling_apis() -> None:
     migration = gateway.index("name: loom-schema-migrate")
     gateway_rollout = gateway.index('deployment/loom-llm-gateway "gateway=$gateway_image"')
     assert migration < gateway_rollout
-    assert 'command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]' in gateway
+    assert 'command: ["alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"]' in gateway
     assert "automountServiceAccountToken: false" in gateway
     assert "app: loom-migration" in gateway
     assert "name: LOOM_DB_URL" in gateway

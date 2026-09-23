@@ -19,7 +19,7 @@ def test_capacity_guard_migrations_have_no_candidate_database_fallback() -> None
 def test_historical_guard_migrations_remain_in_static_validation() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     ruff_command = (
-        "ruff check src tests packages migrations database/capacity_guard_migrations database/capacity_migrations"
+        "ruff check src tests packages database/migrations database/capacity_guard_migrations database/capacity_migrations"
     )
     assert ruff_command in workflow
 
