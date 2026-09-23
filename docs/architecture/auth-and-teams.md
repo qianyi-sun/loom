@@ -57,6 +57,46 @@ Changing the current team requires a membership unless the user is a platform
 administrator. A team can be disabled, have new submissions paused, or have
 public registration enabled or disabled through the admin team routes.
 
+## Platform administrator changes
+
+Existing active platform administrators (session or user-owned token) and the
+singleton operator can call:
+
+- `POST /api/v1/admin/users/{user_id}/platform-admin/grant` with
+  `{"ensure_admin_team": true}` (the default for `{}`). This also ensures `owner`
+  membership in the existing, enabled reserved `admin` team. Set the option to
+  `false` to change only the platform role.
+- `POST /api/v1/admin/users/{user_id}/platform-admin/revoke` with the required
+  `{"credential_policy": "revoke_all"}`. This removes the platform role and any
+  reserved `admin` membership, and revokes every unrevoked session and user-owned
+  API token, including cross-team tokens and the caller's credential on a self-revoke.
+
+The target must be a full user UUID. Names, emails, prefixes and extra selectors
+are rejected, missing users return 404, and disabled/inactive targets return 409.
+Deployment-only identities cannot be promoted. Multiple case-insensitive `admin`
+team matches return 409; a membership-ensuring grant also rejects a missing or
+disabled reserved team. The workflow never creates teams or removes unrelated
+memberships. A revoked user can sign in again with their ordinary team roles.
+
+Grant preserves existing credentials; their authority follows the current user
+flag on subsequent requests. Revoke deliberately logs the user out rather than
+preserving credentials that an administrator may have issued for other teams.
+Already authorized in-flight requests are not cancelled. Repeated operations on
+unchanged state succeed with `changed=false`; each successful request still writes
+an audit event. A later revoke also revokes any credentials created since the last
+revoke, even if the user is already an ordinary user.
+
+The user row serializes changes. Role, membership, credential revocations and the
+`user.platform_admin.grant` or `user.platform_admin.revoke` audit event commit in
+one transaction; an audit failure rolls all mutations back. Events contain the
+authenticated actor, target UUID, prior/new role and membership, credential policy,
+and revocation counts, without raw credentials. Human actors come from the login
+and cannot be overridden by a header. Singleton requests require
+`X-Loom-Admin-Actor`; session requests also require the normal CSRF proof.
+
+See the [operator procedure](../runbooks/operator-runbook.md#platform-administrator-grant-and-revoke)
+for CLI commands and independent Nebius integration acceptance.
+
 ## Sessions and CSRF
 
 Successful password login creates a database-backed session and sets the raw
