@@ -45,15 +45,15 @@ class DNSChallengeError(RuntimeError):
     """A fixed, payload-free diagnostic safe for protected operation output."""
 
 
-def _private_json(path: Path) -> dict[str, Any]:
+def _private_json(path: Path, *, limit: int = 16_384) -> dict[str, Any]:
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise DNSChallengeError("private regular file required")
-            content = stream.read(16_385)
-        if len(content) > 16_384:
+            content = stream.read(limit + 1)
+        if len(content) > limit:
             raise DNSChallengeError("private input exceeds bound")
         value = json.loads(content)
         if not isinstance(value, dict):
@@ -185,6 +185,13 @@ def _journal_lock(root: Path, key: str) -> Iterator[Path]:
         info = root.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise DNSChallengeError("private journal directory required")
+        # fsync(root) cannot make root's own entry durable in its parent. Do
+        # this even on replay: an earlier process could have stopped after mkdir.
+        parent = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
         descriptor = os.open(root / (key + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "r+b") as stream:
             info = os.fstat(stream.fileno())
@@ -231,9 +238,13 @@ def run_hook(dns: GoDaddyDNS, *, state_dir: Path, action: str, certbot_domain: s
         except FileNotFoundError:
             journal = None
         else:
-            journal = _private_json(path)
+            journal = _private_json(path, limit=262_144)
+            before_ids = journal.get("before_record_ids")
             if (any(journal.get(key) != value for key, value in identity.items())
-                    or journal.get("stage") not in {"pending", "created", "deleted"}):
+                    or journal.get("stage") not in {"pending", "created", "deleted"}
+                    or not isinstance(before_ids, list) or len(before_ids) > 1000
+                    or any(not isinstance(item, str) or not _RECORD_ID.fullmatch(item) for item in before_ids)
+                    or len(set(before_ids)) != len(before_ids)):
                 raise DNSChallengeError("invalid challenge journal")
         if journal is not None and journal["stage"] == "pending":
             raise DNSChallengeError("pending DNS write requires reconciliation; no automatic retry or cleanup")
@@ -245,7 +256,8 @@ def run_hook(dns: GoDaddyDNS, *, state_dir: Path, action: str, certbot_domain: s
             before = dns.records()
             if any(row["data"] == validation for row in before):
                 raise DNSChallengeError("preexisting challenge has no ownership journal")
-            journal = {**identity, "stage": "pending", "prepared_at": datetime.now(UTC).isoformat()}
+            journal = {**identity, "stage": "pending", "prepared_at": datetime.now(UTC).isoformat(),
+                       "before_record_ids": [row["recordId"] for row in before]}
             _save_journal(path, journal)
             created = dns.create(validation)
             if any(row["recordId"] == created["recordId"] for row in before):
@@ -253,7 +265,8 @@ def run_hook(dns: GoDaddyDNS, *, state_dir: Path, action: str, certbot_domain: s
             journal = {**journal, "stage": "created", "record": created}
             _save_journal(path, journal)
         record = dns._record(journal.get("record"))
-        if record["data"] != validation or record["ttl"] != 600:
+        if (record["data"] != validation or record["ttl"] != 600
+                or record["recordId"] in journal["before_record_ids"]):
             raise DNSChallengeError("journal record does not match its challenge")
         if action == "cleanup":
             dns.delete_owned(record)
@@ -344,6 +357,10 @@ def main(argv: list[str] | None = None) -> int:
                               validation=os.environ.get("CERTBOT_VALIDATION", ""), wait=wait_for_txt)
         print(json.dumps({"status": status}))
         return 0
+    except DNSChallengeError as exc:
+        # This exception class contains only our fixed, payload-free categories.
+        print(str(exc), file=sys.stderr)
+        return 1
     except Exception:
         # Neither remote diagnostics nor filesystem/credential values belong in logs.
         print("DNS challenge failed; preserve private journal for scoped reconciliation", file=sys.stderr)

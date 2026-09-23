@@ -148,8 +148,9 @@ Keep the journal directory private (0700); its 0600 files must persist across
 renewals and interrupted operations. Use one shared protected journal and the
 installation workflow's exclusion boundary, not copies on parallel hosts.
 
-Authentication records intent before POST and persists the returned record ID
-before reporting success. It then checks the exact TXT value directly against
+Authentication durably records intent and the bounded scoped record-ID inventory
+before POST (including the parent entry on first journal creation), and persists
+the returned record ID before reporting success. It checks the exact TXT value directly against
 every discovered authoritative IPv4 DNS address; recursive resolver or provider
 API success alone is insufficient. Aliased/delegated challenge routes are
 rejected. Propagation waits at most ten minutes. Failure preserves the journal
