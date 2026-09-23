@@ -635,7 +635,9 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             ).scalar_one()
             env = task.config["environment"]
             assert env["cpu_arch"] == "x86_64"
-            assert env["user"] == "agent"
+            # Publication preserves each source identity; runtime admission
+            # separately requires the constrained private-root policy.
+            assert env["user"] == "root"
             assert env["workdir"] == "/app"
             assert env["dockerfile"] == "environment/Dockerfile.loom-nebius"
             assert env["cpus"] == 1
@@ -643,7 +645,7 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             assert env["storage_mb"] == 4096
             assert env["network_policies_supported"] == ["gateway-only"]
             assert env["baseline_network_policy"] == {"kind": "gateway-only"}
-            assert "user" not in task.config["verifier"]
+            assert task.config["verifier"]["user"] == "root"
             assert task.config["verifier"]["env_mode"] == "shared"
             assert task.config["verifier"]["args"]["script_path"] == "verifier/run.sh"
             assert "service_execution_input" in task.source_provenance
