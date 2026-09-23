@@ -18,6 +18,7 @@ from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
     build_service_execution_input_manifest,
     compile_service_execution_plan,
+    load_service_execution_runtime_profile,
     prepare_service_execution_input_manifest,
     service_execution_input_binding,
 )
@@ -96,6 +97,38 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
         runtime_binary_sha256="sha256:" + "e" * 64,
         image_admission=signed_image_admission_bundle((_TASK_IMAGE, _RUNTIME_IMAGE)),
     )
+
+
+@pytest.mark.parametrize(("class_id", "web_egress"), [
+    ("linux-amd64-cpu-pod-v1", True),
+    ("linux-amd64-cpu-web-pod-v1", False),
+    ("unqualified-class", False),
+])
+def test_runtime_profile_load_rejects_conflicting_class_capability(
+    class_id: str, web_egress: bool,
+) -> None:
+    payload = _profile().model_dump(mode="json")
+    payload.update(execution_class_id=class_id, supports_task_web_egress=web_egress)
+    with pytest.raises(ValueError, match="execution class"):
+        load_service_execution_runtime_profile(json.dumps(payload))
+
+
+@pytest.mark.parametrize(("class_id", "web_egress"), [
+    ("linux-amd64-cpu-pod-v1", None),
+    ("linux-amd64-cpu-pod-v1", False),
+    ("linux-amd64-cpu-web-pod-v1", True),
+])
+def test_runtime_profile_load_preserves_matching_class_capability(
+    class_id: str, web_egress: bool | None,
+) -> None:
+    payload = _profile().model_dump(mode="json")
+    payload["execution_class_id"] = class_id
+    if web_egress is not None:
+        payload["supports_task_web_egress"] = web_egress
+    profile = load_service_execution_runtime_profile(json.dumps(payload))
+    assert profile is not None
+    assert profile.execution_class_id == class_id
+    assert profile.supports_task_web_egress is (web_egress is True)
 
 
 @pytest.mark.parametrize("architecture", ["x86_64", "arm64", "any"])
