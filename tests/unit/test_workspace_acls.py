@@ -106,6 +106,8 @@ def test_malformed_or_unsupported_acl_metadata_is_rejected(tmp_path, key, value,
 async def test_missing_acl_tools_fail_before_export(tmp_path: Path):
     class UnsupportedDriver:
         async def exec(self, cmd: str, **_kwargs: object) -> ExecResult:
+            if cmd.startswith(("find ", "rm ")):
+                return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
             return ExecResult(return_code=127, stdout=b"", stderr=b"not found", duration_sec=0)
 
         async def download(self, *_args):

@@ -234,6 +234,7 @@ async def _run_step_impl(
                     verifier_driver=verifier_env,
                     workdir=workdir,
                     policy=ctx.workspace_staging_policy,
+                    preserve_acls=ctx.task_config.environment.preserve_acls,
                 )
             async with phase_network(
                 verifier_env,
@@ -483,6 +484,7 @@ async def _handoff_agent_workspace(
     verifier_driver: Driver,
     workdir: PurePosixPath,
     policy: object,
+    preserve_acls: bool = False,
 ) -> None:
     """Snapshot the public agent workspace into the fresh verifier driver."""
     from loom.trial.workspace import WorkspaceStagingPolicy
@@ -494,6 +496,7 @@ async def _handoff_agent_workspace(
         verifier_driver=verifier_driver,
         workdir=workdir,
         policy=policy,
+        preserve_acls=preserve_acls,
     )
 
 
@@ -695,6 +698,10 @@ async def _run_agent_with_retry(
                 guarded_trajectory: TrajectoryWriter,
             ) -> None:
                 try:
+                    if ctx.task_config.environment.preserve_acls:
+                        from loom.trial.workspace_acls import require_acl_support
+
+                        await require_acl_support(ctx.driver, ctx.task_config.environment.workdir)
                     async with phase_network(
                         ctx.driver,
                         baseline=baseline_policy,

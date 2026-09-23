@@ -40,7 +40,7 @@ async def test_deadline_timeout_handoff_requires_completed_snapshot(
         driver.filesystem[PurePosixPath("/app/answer.txt")] = b"partial answer"
         await asyncio.sleep(10)
 
-    async def failed_snapshot(*args):
+    async def failed_snapshot(*args, **kwargs):
         raise RuntimeError("snapshot failed")
 
     monkeypatch.setattr(module, "_execution_identity", identity)

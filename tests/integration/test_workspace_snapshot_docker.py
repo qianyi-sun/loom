@@ -219,3 +219,16 @@ async def test_handoff_rejects_symlink_destination_before_cleanup(
     assert (await verifier.exec(
         'test "$(cat /outside/keep)" = safe', user="root",
     )).return_code == 0
+
+
+async def test_acl_requirement_rejects_busybox_without_leaving_probe_files(
+    docker_drivers: tuple[Driver, Driver],
+) -> None:
+    from loom.trial.workspace_acls import require_acl_support
+
+    agent, _ = docker_drivers
+    with pytest.raises(WorkspaceSnapshotError, match="POSIX ACL"):
+        await require_acl_support(agent, PurePosixPath("/workspace"))
+    result = await agent.exec("find /workspace -name '.loom-acl-probe.*'", user="root")
+    assert result.return_code == 0
+    assert result.stdout == b""

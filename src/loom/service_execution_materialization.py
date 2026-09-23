@@ -327,6 +327,8 @@ def automatic_service_execution_rejections(
         reasons.append("gpu_unsupported")
     if env.mutable_paths and not terminus:
         reasons.append("mutable_paths_require_terminus")
+    if env.preserve_acls and not terminus:
+        reasons.append("acl_snapshots_require_terminus")
     if env.service_lifecycle is not None and not terminus:
         reasons.append("service_lifecycle_requires_terminus")
     if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (

@@ -104,6 +104,7 @@ class EnvironmentConfig(BaseModel):
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
     mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
+    preserve_acls: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     service_lifecycle: ServiceLifecycleConfig | None = None
     execution_requirements: TaskExecutionRequirementsV1 | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -299,6 +300,7 @@ class TaskConfig(BaseModel):
         if (self.environment.user != "agent" or self.verifier.user is not None
                 or "HOME" in self.environment.environment or self.environment.mutable_paths
                 or self.environment.service_lifecycle is not None
+                or self.environment.preserve_acls
                 or self.environment.baseline_network_policy.kind == "web-allowlist"):
             raise ValueError("declared sandbox capabilities require automatic native execution")
 
