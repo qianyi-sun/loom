@@ -54,6 +54,20 @@ def test_invalid_startup_argv_is_rejected(startup):
         TaskConfig.model_validate(raw)
 
 
+def test_startup_only_readiness_requires_initializer_and_preserves_old_defaults():
+    from loom.models.task import ServiceLifecycleConfig
+
+    default = ServiceLifecycleConfig(readiness={"command": "true"})
+    assert "readiness_scope" not in default.model_dump()
+    declared = ServiceLifecycleConfig(
+        startup_command=("/start-listener",), readiness={"command": "true"},
+        readiness_scope="startup_only",
+    )
+    assert declared.readiness_scope == "startup_only"
+    with pytest.raises(ValueError, match="startup_only.*startup_command"):
+        ServiceLifecycleConfig(readiness={"command": "true"}, readiness_scope="startup_only")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "startup", "snapshot", "verifier"])
 async def test_service_survives_snapshot_until_private_verifier_finishes(tmp_path, monkeypatch, failure):
