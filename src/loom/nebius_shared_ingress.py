@@ -58,9 +58,10 @@ class SharedIngressInstallation(BaseModel):
 def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[str, Any]]:
     """Render prerequisites only; caller must qualify ownership, TLS and cutover.
 
-    Requires Traefik 3.7.13's strictPrefixMatching, crossProviderNamespaces and
-    disableResponseBuffer contracts, verified by the disposable-cluster test.
-    Steady requests: 100m CPU/128Mi memory/2Gi scratch; rollout reserves two Pods.
+    Requires Traefik 3.7.13's strictPrefixMatching and crossProviderNamespaces
+    contracts, verified by the disposable-cluster test. Uploads and responses
+    stream without shared-controller body buffering. Steady requests are
+    100m CPU/128Mi memory/64Mi scratch; rollout reserves two Pods.
     """
     foundation = installation.foundation
     config = foundation.platform_config
@@ -71,7 +72,7 @@ def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[
         "entryPoints": {
             "websecure": {
                 "address": ":8443", "asDefault": True,
-                "http": {"tls": {}, "middlewares": ["in-flight@file", "bounded-request@file"]},
+                "http": {"tls": {}},
                 "transport": {"respondingTimeouts": {
                     "readTimeout": "3600s", "writeTimeout": "0s", "idleTimeout": "180s",
                 }},
@@ -85,7 +86,7 @@ def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[
                 "allowExternalNameServices": False, "strictPrefixMatching": True,
                 "crossProviderNamespaces": [],
             },
-            "file": {"filename": "/etc/loom-ingress/routes.json", "watch": True},
+            "file": {"filename": "/etc/loom-ingress/routes.yaml", "watch": True},
         },
         "serversTransport": {"forwardingTimeouts": {"responseHeaderTimeout": "3600s"}},
         # No dashboard, access log containing user requests, ACME or cloud key.
@@ -101,13 +102,9 @@ def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[
                 "address": "loom-web-origin." + ns + ".svc.cluster.local:443",
             }]}}},
         },
-        "http": {"middlewares": {
-            # Bound request-buffer disk across concurrent uploads; stream responses.
-            "in-flight": {"inFlightReq": {"amount": 16}},
-            "bounded-request": {"buffering": {"maxRequestBodyBytes": 104857600,
-                "memRequestBodyBytes": 1048576, "disableResponseBuffer": True}},
-        }},
         "tls": {
+            "certificates": [{"certFile": "/var/run/loom-ingress-tls/tls.crt",
+                              "keyFile": "/var/run/loom-ingress-tls/tls.key"}],
             "stores": {"default": {"defaultCertificate": {
                 "certFile": "/var/run/loom-ingress-tls/tls.crt",
                 "keyFile": "/var/run/loom-ingress-tls/tls.key",
@@ -116,7 +113,9 @@ def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[
         },
     }
     cm = _obj("ConfigMap", CONTROLLER, ns)
-    cm["data"] = {"traefik.json": canonical(static).decode(), "routes.json": canonical(dynamic).decode()}
+    # JSON is YAML-compatible, but the dynamic file provider requires a .yaml
+    # or .toml suffix (unlike the static configuration loader).
+    cm["data"] = {"traefik.json": canonical(static).decode(), "routes.yaml": canonical(dynamic).decode()}
     role_name = CONTROLLER + "-" + ns
     role = _obj("ClusterRole", role_name, None, api="rbac.authorization.k8s.io/v1")
     role["rules"] = [
@@ -137,13 +136,13 @@ def render_shared_ingress(installation: SharedIngressInstallation) -> list[dict[
     pod["volumes"] = [
         {"name": "config", "configMap": {"name": CONTROLLER}},
         {"name": "tls", "secret": {"secretName": installation.tls_secret_name, "defaultMode": 0o440}},
-        {"name": "scratch", "emptyDir": {"sizeLimit": "2Gi"}},
+        {"name": "scratch", "emptyDir": {"sizeLimit": "64Mi"}},
     ]
     container = pod["containers"][0]
     container.update(command=["traefik"], args=["--configFile=/etc/loom-ingress/traefik.json"],
                      ports=[{"name": "https", "containerPort": 8443}, {"name": "health", "containerPort": 9000}])
-    container["resources"]["requests"]["ephemeral-storage"] = "2Gi"
-    container["resources"]["limits"]["ephemeral-storage"] = "2Gi"
+    container["resources"]["requests"]["ephemeral-storage"] = "64Mi"
+    container["resources"]["limits"]["ephemeral-storage"] = "64Mi"
     container["securityContext"]["readOnlyRootFilesystem"] = True
     container["volumeMounts"] = [
         {"name": "config", "mountPath": "/etc/loom-ingress", "readOnly": True},
