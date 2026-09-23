@@ -154,6 +154,44 @@ def _forward_port(process: subprocess.Popen[bytes], *, timeout: float = 10) -> i
 
 
 class KubectlControllerAPI(KubectlTLSAPI):
+    def switch_controller_tls(self, observed: dict[str, Any], secret_name: str) -> None:
+        """Submit one CAS patch; the caller must journal intent before this call.
+
+        A lost response is an unknown write, never an invitation to retry. Only
+        a later exact readback may resolve it. This does not qualify the new
+        Pods or switch public traffic, and preserves every other Pod field.
+        """
+        try:
+            metadata = observed["metadata"]
+            uid, version = metadata["uid"], metadata["resourceVersion"]
+            if (metadata["name"] != "loom-shared-ingress" or metadata["namespace"] != self.binding.namespace
+                    or metadata.get("labels", {}).get("loom.nebius/ingress-installation-id") != self.binding.installation_id
+                    or metadata.get("deletionTimestamp") is not None
+                    or str(UUID(uid)) != uid or UUID(uid).int == 0 or not isinstance(version, str) or not version
+                    or not re.fullmatch(r"loom-ingress-tls-[a-z0-9](?:[a-z0-9-]{0,44}[a-z0-9])?", secret_name)):
+                raise ValueError()
+            volumes = observed["spec"]["template"]["spec"]["volumes"]
+            matches = [index for index, volume in enumerate(volumes) if volume.get("name") == "tls"]
+            if len(matches) != 1:
+                raise ValueError()
+            index = matches[0]
+            previous = volumes[index]["secret"]["secretName"]
+            if not isinstance(previous, str) or not previous or previous == secret_name:
+                raise ValueError()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise IngressError("controller TLS switch binding is invalid") from None
+        path = f"/spec/template/spec/volumes/{index}"
+        patch = [
+            {"op": "test", "path": "/metadata/uid", "value": uid},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+            {"op": "test", "path": path + "/name", "value": "tls"},
+            {"op": "test", "path": path + "/secret/secretName", "value": previous},
+            {"op": "replace", "path": path + "/secret/secretName", "value": secret_name},
+        ]
+        self.verify_identity(self.binding)
+        self._run(["patch", "deployment", "loom-shared-ingress", "-n", self.binding.namespace,
+                   "--type=json", "--patch-file=/dev/stdin", "-o", "name"], payload=json.dumps(patch).encode())
+
     def _namespace(self, namespace: str) -> None:
         if namespace != self.binding.namespace:
             raise IngressError("controller namespace outside protected binding")

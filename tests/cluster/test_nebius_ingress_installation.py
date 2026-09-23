@@ -15,7 +15,6 @@ from scripts.ops.nebius_certificates import _bind_installation
 from scripts.ops.nebius_ingress_gateway import (
     IngressError,
     KubectlControllerAPI,
-    KubectlTLSAPI,
     TLSBinding,
     deliver_tls,
 )
@@ -53,7 +52,7 @@ def test_immutable_tls_delivery_replays_and_rotates_without_replacing_old_secret
         )
         # Only execution is adapted for the container's private kubectl; real
         # production namespace binding, JSON readback and Secret creation run.
-        class ContainerAPI(KubectlTLSAPI):
+        class ContainerAPI(KubectlControllerAPI):
             def _run(self, arguments, *, payload=None):
                 result = subprocess.run(
                     ["docker", "exec", "-i", container.get_wrapped_container().id,
@@ -117,6 +116,34 @@ server.serve_forever()
         assert second["secret_uid"] != first["secret_uid"]
         assert core.read_namespaced_secret(first["secret_name"], namespace).data == old.data
         assert len(core.list_namespaced_secret(namespace).items) == 2
+        apps = client.AppsV1Api()
+        apps.create_namespaced_deployment(namespace, {
+            "apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "loom-shared-ingress", "namespace": namespace,
+                         "labels": {"loom.nebius/ingress-installation-id": binding.installation_id}},
+            "spec": {"replicas": 0, "selector": {"matchLabels": {"app": "loom-shared-ingress"}},
+                     "template": {"metadata": {"labels": {"app": "loom-shared-ingress"}}, "spec": {
+                         "containers": [{"name": "controller", "image": PYTHON}],
+                         "volumes": [{"name": "tls", "secret": {"secretName": first["secret_name"]}}],
+                     }}},
+        })
+        observed = api.get_deployment(namespace, "loom-shared-ingress")
+        wrong_uid = {**observed, "metadata": {**observed["metadata"], "uid": str(uuid4())}}
+        with pytest.raises(IngressError):
+            api.switch_controller_tls(wrong_uid, second["secret_name"])
+        apps.patch_namespaced_deployment("loom-shared-ingress", namespace,
+                                        {"metadata": {"annotations": {"concurrent-change": "retained"}}})
+        with pytest.raises(IngressError):
+            api.switch_controller_tls(observed, second["secret_name"])
+        current = api.get_deployment(namespace, "loom-shared-ingress")
+        assert current["spec"]["template"]["spec"]["volumes"][0]["secret"]["secretName"] == first["secret_name"]
+        api.switch_controller_tls(current, second["secret_name"])
+        switched = api.get_deployment(namespace, "loom-shared-ingress")
+        assert switched["metadata"]["uid"] == current["metadata"]["uid"]
+        assert switched["metadata"]["generation"] == current["metadata"]["generation"] + 1
+        assert switched["metadata"]["annotations"]["concurrent-change"] == "retained"
+        assert switched["spec"]["template"]["spec"]["volumes"][0]["secret"]["secretName"] == second["secret_name"]
+        assert switched["spec"]["template"]["spec"]["containers"] == current["spec"]["template"]["spec"]["containers"]
         core.delete_namespaced_secret(second["secret_name"], namespace)
         with pytest.raises(IngressError, match="unresolved"):
             deliver_tls(config, binding=binding, api=api, roots=new_roots, now=NOW)
