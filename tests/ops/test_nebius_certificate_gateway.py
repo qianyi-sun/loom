@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.process_observation import process_exited
+
 
 def module():
     return importlib.import_module("scripts.ops.nebius_certificate_gateway")
@@ -205,8 +207,7 @@ def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client
     client_pid = int(pid.read_text())
     try:
         for _ in range(200):
-            status = Path(f"/proc/{client_pid}/stat")
-            if not status.exists() or status.read_text().split()[2] in {"Z", "X"}:
+            if process_exited(client_pid):
                 break
             time.sleep(0.01)
         else:
@@ -217,3 +218,28 @@ def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client
             os.killpg(client_pid, 9)
         except ProcessLookupError:
             pass
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_process_exit_observation_handles_proc_disappearing_during_read(monkeypatch, error):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+
+    def disappeared(path, *args, **kwargs):
+        assert str(path) == "/proc/123456/stat"
+        raise error()
+
+    monkeypatch.setattr(Path, "read_text", disappeared)
+    assert process_exited(123456)
+
+
+def test_process_exit_observation_does_not_hide_live_process_or_read_errors(monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self: "123456 (python) S 1 2 3")
+    assert not process_exited(123456)
+
+    def denied(path, *args, **kwargs):
+        raise PermissionError()
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        process_exited(123456)
