@@ -202,6 +202,7 @@ def test_hook_lost_create_reply_keeps_pending_intent_without_retry_or_guessed_de
     assert state.calls.count("DELETE") == 0
     journal = json.loads(next((tmp_path / "journal").glob("*.json")).read_text())
     assert journal["stage"] == "pending"
+    assert journal["before_record_ids"] == ["foreign"]
 
 
 def test_hook_propagation_failure_keeps_record_for_safe_retry_and_cleanup(tmp_path):
@@ -339,6 +340,11 @@ def test_cli_runs_exact_hook_and_never_prints_validation_or_credential(tmp_path,
     assert "private-pat" not in output.err + output.out
     assert "private-malformed-domain" not in output.err + output.out
     assert "v" * 43 not in output.err + output.out
+    credential.write_text(json.dumps({"token": "private-pat", "expires_on": "2000-01-01"}))
+    assert mod.main(["auth", *args]) == 1
+    output = capsys.readouterr()
+    assert "credential expired" in output.err
+    assert "private-pat" not in output.err + output.out
 
 
 def test_encoded_inventory_is_rejected_before_processing(monkeypatch):
@@ -417,3 +423,26 @@ def test_authority_discovery_rejects_private_addresses(monkeypatch):
     monkeypatch.setattr(mod.dns.resolver, "Resolver", lambda: SimpleNamespace(resolve=resolve))
     with pytest.raises(mod.DNSChallengeError, match="not public"):
         mod._authorities("yylx.world", mod.time.monotonic() + 5)
+
+
+def test_first_use_journal_directory_is_durable_before_provider_write(tmp_path, monkeypatch):
+    import os
+
+    state = ProviderState()
+    root = tmp_path / "journal"
+    synced = []
+    actual_fsync = os.fsync
+
+    def fsync(descriptor):
+        synced.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        actual_fsync(descriptor)
+
+    def provider_write(request):
+        if request.method == "POST":
+            assert str(root.parent) in synced, "journal directory entry was not made durable before POST"
+            assert str(root) in synced, "pending intent was not made durable before POST"
+        return state.handle(request)
+
+    monkeypatch.setattr(module().os, "fsync", fsync)
+    with provider(provider_write) as dns:
+        assert hook(dns, root, "auth") == "present"
