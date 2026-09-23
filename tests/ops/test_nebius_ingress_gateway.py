@@ -1,0 +1,155 @@
+"""TLS publication owns exact immutable Secrets; it never cuts public traffic."""
+from __future__ import annotations
+
+import copy
+import importlib
+import json
+from datetime import timedelta
+from uuid import uuid4
+
+import pytest
+
+from tests.ops.test_nebius_certificates import NOW, installation, material, publish
+
+
+def module():
+    return importlib.import_module("scripts.ops.nebius_ingress_gateway")
+
+
+class API:
+    def __init__(self, binding):
+        self.binding = binding
+        self.secrets = {}
+        self.creates = 0
+        self.failure = None
+        self.identity_matches = True
+
+    def verify_identity(self, binding):
+        assert binding == self.binding
+        if not self.identity_matches:
+            raise RuntimeError("wrong cluster")
+
+    def get_secret(self, namespace, name):
+        assert namespace == self.binding.namespace
+        return copy.deepcopy(self.secrets.get(name))
+
+    def create_secret(self, document):
+        self.creates += 1
+        if self.failure == "before":
+            raise TimeoutError("private-payload-must-not-escape")
+        self.secrets[document["metadata"]["name"]] = copy.deepcopy(document)
+        self.secrets[document["metadata"]["name"]]["metadata"]["uid"] = str(uuid4())
+        if self.failure == "after":
+            raise TimeoutError("private-payload-must-not-escape")
+
+
+@pytest.fixture
+def inputs(tmp_path):
+    config = json.loads(installation(tmp_path).read_text())
+    root = tmp_path / "certificate-state"
+    chain, key, roots = material()
+    selected = publish(root, chain, key, roots)
+    from scripts.ops.nebius_certificates import _bind_installation
+
+    _bind_installation(root, config)
+    binding = module().TLSBinding(
+        installation_id=str(uuid4()), certificate_installation_id=config["installation_id"],
+        namespace="loom-platform", namespace_uid=str(uuid4()), kube_system_uid=str(uuid4()),
+        child_domain=config["child_domain"], management_host=config["management_host"],
+    )
+    return config, binding, API(binding), roots, selected, root
+
+
+def deliver(inputs, **kwargs):
+    config, binding, api, roots, _, _ = inputs
+    return module().deliver_tls(config, binding=binding, api=api, roots=roots, now=kwargs.pop("now", NOW), **kwargs)
+
+
+def test_tls_secret_is_immutable_private_and_exactly_replayable(inputs):
+    result = deliver(inputs)
+    config, binding, api, roots, selected, root = inputs
+    assert result["certificate_generation"] == selected["generation"]
+    assert result["fingerprint_sha256"] == selected["fingerprint_sha256"]
+    secret = api.secrets[result["secret_name"]]
+    assert secret["type"] == "kubernetes.io/tls" and secret["immutable"] is True
+    assert set(secret["data"]) == {"tls.crt", "tls.key"}
+    assert secret["metadata"]["namespace"] == binding.namespace
+    assert deliver(inputs) == result and api.creates == 1
+    assert "PRIVATE KEY" not in json.dumps(result) and "tls.key" not in json.dumps(result)
+    receipt = list((root / "deliveries").glob("*.json"))
+    assert len(receipt) == 1 and receipt[0].stat().st_mode & 0o077 == 0
+    assert json.loads(receipt[0].read_text())["secret_uid"] == secret["metadata"]["uid"]
+
+
+@pytest.mark.parametrize("change", ["owner", "data", "mutable", "uid", "deleting", "namespace"])
+def test_replay_never_overwrites_foreign_changed_or_recreated_secret(inputs, change):
+    result = deliver(inputs)
+    api = inputs[2]
+    secret = api.secrets[result["secret_name"]]
+    if change == "owner":
+        secret["metadata"]["labels"] = {}
+    elif change == "data":
+        secret["data"]["tls.key"] = "Zm9yZWlnbg=="
+    elif change == "mutable":
+        secret["immutable"] = False
+    elif change == "uid":
+        secret["metadata"]["uid"] = str(uuid4())
+    elif change == "namespace":
+        secret["metadata"]["namespace"] = "foreign"
+    else:
+        secret["metadata"]["deletionTimestamp"] = NOW.isoformat()
+    before = copy.deepcopy(api.secrets)
+    with pytest.raises(module().IngressError):
+        deliver(inputs)
+    assert api.secrets == before and api.creates == 1
+
+
+@pytest.mark.parametrize("failure", ["before", "after"])
+def test_unknown_create_reply_is_read_back_without_write_retry(inputs, failure):
+    api = inputs[2]
+    api.failure = failure
+    if failure == "after":
+        assert deliver(inputs)["status"] == "tls_delivered"
+        assert deliver(inputs)["status"] == "tls_delivered"
+    else:
+        for _ in range(2):
+            with pytest.raises(module().IngressError) as error:
+                deliver(inputs)
+            assert "private-payload" not in str(error.value)
+    assert api.creates == 1
+
+
+@pytest.mark.parametrize("change", ["expired", "selection", "missing", "identity", "config", "symlink"])
+def test_invalid_certificate_or_binding_blocks_before_kubernetes_write(inputs, change):
+    config, binding, api, roots, selected, root = inputs
+    kwargs = {}
+    if change == "expired":
+        kwargs["now"] = NOW + timedelta(days=65)
+    elif change == "selection":
+        selected["fingerprint_sha256"] = "0" * 64
+        (root / "selected.json").write_text(json.dumps(selected))
+    elif change == "missing":
+        (root / "selected.json").unlink()
+    elif change == "identity":
+        api.identity_matches = False
+    elif change == "config":
+        config["installation_id"] = str(uuid4())
+    else:
+        original = root / "generations" / selected["generation"] / "privkey.pem"
+        original.rename(original.with_suffix(".retained"))
+        original.symlink_to(original.with_suffix(".retained"))
+    with pytest.raises(module().IngressError):
+        deliver(inputs, **kwargs)
+    assert api.creates == 0
+
+
+def test_rotation_retains_previous_secret_and_never_changes_selected_certificate(inputs):
+    first = deliver(inputs)
+    config, binding, api, roots, selected, root = inputs
+    before = copy.deepcopy(api.secrets[first["secret_name"]])
+    chain, key, new_roots = material()
+    publish(root, chain, key, new_roots)
+    second = module().deliver_tls(config, binding=binding, api=api, roots=new_roots, now=NOW)
+    assert first["secret_name"] != second["secret_name"]
+    assert api.secrets[first["secret_name"]] == before and api.creates == 2
+    assert json.loads((root / "selected.json").read_text())["previous_generation"] == selected["generation"]
