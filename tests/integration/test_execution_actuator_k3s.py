@@ -272,6 +272,11 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 "server",
                 "--disable=traefik",
                 "--disable=servicelb",
+                # Disposable Docker nodes have no cloud integration. K3s's
+                # embedded CCM can exit during its own RBAC bootstrap and take
+                # the test API down; neither it nor ServiceLB is needed here.
+                # Keep ordinary API RBAC, scheduling, CNI and policies enabled.
+                "--disable-cloud-controller",
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
                 *([] if node_name is None else [f"--node-name={node_name}"]),
