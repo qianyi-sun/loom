@@ -36,8 +36,17 @@ TRAEFIK = "docker.io/library/traefik@sha256:3429c14149401de2ac82fc72ddc6a9264233
 PYTHON = "docker.io/library/python@sha256:9b8dad7f66b5c7751df6cb7a64a07812e86bed85d0116efe82b3a11209f1440d"
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = '''import base64, hashlib, http.server, os, ssl, time
+upload_bytes = 0
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    def do_POST(self):
+        global upload_bytes
+        upload_bytes += len(self.rfile.read(1))
+        upload_bytes += len(self.rfile.read(1))
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
     def do_GET(self):
         if self.headers.get("Upgrade", "").lower() == "websocket":
             accept = base64.b64encode(hashlib.sha1((self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
@@ -51,13 +60,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             return
         body = (os.environ["IDENTITY"] + ":" + os.environ["PORT"]).encode()
+        if self.path == "/api/upload-observed": body = str(upload_bytes).encode()
         if self.path == "/api/stream": body = b"first-second"
         self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
+        if self.path == "/api/stream":
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+        else: self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.path == "/api/stream":
-            self.wfile.write(body[:6]); self.wfile.flush(); time.sleep(2)
-            self.wfile.write(body[6:]); self.wfile.flush()
+            self.wfile.write(b"6\\r\\n" + body[:6] + b"\\r\\n"); self.wfile.flush(); time.sleep(2)
+            self.wfile.write(b"6\\r\\n" + body[6:] + b"\\r\\n0\\r\\n\\r\\n"); self.wfile.flush()
         else: self.wfile.write(body)
     def log_message(self, *args): pass
 server = http.server.ThreadingHTTPServer(("0.0.0.0", int(os.environ["PORT"])), Handler)
@@ -111,7 +124,7 @@ def _backend(ns, name, port, *, tls=False):
 
 
 @pytest.mark.timeout(240)
-def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, platform_inputs, tmp_path):
+def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_inputs, tmp_path):
     config, candidate, profile = platform_inputs
     ns, old_host = config["namespace"], config["public_host"]
     foundation = FoundationBinding.model_validate(ingress_input["foundation"])
@@ -169,7 +182,9 @@ def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, pl
         _run(container, "kubectl", "apply", "--validate=strict", "-f", "-", payload=yaml.safe_dump_all(docs))
         try:
             _run(container, "kubectl", "rollout", "status", "deployment/loom-shared-ingress", "-n", ns, "--timeout=150s", timeout=165)
-            _run(container, "kubectl", "wait", "pods", "--all", "--all-namespaces", "--for=condition=Ready", "--timeout=150s", timeout=165)
+            _run(container, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s", timeout=75)
+            for namespace in (ns, "loom-dev-alice", "loom-dev-bob"):
+                _run(container, "kubectl", "wait", "pods", "--all", "-n", namespace, "--for=condition=Ready", "--timeout=60s", timeout=75)
         except AssertionError:
             pytest.fail(_run(container, "kubectl", "get", "pods", "-A", "-o", "wide") +
                         _run(container, "kubectl", "get", "events", "-A", "--field-selector", "type=Warning"))
@@ -221,10 +236,21 @@ def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, pl
             assert time.monotonic() - started < 1.5
             assert response.read() == b"second"
         with connect("alice.dev.example.com") as stream:
-            stream.sendall(b"POST /api/upload HTTP/1.1\r\nHost: alice.dev.example.com\r\nContent-Length: 104857601\r\n\r\nx")
+            # Backend must receive the first byte before the client finishes.
+            stream.sendall(b"POST /api/upload HTTP/1.1\r\nHost: alice.dev.example.com\r\nContent-Length: 2\r\n\r\nx")
+            deadline = time.monotonic() + 3
+            observed = None
+            while time.monotonic() < deadline:
+                observed = get("alice.dev.example.com", "/api/upload-observed")
+                if observed == (200, b"1"):
+                    break
+                time.sleep(0.1)
+            assert observed == (200, b"1")
+            stream.sendall(b"y")
             response = http.client.HTTPResponse(stream)
             response.begin()
-            assert response.status == 413
+            assert response.status == 200
+            assert response.read() == b"ok"
         with connect("alice.dev.example.com") as stream:
             stream.sendall(b"GET /api/socket HTTP/1.1\r\nHost: alice.dev.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
             data = b""
@@ -236,5 +262,13 @@ def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, pl
         result = container.exec(["kubectl", "exec", "-n", "loom-dev-bob", "loom-service", "--", "python", "-c", denial])
         assert result.exit_code != 0
         assert b"timed out" in result.output
+    except Exception as exc:
+        exc.add_note(_run(container, "kubectl", "logs", "-n", ns, "deployment/loom-shared-ingress", "--tail=60"))
+        exc.add_note(_run(container, "kubectl", "get", "services,endpointslices", "-n", ns, "-o", "wide"))
+        probe = container.exec(["kubectl", "exec", "-n", ns, "deployment/loom-shared-ingress", "--",
+                                "wget", "-T", "3", "-O", "-", "--no-check-certificate",
+                                "https://loom-web-origin." + ns + ".svc.cluster.local"])
+        exc.add_note(probe.output.decode())
+        raise
     finally:
         container.stop()

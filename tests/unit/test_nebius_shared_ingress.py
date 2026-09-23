@@ -85,7 +85,7 @@ def test_shared_controller_preserves_legacy_sni_and_never_allocates_public_resou
     assert not {"Secret", "Namespace", "PersistentVolumeClaim", "Ingress"} & {d["kind"] for d in docs}
     assert all(d["spec"].get("type", "ClusterIP") == "ClusterIP" for d in docs if d["kind"] == "Service")
     config = next(d["data"] for d in docs if d["kind"] == "ConfigMap")
-    dynamic = json.loads(config["routes.json"])
+    dynamic = json.loads(config["routes.yaml"])
     platform = json.loads(ingress_input["foundation"]["platform_config_json"])
     assert dynamic["tcp"]["routers"]["standalone"] == {
         "rule": "HostSNI(`" + platform["public_host"] + "`)",
@@ -106,10 +106,9 @@ def test_shared_controller_preserves_legacy_sni_and_never_allocates_public_resou
     assert static["providers"]["kubernetesIngress"]["allowExternalNameServices"] is False
     assert static["providers"]["kubernetesIngress"]["crossProviderNamespaces"] == []
     assert not static.get("api")
-    assert dynamic["http"]["middlewares"]["bounded-request"]["buffering"] == {
-        "maxRequestBodyBytes": 104857600, "memRequestBodyBytes": 1048576,
-        "disableResponseBuffer": True,
-    }
+    # Body buffering would hold streams and multiply disk use per child route.
+    assert "middlewares" not in static["entryPoints"]["websecure"]["http"]
+    assert "http" not in dynamic
 
 
 def test_shared_controller_is_read_only_nonroot_and_has_surge_budget(ingress_input):
@@ -125,7 +124,7 @@ def test_shared_controller_is_read_only_nonroot_and_has_surge_budget(ingress_inp
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
     assert container["image"] == ingress_input["image"]
-    assert container["resources"]["requests"] == {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "2Gi"}
+    assert container["resources"]["requests"] == {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}
     assert {v["secret"]["secretName"] for v in pod["volumes"] if "secret" in v} == {"loom-shared-public-tls"}
 
 
