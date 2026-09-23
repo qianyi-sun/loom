@@ -91,7 +91,10 @@ def render_management(
     """No execution stack, public allocation or existing application mutations."""
     if candidate.get("source_ref") != "refs/heads/dev":
         raise ValueError("management requires a protected dev publication")
-    image = candidate.get("images", {}).get("service", {}).get("image_ref", "")
+    images = candidate.get("images")
+    if not isinstance(images, dict) or not isinstance(images.get("service"), dict):
+        raise ValueError("management image must be an object in the candidate")
+    image = images["service"].get("image_ref", "")
     if (not isinstance(image, str) or re.fullmatch(
             re.escape(deployment.installation.registry_prefix) + r"/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", image,
     ) is None):
@@ -201,6 +204,10 @@ def render_management(
             template = spec["template"]
             template["metadata"].setdefault("labels", {})[_LABEL] = str(deployment.installation_id)
             template["metadata"]["annotations"]["loom.nebius/configuration-revision"] = revision
+            if doc["kind"] in {"Job", "CronJob"}:
+                for volume in template["spec"].get("volumes", []):
+                    if volume.get("configMap", {}).get("name") == "loom-platform-config":
+                        volume["configMap"]["items"] = [{"key": "environment.json", "path": "environment.json"}]
             size = deployment.postgres_storage_gi * 1024 if doc["kind"] == "CronJob" else 256
             for c in template["spec"].get("initContainers", []) + template["spec"]["containers"]:
                 c["resources"]["requests"]["ephemeral-storage"] = f"{size}Mi"
