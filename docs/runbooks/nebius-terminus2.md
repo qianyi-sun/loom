@@ -331,7 +331,11 @@ explicit adaptation. A removed guard leaves a shell no-op to preserve any
 enclosing branch or function. The converter does not evaluate arbitrary shell
 control flow. Verifier scripts containing `<<` outside comment lines require
 explicit adaptation, so heredoc payloads cannot be mistaken for installers.
-Recognized fixed-commit Git dependencies and explicit verifier asset downloads are prepared
+Preparation does not install `python-is-python3` implicitly or replace an
+authored `python` alias. When a Dockerfile declares `SHELL`, only appended
+preparation commands use explicit JSON-form `/bin/sh -c`; the authored shell
+and its task commands remain unchanged. Recognized fixed-commit Git dependencies
+and explicit verifier asset downloads are prepared
 at image build time. Assets are copied into the verifier workspace at the
 original script location; test assertions and reward branches are unchanged.
 If the original script emits a valid reward and then exits nonzero, the wrapper
@@ -352,7 +356,7 @@ exact-pinned pip plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Official Debian-based Python full
 and slim images are supported; Alpine images are not. Prebuilt images, custom
-Dockerfile `SHELL`, selected build targets, floating Git dependencies and
+Malformed Dockerfile `SHELL`, selected build targets, floating Git dependencies and
 unrecognized shell/installer forms need explicit adaptation. An upstream asset
 URL can still change on a future rebuild; a prepared image fixes the bytes used
 for its own executions, without making an upstream reproducibility claim. The publisher then dry-runs

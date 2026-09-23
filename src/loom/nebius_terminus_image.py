@@ -392,7 +392,6 @@ def _preparation_dockerfile(
             "asciinema",
             "passwd",
             "python3",
-            "python-is-python3",
             *bootstrap.apt_packages,
         }
     )
