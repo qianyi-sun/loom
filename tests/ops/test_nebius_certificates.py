@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import subprocess
+from pathlib import Path
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -187,3 +189,134 @@ def test_generation_files_are_synced_before_selecting_them(tmp_path, monkeypatch
     monkeypatch.setattr(os, "fsync", fsync)
     monkeypatch.setattr(os, "replace", replace)
     publish(tmp_path / "state", *material())
+
+
+def installation(tmp_path):
+    credential = tmp_path / "dns.json"
+    credential.write_text(json.dumps({"token": "private-pat", "expires_on": "2026-10-14"}))
+    credential.chmod(0o600)
+    path = tmp_path / "installation.json"
+    path.write_text(json.dumps({
+        "schema": "loom.nebius-certificate-installation.v1",
+        "installation_id": "024cfbfb-a7e8-4d85-9c60-c1d838730f9a",
+        "zone": "example.test", "child_domain": "dev.example.test",
+        "management_host": "management.example.test", "credential_file": str(credential),
+        "state_dir": str(tmp_path / "certificate-state"), "email": "operator@example.test",
+    }))
+    path.chmod(0o600)
+    return path
+
+
+def client_output(state, chain, key):
+    archive = state / "acme" / "archive" / "loom-managed"
+    archive.mkdir(parents=True, mode=0o700, exist_ok=True)
+    live = state / "acme" / "live" / "loom-managed"
+    live.mkdir(parents=True, mode=0o700, exist_ok=True)
+    for name, value in [("fullchain", chain), ("privkey", key)]:
+        path = archive / (name + "1.pem")
+        path.write_bytes(value)
+        path.chmod(0o600)
+        link = live / (name + ".pem")
+        link.symlink_to(Path("../../archive/loom-managed") / path.name)
+
+
+def test_issuer_pins_client_and_scope_then_publishes_only_validated_output(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    chain, key, roots = material()
+    calls = []
+
+    def client(args, **kwargs):
+        calls.append(args)
+        assert kwargs["stdout"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["timeout"] == 1800 and kwargs["start_new_session"] is True
+        assert "--force-renewal" not in args and "--run-deploy-hooks" not in args
+        assert args[args.index("--server") + 1] == "https://acme-v02.api.letsencrypt.org/directory"
+        assert args[args.index("--config") + 1] == "/dev/null"
+        assert [args[i + 1] for i, word in enumerate(args) if word == "--domain"] == list(NAMES)
+        assert not any("private-pat" in word for word in args)
+        state = tmp_path / "certificate-state"
+        assert json.loads((state / "issuance.json").read_text())["stage"] == "running"
+        client_output(state, chain, key)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(module(), "_run_client", client)
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+    result = module().issue_certificate(config, now=NOW, roots=roots)
+    assert result["status"] == "qualified"
+    assert result["sans"] == list(NAMES)
+    assert len(calls) == 1
+    assert json.loads((tmp_path / "certificate-state" / "issuance.json").read_text())["stage"] == "complete"
+
+
+@pytest.mark.parametrize("blocker", ["wrong_version", "pending_dns", "created_dns", "unknown_dns", "running_issue", "foreign_config"])
+def test_unresolved_or_incompatible_state_blocks_client_before_new_dns_write(tmp_path, monkeypatch, blocker):
+    config = installation(tmp_path)
+    state = tmp_path / "certificate-state"
+    state.mkdir(mode=0o700)
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.9.0" if blocker == "wrong_version" else "5.8.0")
+    if blocker.endswith("dns"):
+        journal = state / "challenges"
+        journal.mkdir(mode=0o700)
+        path = journal / ("a" * 64 + ".json")
+        path.write_text(json.dumps({"stage": blocker.removesuffix("_dns")}))
+        path.chmod(0o600)
+    elif blocker == "running_issue":
+        path = state / "issuance.json"
+        path.write_text(json.dumps({"stage": "running"}))
+        path.chmod(0o600)
+    elif blocker == "foreign_config":
+        path = state / "installation.json"
+        path.write_text(json.dumps({"installation_id": "foreign"}))
+        path.chmod(0o600)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("issuance attempted despite unresolved or incompatible state")
+
+    monkeypatch.setattr(module(), "_run_client", forbidden)
+    with pytest.raises(module().CertificateError):
+        module().issue_certificate(config, now=NOW)
+
+
+def test_failed_client_cannot_publish_and_cannot_be_automatically_retried(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    calls = []
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+
+    def failure(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 1)
+
+    monkeypatch.setattr(module(), "_run_client", failure)
+    for _ in range(2):
+        with pytest.raises(module().CertificateError):
+            module().issue_certificate(config, now=NOW)
+    assert len(calls) == 1
+    assert not (tmp_path / "certificate-state" / "selected.json").exists()
+
+
+@pytest.mark.parametrize("domain", ["foreign.example.test", "dev.example.test.evil", "*.management.example.test", ""])
+def test_hook_refuses_subject_outside_exact_two_subject_allowlist(tmp_path, monkeypatch, domain):
+    config = installation(tmp_path)
+    monkeypatch.setenv("CERTBOT_DOMAIN", domain)
+    monkeypatch.setenv("CERTBOT_VALIDATION", "v" * 43)
+    with pytest.raises(module().CertificateError):
+        module().certificate_hook(config, "auth")
+
+
+def test_certbot_live_symlink_cannot_export_foreign_private_file(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    chain, key, roots = material()
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+
+    def client(args, **kwargs):
+        state = tmp_path / "certificate-state"
+        client_output(state, chain, key)
+        link = state / "acme" / "live" / "loom-managed" / "privkey.pem"
+        link.unlink()
+        link.symlink_to(tmp_path / "dns.json")
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(module(), "_run_client", client)
+    with pytest.raises(module().CertificateError):
+        module().issue_certificate(config, now=NOW, roots=roots)
+    assert not (tmp_path / "certificate-state" / "selected.json").exists()
