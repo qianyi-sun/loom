@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import AuthContext
 from loom.db.schema import Batch, Benchmark, ProviderConnection, Team, Trial
 from loom_control_plane.execution_capacity import fetch_execution_capacity_status
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.routes.benchmarks import (
@@ -374,7 +375,7 @@ def _summary(status: str) -> str:
     return "Finish the setup items below before launching evaluations."
 
 
-@router.get("/overview")
+@router.get("/overview", response_model=wire.OverviewSummary, response_model_exclude_unset=True)
 async def get_overview(response: Response, sc: SessionAndCtx) -> dict[str, Any]:
     # Execution observations can change within seconds. Keep
     # browsers and intermediary caches from replaying an old readiness result.

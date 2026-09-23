@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import PendingTeamRegistration, Team, TeamInvite
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import (
     hash_optional,
     require_admin_actor,
@@ -94,7 +95,7 @@ async def _active_registration_exists(
     )).scalar_one_or_none() is not None
 
 
-@router.post("/teams/register", status_code=202)
+@router.post("/teams/register", status_code=202, response_model=wire.TeamRegistrationEntry, response_model_exclude_unset=True)
 async def register_team(
     request: Request,
     payload: _TeamRegistrationReq,
@@ -157,7 +158,7 @@ async def list_team_registrations(
     return {"items": [_serialize_registration(row) for row in rows]}
 
 
-@router.post("/admin/team-registrations/{registration_id}/approve")
+@router.post("/admin/team-registrations/{registration_id}/approve", response_model=wire.TeamRegistrationApproval, response_model_exclude_unset=True)
 async def approve_team_registration(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -236,7 +237,7 @@ async def approve_team_registration(
     }
 
 
-@router.post("/admin/team-registrations/{registration_id}/reject")
+@router.post("/admin/team-registrations/{registration_id}/reject", response_model=wire.TeamRegistrationEntry, response_model_exclude_unset=True)
 async def reject_team_registration(
     request: Request,
     sc: AdminSessionAndCtx,

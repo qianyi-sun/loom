@@ -1,3 +1,4 @@
+import { queryKeys } from "../../api/queryKeys";
 /**
  * Models tab on /providers/:id. Refresh + Add manual + Hide/Unhide.
  * Backend returns all cached rows (no pagination); v1 fetches all and
@@ -6,7 +7,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api, type ProviderConnectionModelEntry } from "../../api/client";
+import { api, type ProviderConnectionModelEntry } from "../../api";
 import { Button } from "../Button";
 import { Card } from "../Card";
 import CommandSnippet from "../CommandSnippet";
@@ -80,7 +81,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
   const cliConnection = connectionName ?? id;
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["providers", id, "models"],
+    queryKey: queryKeys["providers"](id, "models"),
     queryFn: () => api.listProviderConnectionModels(id),
   });
 
@@ -159,14 +160,14 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
             catalog, or <strong>Add manual model</strong> to register one by hand.
           </Card.Body>
         ) : (
-          <table className="min-w-full">
+          <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Provider models scroll area"><table aria-label="Provider models" className="min-w-full">
             <thead>
               <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-500">
-                <th className="px-4 py-2">Model ID</th>
-                <th className="px-4 py-2">Source</th>
-                <th className="px-4 py-2">Preflight</th>
-                <th className="px-4 py-2">Hidden</th>
-                <th className="px-4 py-2"></th>
+                <th scope="col" className="px-4 py-2">Model ID</th>
+                <th scope="col" className="px-4 py-2">Source</th>
+                <th scope="col" className="px-4 py-2">Preflight</th>
+                <th scope="col" className="px-4 py-2">Hidden</th>
+                <th scope="col" className="px-4 py-2"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -212,7 +213,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </Card>
       {showAdd && (

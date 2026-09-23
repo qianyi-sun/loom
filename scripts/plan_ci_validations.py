@@ -393,6 +393,7 @@ def plan_validations(
         "deploy/nginx-spa-security-headers.conf",
         "deploy/web-runtime-config.sh",
         "scripts/component_ownership.py",
+        "scripts/export_openapi.py",
     }
 
     for path in paths:
@@ -453,7 +454,7 @@ def plan_validations(
         if not _is_frontend_input(path) and _matches(path, exact=staging_exact, prefixes=staging_prefixes):
             select("staging_smoke", f"path:{path}")
             matched_owner = True
-        if path.startswith("web/") or path in web_quality_exact:
+        if path.startswith(("web/", "src/loom_service/")) or path in web_quality_exact:
             select("web_checks", f"path:{path}")
             matched_owner = True
         if not matched_owner:

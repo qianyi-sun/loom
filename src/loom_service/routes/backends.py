@@ -7,13 +7,14 @@ from typing import Any
 from fastapi import APIRouter
 
 from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
+from loom_service import wire_responses as wire
 from loom_service.dependencies import SessionAndCtx
 from loom_service.worker_backends import get_active_backends, get_service_execution_backend_pools
 
 router = APIRouter()
 
 
-@router.get("/backends")
+@router.get("/backends", response_model=wire.GetBackendsResponse, response_model_exclude_unset=True)
 async def list_backends(sc: SessionAndCtx) -> dict[str, Any]:
     session, _ctx = sc
     seen = await get_active_backends(session) if local_execution_enabled() else set()

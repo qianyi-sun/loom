@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Authenticated Home. This is the role-aware first screen for invited
  * users: it summarizes whether their team can launch evaluations and
@@ -11,7 +12,7 @@ import {
   type OverviewAction,
   type OverviewStatus,
   type OverviewSummary,
-} from "../api/client";
+} from "../api";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -300,7 +301,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
 
 export default function Home(): JSX.Element {
   const query = useQuery({
-    queryKey: ["overview"],
+    queryKey: queryKeys["overview"](),
     queryFn: () => api.getOverview(),
     // Keep shared execution observations and team activity current.
     refetchInterval: 10_000,

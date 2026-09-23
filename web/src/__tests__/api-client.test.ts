@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api/client";
+import { api, apiFetch, setCsrfToken, setUnauthorizedHandler } from "../api";
 import { setFrontendConfigForTests } from "../lib/frontendConfig";
 
 function validAuthSessionPayload() {
@@ -504,7 +504,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ items: [] }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
 
     const result = await api.listProviderConnections("team-a");
 
@@ -519,7 +519,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "abc", name: "x" }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     const result = await api.getProviderConnection("abc");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
@@ -532,7 +532,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "new" }), { status: 201 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     const payload = {
       name: "n", type: "openai-compatible",
       base_url: "https://example", api_key: "k",
@@ -549,7 +549,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ id: "abc" }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     const patch = { allowed_models: ["m1"] };
     await api.updateProviderConnection("abc", patch);
     expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -562,7 +562,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     await api.deleteProviderConnection("abc");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc",
@@ -574,7 +574,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ status: "valid" }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     const result = await api.testProviderConnection("abc");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/test",
@@ -587,7 +587,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ items: [] }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     await api.listProviderConnectionModels("abc");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models",
@@ -599,7 +599,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({}), { status: 201 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     const model = { model_id: "manual/x" };
     await api.addProviderConnectionModel("abc", model);
     expect(globalThis.fetch).toHaveBeenCalledWith(
@@ -612,7 +612,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(JSON.stringify({ added: 0, removed: 0 }), { status: 200 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     await api.refreshProviderConnectionModels("abc");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/refresh",
@@ -624,7 +624,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     await api.hideProviderConnectionModel("abc", "openai/gpt-4");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/openai%2Fgpt-4/hide",
@@ -636,7 +636,7 @@ describe("provider connection management endpoints", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Response(null, { status: 204 }),
     );
-    const { api } = await import("../api/client");
+    const { api } = await import("../api");
     await api.unhideProviderConnectionModel("abc", "openai/gpt-4");
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "/api/v1/provider-connections/abc/models/openai%2Fgpt-4/unhide",
@@ -645,7 +645,7 @@ describe("provider connection management endpoints", () => {
   });
 
   it("addProviderConnectionModel is the new name (createProviderConnectionModel is gone)", async () => {
-    const mod = await import("../api/client");
+    const mod = await import("../api");
     expect(mod.api.addProviderConnectionModel).toBeDefined();
     expect((mod.api as Record<string, unknown>).createProviderConnectionModel)
       .toBeUndefined();

@@ -1,13 +1,15 @@
+import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { api, type ArtifactSummary, type RunLibraryBatch } from "../api/client";
+import { api, type ArtifactSummary, type RunLibraryBatch } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
 import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
-import { Input } from "../components/Input";
+import { ARTIFACT_LABELS } from "../lib/artifactLabels";
+import { RunLibraryFilters } from "./RunLibraryFilters";
 import LoadingState from "../components/LoadingState";
 import Pagination from "../components/Pagination";
 import { StatusPill } from "../components/StatusPill";
@@ -20,38 +22,6 @@ import { batchResultPresentation, batchStateVariant } from "../lib/statusVariant
 import { formatUsageCost } from "../lib/usageCost";
 
 const TERMINAL_STATES = new Set(["finished", "cancelled"]);
-
-const ARTIFACT_LABELS: Array<[keyof ArtifactSummary, string]> = [
-  ["reports", "Reports"],
-  ["trajectories", "Trajectories"],
-  ["reusable_outputs", "Outputs"],
-  ["logs_diagnostics", "Logs"],
-  ["raw_diagnostics", "Raw/internal"],
-];
-
-const TYPED_ARTIFACT_LABELS: Array<[string, string]> = [
-  ["trajectory", "Trajectory"],
-  ["atif_projection", "ATIF projection"],
-  ["trajectory_bundle", "Trajectory bundle"],
-  ["completion_set", "Completion set"],
-  ["task_set", "Task set"],
-  ["task_split", "Task split"],
-  ["skill_markdown", "Skill markdown"],
-  ["workflow_spec", "Workflow spec"],
-  ["verifier_replay", "Verifier replay"],
-  ["debug_bundle", "Debug bundle"],
-  ["metric_table", "Metric table"],
-  ["evidence_bundle", "Evidence bundle"],
-  ["training_data_export", "Training data export"],
-];
-
-const STATE_OPTIONS = [
-  ["", "Any state"],
-  ["finished", "Finished"],
-  ["cancelled", "Cancelled"],
-  ["running", "Running"],
-  ["submitted", "Submitted"],
-];
 
 function scopeFromParams(params: URLSearchParams): "my" | "all" {
   return params.get("scope") === "all" ? "all" : "my";
@@ -173,29 +143,14 @@ export default function RunLibrary(): JSX.Element {
   );
 
   const teamsQuery = useQuery({
-    queryKey: ["admin-teams", auth.isAdmin],
+    queryKey: queryKeys["admin-teams"](auth.isAdmin),
     queryFn: () => api.listAdminTeams(),
     enabled: auth.isAdmin,
   });
   const teamOptions = auth.isAdmin ? teamsQuery.data?.items ?? [] : auth.teams;
-  const selectedTeamKnown = teamOptions.some((team) => team.id === teamId);
 
   const query = useQuery({
-    queryKey: [
-      "run-library",
-      scope,
-      teamId,
-      state,
-      artifactType,
-      search,
-      benchmarkId,
-      agentName,
-      modelProvider,
-      modelName,
-      providerConnectionId,
-      providerModelId,
-      page.cursor,
-    ],
+    queryKey: queryKeys["run-library"](scope, teamId, state, artifactType, search, benchmarkId, agentName, modelProvider, modelName, providerConnectionId, providerModelId, page.cursor),
     queryFn: () =>
       api.listRunLibraryBatches({
         scope: scope === "all" ? "all" : undefined,
@@ -216,29 +171,10 @@ export default function RunLibrary(): JSX.Element {
   });
 
   const pipelineArtifactsQuery = useQuery({
-    queryKey: ["run-library-pipeline-artifacts", scope, teamId, artifactType, pipelineRecipe, pipelineResult],
+    queryKey: queryKeys["run-library-pipeline-artifacts"](scope, teamId, artifactType, pipelineRecipe, pipelineResult),
     queryFn: () => api.listRunLibraryArtifacts({ producer_kind: "pipeline", pipeline_recipe: pipelineRecipe || undefined, pipeline_result: pipelineResult || undefined, team_id: teamId || undefined, artifact_type: artifactType || undefined, scope: scope === "all" ? "all" : undefined }),
     enabled: pipelineOnly,
   });
-
-  function updateParam(key: string, value: string): void {
-    const next = new URLSearchParams(searchParams);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    setSearchParams(next);
-  }
-
-  function updateParamWithAliases(
-    key: string,
-    value: string,
-    aliases: string[] = [],
-  ): void {
-    const next = new URLSearchParams(searchParams);
-    for (const alias of aliases) next.delete(alias);
-    if (value) next.set(key, value);
-    else next.delete(key);
-    setSearchParams(next);
-  }
 
   function setScope(nextScope: "my" | "all"): void {
     const next = new URLSearchParams(searchParams);
@@ -276,145 +212,7 @@ export default function RunLibrary(): JSX.Element {
         </p>
       </DocsCallout>
 
-      <Card>
-        <Card.Body className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-            <input type="checkbox" checked={pipelineOnly} onChange={(event) => updateParam("producer_kind", event.target.checked ? "pipeline" : "")} />
-            Pipeline artifacts only
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">Pipeline Recipe<Input value={pipelineRecipe} onChange={(event) => updateParam("pipeline_recipe", event.target.value.normalize("NFC"))} placeholder="name@version" className="mt-1 normal-case tracking-normal" /></label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">Pipeline result<select value={pipelineResult} onChange={(event) => updateParam("pipeline_result", event.target.value)} className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"><option value="">Any result</option>{["succeeded", "partial_failed", "failed", "cancelled", "budget_exhausted"].map((value) => <option key={value}>{value}</option>)}</select></label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Search
-            <Input
-              value={search}
-              onChange={(event) => updateParam("q", event.target.value)}
-              placeholder="Name, description, or ID"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Benchmark
-            <Input
-              value={benchmarkId}
-              onChange={(event) =>
-                updateParam("benchmark_id", event.target.value)
-              }
-              placeholder="humaneval"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Agent
-            <Input
-              value={agentName}
-              onChange={(event) =>
-                updateParamWithAliases("agent_name", event.target.value, ["agent"])
-              }
-              placeholder="direct-completion"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Model provider
-            <Input
-              value={modelProvider}
-              onChange={(event) =>
-                updateParam("model_provider", event.target.value)
-              }
-              placeholder="openai"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Model name
-            <Input
-              value={modelName}
-              onChange={(event) =>
-                updateParamWithAliases("model_name", event.target.value, ["model"])
-              }
-              placeholder="gpt-4o-mini"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Provider connection
-            <Input
-              value={providerConnectionId}
-              onChange={(event) =>
-                updateParam("provider_connection_id", event.target.value)
-              }
-              placeholder="connection ID"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Provider model
-            <Input
-              value={providerModelId}
-              onChange={(event) =>
-                updateParam("provider_model_id", event.target.value)
-              }
-              placeholder="provider model ID"
-              className="mt-1 normal-case tracking-normal"
-            />
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Team
-            <select
-              value={teamId}
-              onChange={(event) => updateParam("team_id", event.target.value)}
-              className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
-            >
-              <option value="">Current scope</option>
-              {teamId && !selectedTeamKnown ? (
-                <option value={teamId}>{teamId}</option>
-              ) : null}
-              {teamOptions.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            State
-            <select
-              value={state}
-              onChange={(event) => updateParam("state", event.target.value)}
-              className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
-            >
-              {STATE_OPTIONS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-            Artifact type
-            <select
-              value={artifactType}
-              onChange={(event) =>
-                updateParam("artifact_type", event.target.value)
-              }
-              className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
-            >
-              <option value="">Any artifact</option>
-              {ARTIFACT_LABELS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-              {TYPED_ARTIFACT_LABELS.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </Card.Body>
-      </Card>
+      <RunLibraryFilters teamOptions={teamOptions} />
 
       <Card>
         <Card.Body className="p-0">
@@ -425,10 +223,10 @@ export default function RunLibrary(): JSX.Element {
           ) : pipelineArtifactsQuery.data.items.length === 0 ? (
             <EmptyState label="No Pipeline artifacts match this view." hint="Clear a Pipeline filter or select another team." />
           ) : (
-            <div className="overflow-x-auto"><table className="min-w-full text-sm"><thead><tr>{["Artifact", "Type", "Producer Pipeline", "Producer Stage", "Recipe", "Result", "Team", "Scan status"].map((header) => <th key={header} className="px-4 py-3 text-left text-xs uppercase text-slate-500">{header}</th>)}</tr></thead><tbody>{pipelineArtifactsQuery.data.items.map((artifact) => <tr key={artifact.id ?? artifact.key} className="border-t"><td className="px-4 py-3">{artifact.key}</td><td className="px-4 py-3">{artifact.artifact_type ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline ? <Link className="text-accent" to={`/pipelines/${artifact.pipeline.run_id}`}>{artifact.pipeline.run_id}</Link> : "—"}</td><td className="px-4 py-3">{artifact.pipeline?.stage_run_id ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.recipe ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.result ?? "Pending"}</td><td className="px-4 py-3">{artifact.owner_team?.name ?? "—"}</td><td className="px-4 py-3">{artifact.share_status === "pending_scan" ? "Team private — scan pending" : artifact.share_status}</td></tr>)}</tbody></table></div>
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Pipeline artifacts scroll area"><table aria-label="Pipeline artifacts" className="min-w-full text-sm"><thead><tr>{["Artifact", "Type", "Producer Pipeline", "Producer Stage", "Recipe", "Result", "Team", "Scan status"].map((header) => <th scope="col" key={header} className="px-4 py-3 text-left text-xs uppercase text-slate-500">{header}</th>)}</tr></thead><tbody>{pipelineArtifactsQuery.data.items.map((artifact) => <tr key={artifact.id ?? artifact.key} className="border-t"><td className="px-4 py-3"><span className="block min-w-64 max-w-sm break-words">{artifact.key}</span></td><td className="px-4 py-3">{artifact.artifact_type ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline ? <Link className="text-accent" to={`/pipelines/${artifact.pipeline.run_id}`}>{artifact.pipeline.run_id}</Link> : "—"}</td><td className="px-4 py-3">{artifact.pipeline?.stage_run_id ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.recipe ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.result ?? "Pending"}</td><td className="px-4 py-3">{artifact.owner_team?.name ?? "—"}</td><td className="px-4 py-3">{artifact.share_status === "pending_scan" ? "Team private — scan pending" : artifact.share_status}</td></tr>)}</tbody></table></div>
           ) : query.isPending ? (
             <div className="p-5">
-              <LoadingState />
+              <LoadingState announce={false} />
             </div>
           ) : query.isError ? (
             <div className="p-5">
@@ -440,8 +238,8 @@ export default function RunLibrary(): JSX.Element {
               hint="Try All teams or clear the filters."
             />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Runs scroll area">
+              <table aria-label="Runs" className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
                   <tr className="bg-slate-50/50">
                     {[
@@ -480,7 +278,7 @@ export default function RunLibrary(): JSX.Element {
                         <td className="px-4 py-3">
                           <Link
                             to={`/library/batches/${batch.id}`}
-                            className="font-medium text-accent hover:text-accent-hover"
+                            className="block min-w-64 max-w-sm break-words font-medium text-accent hover:text-accent-hover"
                           >
                             {batch.name}
                           </Link>

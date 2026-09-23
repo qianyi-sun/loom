@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from loom.db.schema import RateCard
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.forwarders import forward, propagate
@@ -31,7 +32,7 @@ def _serialize_rate_card(row: RateCard) -> dict[str, Any]:
     }
 
 
-@router.get("/rate-cards")
+@router.get("/rate-cards", response_model=wire.GetRateCardsResponse, response_model_exclude_unset=True)
 async def list_rate_cards(
     sc: SessionAndCtx,
 ) -> dict[str, list[dict[str, Any]]]:

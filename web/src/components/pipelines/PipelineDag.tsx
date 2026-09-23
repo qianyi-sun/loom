@@ -1,6 +1,6 @@
 import { useMemo, useRef } from "react";
 
-import type { PipelineNodeTopology, PipelineRunDetail, PipelineStageRunSummary } from "../../api/client";
+import type { PipelineNodeTopology, PipelineRunDetail, PipelineStageRunSummary } from "../../api";
 import { bytewiseCompare, PIPELINE_STAGE_STATE } from "../../lib/pipelinePresentation";
 
 type StageState = PipelineStageRunSummary["state"];

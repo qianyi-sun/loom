@@ -1,8 +1,9 @@
+import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { api, type InviteLookup, type InviteStatus } from "../api/client";
+import { api, type InviteLookup, type InviteStatus } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -69,7 +70,7 @@ export default function InviteAccept(): JSX.Element {
   const [joinedTeam, setJoinedTeam] = useState<string | null>(null);
 
   const invite = useQuery({
-    queryKey: ["invite", code],
+    queryKey: queryKeys["invite"](code),
     queryFn: () => api.lookupInvite(code),
     enabled: code.length > 0,
     retry: false,

@@ -1,6 +1,6 @@
 import { createContext } from "react";
 
-import type { AuthMe, AuthTeam } from "../api/client";
+import type { AuthMe, AuthTeam } from "../api";
 
 export type AuthSessionStatus =
   | "loading"

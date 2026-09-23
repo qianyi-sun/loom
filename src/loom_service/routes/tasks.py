@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.benchmark_profiles import resolve_benchmark_selectors
 from loom.db.schema import Task, TaskSet
+from loom_service import wire_responses as wire
 from loom_service.dependencies import SessionAndCtx
 from loom_service.task_config_validation import split_valid_task_configs
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
@@ -85,7 +86,7 @@ async def _owned_task_set_ids(
     )
 
 
-@router.get("/tasks")
+@router.get("/tasks", response_model=wire.TaskList, response_model_exclude_unset=True)
 async def list_tasks(
     sc: SessionAndCtx,
     benchmark_id: Annotated[str | None, Query()] = None,

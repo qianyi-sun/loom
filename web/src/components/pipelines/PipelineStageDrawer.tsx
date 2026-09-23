@@ -1,7 +1,8 @@
+import { queryKeys } from "../../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 
-import { api, type PipelineEventPage, type PipelineStageRunSummary } from "../../api/client";
+import { api, type PipelineEventPage, type PipelineStageRunSummary } from "../../api";
 import { Modal } from "../Modal";
 import ErrorState from "../ErrorState";
 import LoadingState from "../LoadingState";
@@ -10,8 +11,8 @@ import { PIPELINE_ATTEMPT_STATE, PIPELINE_STAGE_STATE } from "../../lib/pipeline
 import BehaviorRolloutLivePreview from "../artifacts/BehaviorRolloutLivePreview";
 
 export default function PipelineStageDrawer({ stage, events, onClose, onRetry }: { stage: PipelineStageRunSummary | null; events: PipelineEventPage["events"]; onClose: () => void; onRetry: (stage: PipelineStageRunSummary) => void }): JSX.Element {
-  const detail = useQuery({ queryKey: ["pipeline-stage", stage?.id], queryFn: () => api.getPipelineStageRun(stage!.id), enabled: stage !== null });
-  const attempts = useQuery({ queryKey: ["pipeline-stage-attempts", stage?.id], queryFn: () => api.listPipelineStageAttempts(stage!.id), enabled: stage !== null });
+  const detail = useQuery({ queryKey: queryKeys["pipeline-stage"](stage?.id), queryFn: () => api.getPipelineStageRun(stage!.id), enabled: stage !== null });
+  const attempts = useQuery({ queryKey: queryKeys["pipeline-stage-attempts"](stage?.id), queryFn: () => api.listPipelineStageAttempts(stage!.id), enabled: stage !== null });
   const logs = events.filter((event) => event.stage_run_id === stage?.id);
   const activeAttempt = attempts.data?.items
     .filter((attempt) => attempt.state === "running")

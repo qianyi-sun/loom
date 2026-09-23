@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import Select, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,7 @@ from loom.benchmark_readiness import (
     readiness_display_fields,
 )
 from loom.db.schema import Benchmark, BenchmarkAlias, Task
+from loom_service import wire_responses as wire
 from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
@@ -172,7 +174,7 @@ async def _benchmark_rows_with_readiness(
     ]
 
 
-@router.get("/benchmarks")
+@router.get("/benchmarks", response_model=wire.BenchmarkList, response_model_exclude_unset=True)
 async def list_benchmarks(
     sc: SessionAndCtx,
     cursor: Annotated[str | None, Query()] = None,
@@ -223,6 +225,49 @@ async def list_benchmarks(
     }
 
 
+class BenchmarkDiscoveryRequest(BaseModel):
+    benchmark_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class BenchmarkTag(BaseModel):
+    key: str
+    values: list[str]
+
+
+class BenchmarkDiscoveryResponse(BaseModel):
+    items: list[BenchmarkTag]
+
+
+@router.post("/benchmarks/discover", response_model=BenchmarkDiscoveryResponse)
+async def discover_benchmarks(
+    body: BenchmarkDiscoveryRequest,
+    sc: SessionAndCtx,
+) -> BenchmarkDiscoveryResponse:
+    """Union selected tags in bulk. Catalog readiness is already a bulk read.
+
+    Keep readiness on GET /benchmarks; loading task configurations again for
+    every selection would duplicate its authoritative catalog projection.
+    """
+    session, _ctx = sc
+    resolved = await resolve_benchmark_selectors(
+        session, sorted(set(body.benchmark_ids)), require_runnable=False,
+    )
+    physical_ids = sorted(set(resolved.physical_ids))
+    benchmarks = list((await session.scalars(
+        select(Benchmark).where(Benchmark.id.in_(physical_ids)).order_by(Benchmark.id),
+    )).all())
+    if len(benchmarks) != len(physical_ids):
+        raise HTTPException(status_code=404, detail="benchmark not found")
+    rows = (await session.execute(text(
+        "SELECT kv.key, ARRAY_AGG(DISTINCT kv.value ORDER BY kv.value) "
+        "FROM tasks t, jsonb_each_text(t.tags) AS kv(key, value) "
+        "WHERE t.benchmark_id = ANY(:ids) GROUP BY kv.key ORDER BY kv.key",
+    ), {"ids": physical_ids})).all()
+    return BenchmarkDiscoveryResponse(
+        items=[BenchmarkTag(key=key, values=list(values)) for key, values in rows],
+    )
+
+
 @router.get("/benchmarks/{benchmark_id}")
 async def get_benchmark(
     benchmark_id: str,
@@ -264,7 +309,7 @@ async def get_benchmark(
     )
 
 
-@router.get("/benchmarks/{benchmark_id}/tags")
+@router.get("/benchmarks/{benchmark_id}/tags", response_model=wire.BenchmarkTagsResponse, response_model_exclude_unset=True)
 async def list_benchmark_tags(
     benchmark_id: str,
     sc: SessionAndCtx,

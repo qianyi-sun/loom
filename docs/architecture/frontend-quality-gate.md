@@ -17,9 +17,10 @@ The gate uses a frozen `npm ci` install and requires:
    functions and 75% branches;
 3. a successful production Vite build;
 4. Chromium against that production build under a validated local `/dev` or
-   `/prod` route prefix at 1440x900 and 390x844 for logged-out, user, and admin
+   `/prod` route prefix at 390x844, 768x1024, 1280x800 and 1440x900 for logged-out, user, and admin
    routes; and
-5. zero serious or critical axe violations plus fail-closed page-error,
+5. deterministic offline OpenAPI regeneration (`npm run gen-api -- --check`); and
+6. zero serious or critical axe violations plus fail-closed page-error,
    console, unhandled-error, same-origin network, asset status, and MIME
    ledgers.
 
@@ -93,3 +94,6 @@ authorized the broker-owned rollout. Candidate-bound browser evidence then
 extends—not replaces—the repository gate. Local or Draft-PR work must never be
 inserted into, used to re-resolve, or used to replace an already fixed rollout
 candidate.
+
+See [frontend domain boundaries](frontend-domain-boundaries.md) for code generation,
+ownership, aggregate catalog discovery and the local/manual acceptance boundary.

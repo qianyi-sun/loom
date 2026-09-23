@@ -36,6 +36,7 @@ from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
 )
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import (
     is_admin,
     require_team_or_admin,
@@ -213,7 +214,7 @@ async def _cloud_compute_records_exists(session: AsyncSession) -> bool:
     return bool(res.scalar())
 
 
-@router.get("/usage")
+@router.get("/usage", response_model=wire.Usage, response_model_exclude_unset=True)
 async def get_usage(
     request: Request,
     sc: SessionAndCtx,

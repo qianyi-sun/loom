@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import Team, TeamMembership, TeamQuota, Token, User
 from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
     require_team_or_admin,
@@ -205,7 +206,7 @@ async def _set_team_control(
     return await _serialize_team(session, team)
 
 
-@router.get("/teams/{team_id}")
+@router.get("/teams/{team_id}", response_model=wire.Team, response_model_exclude_unset=True)
 async def get_team(
     request: Request,
     sc: SessionAndCtx,
@@ -228,7 +229,7 @@ async def list_admin_teams(sc: AdminSessionAndCtx) -> dict[str, list[dict[str, A
     return {"items": [await _serialize_team(session, team) for team in rows]}
 
 
-@router.post("/admin/teams", status_code=status.HTTP_201_CREATED)
+@router.post("/admin/teams", status_code=status.HTTP_201_CREATED, response_model=wire.AdminTeam, response_model_exclude_unset=True)
 async def create_admin_team(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -268,7 +269,7 @@ async def create_admin_team(
     return await _serialize_team(session, team)
 
 
-@router.patch("/admin/teams/{team_id}")
+@router.patch("/admin/teams/{team_id}", response_model=wire.AdminTeam, response_model_exclude_unset=True)
 async def update_admin_team(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -342,7 +343,7 @@ async def _set_public_registration(
     return await _serialize_team(session, team)
 
 
-@router.post("/admin/teams/{team_id}/public-registration/enable")
+@router.post("/admin/teams/{team_id}/public-registration/enable", response_model=wire.AdminTeam, response_model_exclude_unset=True)
 async def enable_public_registration(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -360,7 +361,7 @@ async def enable_public_registration(
     )
 
 
-@router.post("/admin/teams/{team_id}/public-registration/disable")
+@router.post("/admin/teams/{team_id}/public-registration/disable", response_model=wire.AdminTeam, response_model_exclude_unset=True)
 async def disable_public_registration(
     request: Request,
     sc: AdminSessionAndCtx,

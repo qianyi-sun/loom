@@ -21,6 +21,8 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
+    { name: "chromium-tablet", use: { ...devices["Desktop Chrome"], viewport: { width: 768, height: 1024 } } },
+    { name: "chromium-laptop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
     {
       name: "chromium-desktop",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },

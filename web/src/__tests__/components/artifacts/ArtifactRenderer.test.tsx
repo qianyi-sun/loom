@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 
-import type { PipelineArtifactDetail } from "../../../api/client";
+import type { PipelineArtifactDetail } from "../../../api";
 import ArtifactRenderer, {
   ARTIFACT_RENDERERS,
 } from "../../../components/artifacts/ArtifactRenderer";

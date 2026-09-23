@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Benchmarks list — registered benchmark suites grouped by series.
  *
@@ -15,7 +16,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import DocsCallout from "../components/DocsCallout";
@@ -101,7 +102,7 @@ export default function Benchmarks(): JSX.Element {
     [],
   );
   const query = useQuery({
-    queryKey: ["benchmarks", page.current],
+    queryKey: queryKeys["benchmarks"](page.current),
     queryFn: () =>
       api.listBenchmarks({
         cursor: page.current ?? undefined,
@@ -157,8 +158,8 @@ export default function Benchmarks(): JSX.Element {
       );
     }
     return (
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-slate-200 text-sm">
+      <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Benchmarks scroll area">
+        <table aria-label="Benchmarks" className="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
               {[
@@ -170,7 +171,7 @@ export default function Benchmarks(): JSX.Element {
                 "Source",
                 "Imported",
               ].map((h) => (
-                <th
+                <th scope="col"
                   key={h}
                   className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
                 >
@@ -187,7 +188,7 @@ export default function Benchmarks(): JSX.Element {
                 className="divide-y divide-slate-100 border-t border-slate-200"
               >
                 <tr className="bg-indigo-50/60">
-                  <th
+                  <th scope="col"
                     colSpan={7}
                     className="px-4 py-2.5 text-left text-sm font-semibold text-indigo-900"
                   >

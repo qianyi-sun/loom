@@ -1,7 +1,7 @@
 import {
   pipelineArtifactFileUrl,
   type PipelineArtifactDetail,
-} from "../../api/client";
+} from "../../api";
 
 export default function GenericArtifactViewer({
   artifact,

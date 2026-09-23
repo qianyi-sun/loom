@@ -30,6 +30,7 @@ from loom.db.schema import (
 )
 from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -1782,7 +1783,7 @@ def _batch_after_cursor(cursor: Cursor) -> Any:
     )
 
 
-@router.get("/run-library/batches")
+@router.get("/run-library/batches", response_model=wire.RunLibraryBatchList, response_model_exclude_unset=True)
 async def list_run_library_batches(
     sc: SessionAndCtx,
     scope: Annotated[str, Query(pattern="^(my|all)$")] = "my",
@@ -2092,7 +2093,7 @@ async def export_run_library_artifacts(
     return Response(content=content, media_type="application/x-ndjson")
 
 
-@router.get("/run-library/batches/{batch_id}")
+@router.get("/run-library/batches/{batch_id}", response_model=wire.RunLibraryBatchDetail, response_model_exclude_unset=True)
 async def get_run_library_batch(
     request: Request,
     sc: SessionAndCtx,
@@ -2255,7 +2256,7 @@ async def _freeze_derived_runtime_profile(
     return profile.model_dump(mode="json") if profile is not None else None
 
 
-@router.post("/run-library/batches/{batch_id}/clone-config", status_code=201)
+@router.post("/run-library/batches/{batch_id}/clone-config", status_code=201, response_model=wire.CloneRunLibraryBatchResult, response_model_exclude_unset=True)
 async def clone_run_library_batch_config(
     request: Request,
     sc: SessionAndCtx,
@@ -2430,7 +2431,7 @@ async def download_run_library_artifact(
     )
 
 
-@router.post("/run-library/trials/{trial_id}/artifacts/reuse", status_code=201)
+@router.post("/run-library/trials/{trial_id}/artifacts/reuse", status_code=201, response_model=wire.ReuseRunLibraryArtifactResult, response_model_exclude_unset=True)
 async def reuse_run_library_artifact(
     request: Request,
     sc: SessionAndCtx,

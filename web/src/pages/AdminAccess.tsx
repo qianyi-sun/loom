@@ -1,731 +1,74 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-
-import {
-  api,
-  type AccountActionApproval,
-  type AdminTeam,
-  type ApiTokenEntry,
-  type ApiTokenReveal,
-  type InviteEntry,
-  type InviteReveal,
-  type InviteRole,
-  type InviteStatus,
-  type PasswordResetRequestEntry,
-  type TeamRegistrationEntry,
-  type TeamRegistrationApproval,
-  type UserRegistrationEntry,
-} from "../api/client";
-import { useAuth } from "../auth/useAuth";
+import { type InviteRole, type InviteStatus } from "../api";
+import AdminAuditLog from "../components/admin/AdminAuditLog";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import AdminAuditLog from "../components/admin/AdminAuditLog";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { Tabs } from "../components/Tabs";
-import { formatLocalDateTime } from "../lib/dateTime";
-import { oracleSmokeBatchCommand } from "../lib/quickstartSnippets";
-import { currentServerOrigin } from "../lib/serverOrigin";
+import { downloadInviteLink, formatDate, statusClass } from "./adminAccessState";
+import { CliSetupCommands } from "./AdminCliSetup";
 
-function formatDate(value: string | null): string {
-  return formatLocalDateTime(value);
-}
-
-function downloadInviteLink(link: string, teamName: string | null): void {
-  const blob = new Blob([`${link}\n`], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `${teamName ?? "loom"}-invite-link.txt`;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function statusClass(status: InviteStatus): string {
-  switch (status) {
-    case "pending":
-      return "text-amber-700";
-    case "accepted":
-      return "text-emerald-700";
-    case "expired":
-      return "text-slate-600";
-    case "revoked":
-      return "text-red-700";
-  }
-}
-
-const TOKEN_SCOPE_OPTIONS = [
-  {
-    value: "read:own",
-    label: "Read own runs",
-    description: "Read this team's runs, batches, artifacts, and metadata.",
-  },
-  {
-    value: "submit",
-    label: "Submit evaluations",
-    description: "Create trials and batches for the current team.",
-  },
-  {
-    value: "providers:manage",
-    label: "Manage provider connections",
-    description: "Create, update, test, and remove model provider credentials.",
-  },
-  {
-    value: "tokens:manage",
-    label: "Manage API tokens",
-    description: "Create, rotate, revoke, and list user-owned API tokens.",
-  },
-] as const;
-
-const TOKEN_SCOPE_LABELS: ReadonlyMap<string, string> = new Map(
-  TOKEN_SCOPE_OPTIONS.map(
-    (option): [string, string] => [option.value, option.label],
-  ),
-);
-
-function formatTokenScopes(scopes: string[]): string {
-  if (scopes.length === 0) return "No scopes";
-  return scopes
-    .map((scope) => TOKEN_SCOPE_LABELS.get(scope) ?? scope)
-    .sort()
-    .join(", ");
-}
-
-function tokenName(token: ApiTokenEntry): string {
-  return token.name?.trim() || token.token_hash_prefix;
-}
-
-function tokenStatus(token: ApiTokenEntry): { label: string; className: string } {
-  if (token.revoked_at) {
-    return { label: "Revoked", className: "text-red-700" };
-  }
-  if (token.expires_at && Date.parse(token.expires_at) <= Date.now()) {
-    return { label: "Expired", className: "text-slate-600" };
-  }
-  return { label: "Active", className: "text-emerald-700" };
-}
-
-function tokenLifetimeDays(value: string): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 1) return 30;
-  return Math.floor(parsed);
-}
-
-function CliSetupCommands({ token }: { token: string }): JSX.Element {
-  const commands = [
-    `export LOOM_API_TOKEN=${token}`,
-    `loom auth login --server ${currentServerOrigin()} --token env:LOOM_API_TOKEN`,
-    "loom auth whoami",
-  ];
-  return (
-    <div className="space-y-2">
-      <p className="text-sm font-medium text-emerald-950">CLI setup commands</p>
-      <div className="space-y-1 rounded-lg border border-emerald-200 bg-white p-3">
-        {commands.map((command) => (
-          <code
-            key={command}
-            className="block whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-800"
-          >
-            {command}
-          </code>
-        ))}
-      </div>
-      <p className="pt-2 text-sm font-medium text-emerald-950">
-        Next CLI checks
-      </p>
-      <code className="block whitespace-pre-wrap break-words rounded-lg border border-emerald-200 bg-white p-3 font-mono text-xs leading-relaxed text-slate-800">
-        {oracleSmokeBatchCommand()}
-      </code>
-    </div>
-  );
-}
-
-type RevealedInvite = TeamRegistrationApproval | InviteReveal;
-
-type RevealedAccountLink = {
-  id: string;
-  kind: "setup" | "reset";
-  username: string;
-  teamName?: string | null;
-  link: string;
-  tokenPrefix?: string | null;
-};
-
-type AccessSection = "requests" | "accounts" | "teams" | "invites" | "tokens" | "audit";
-
-type AccessDestructiveAction =
-  | { kind: "reject-user-registration"; request: UserRegistrationEntry }
-  | { kind: "reject-password-reset"; request: PasswordResetRequestEntry }
-  | { kind: "reject-team-registration"; request: TeamRegistrationEntry }
-  | { kind: "rotate-token"; token: ApiTokenEntry }
-  | { kind: "revoke-token"; token: ApiTokenEntry }
-  | { kind: "revoke-invite"; invite: InviteEntry }
-  | { kind: "resend-invite"; invite: InviteEntry }
-  | { kind: "enable-public-registration"; team: AdminTeam }
-  | { kind: "disable-public-registration"; team: AdminTeam };
-
-const ADMIN_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
-  { value: "requests", label: "Requests" },
-  { value: "accounts", label: "Accounts" },
-  { value: "teams", label: "Teams" },
-  { value: "invites", label: "Invites" },
-  { value: "tokens", label: "API tokens" },
-  { value: "audit", label: "Audit" },
-];
-
-const TEAM_OWNER_ACCESS_SECTIONS: Array<{ value: AccessSection; label: string }> = [
-  { value: "invites", label: "Invites" },
-  { value: "tokens", label: "API tokens" },
-];
-
+import { AdminApiTokens } from "./AdminApiTokens";
+import { AdminTeams } from "./AdminTeams";
+import { AdminLegacyRegistrations } from "./AdminLegacyRegistrations";
+import { useAdminAccess } from "./useAdminAccess";
 export default function AdminAccess(): JSX.Element {
-  const { isAdmin, isLoading, me } = useAuth();
-  const [section, setSection] = useState<AccessSection>("requests");
-  const [actor, setActor] = useState("");
-  const [rejectedReason, setRejectedReason] = useState<Record<string, string>>({});
-  const [revealedInvites, setRevealedInvites] = useState<RevealedInvite[]>([]);
-  const [revealedAccountLinks, setRevealedAccountLinks] = useState<RevealedAccountLink[]>([]);
-  const [inviteStatus, setInviteStatus] = useState<InviteStatus>("pending");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteTeamId, setInviteTeamId] = useState("");
-  const [inviteRole, setInviteRole] = useState<InviteRole>("member");
-  const [inviteMaxUses, setInviteMaxUses] = useState("1");
-  const [inviteDomain, setInviteDomain] = useState("");
-  const [tokenNameInput, setTokenNameInput] = useState("");
-  const [tokenExpiresDays, setTokenExpiresDays] = useState("30");
-  const [tokenScopes, setTokenScopes] = useState<string[]>(["read:own", "submit"]);
-  const [revealedToken, setRevealedToken] = useState<ApiTokenReveal | null>(null);
-  const [newTeamName, setNewTeamName] = useState("");
-  const [teamNameEdits, setTeamNameEdits] = useState<Record<string, string>>({});
-  const [approvalTeamIds, setApprovalTeamIds] = useState<Record<string, string>>({});
-  const [approvalRoles, setApprovalRoles] = useState<Record<string, InviteRole>>({});
-  const [accountApprovalRoles, setAccountApprovalRoles] = useState<Record<string, InviteRole>>({});
-  const [destructiveAction, setDestructiveAction] =
-    useState<AccessDestructiveAction | null>(null);
-  const queryClient = useQueryClient();
-  const currentRole = me?.current_team?.role ?? null;
-  const canManageTeam = isAdmin || currentRole === "owner";
-  const visibleSections = isAdmin ? ADMIN_ACCESS_SECTIONS : TEAM_OWNER_ACCESS_SECTIONS;
-  const activeSection = visibleSections.some((item) => item.value === section)
-    ? section
-    : visibleSections[0].value;
-
-  const registrations = useQuery({
-    queryKey: ["admin", "team-registrations", "pending"],
-    queryFn: () => api.listTeamRegistrations("pending"),
-    enabled: isAdmin,
-  });
-  const adminTeams = useQuery({
-    queryKey: ["admin", "teams"],
-    queryFn: () => api.listAdminTeams(),
-    enabled: isAdmin,
-  });
-  const userRegistrationRequests = useQuery({
-    queryKey: ["admin", "user-registration-requests", "pending"],
-    queryFn: () => api.listUserRegistrationRequests("pending"),
-    enabled: isAdmin && (activeSection === "requests" || activeSection === "accounts"),
-  });
-  const passwordResetRequests = useQuery({
-    queryKey: ["admin", "password-reset-requests", "pending"],
-    queryFn: () => api.listPasswordResetRequests("pending"),
-    enabled: isAdmin && activeSection === "accounts",
-  });
-  const invites = useQuery({
-    queryKey: ["invites", inviteStatus],
-    queryFn: () => api.listInvites({ status: inviteStatus }),
-    enabled: canManageTeam,
-  });
-  const tokens = useQuery({
-    queryKey: ["api-tokens"],
-    queryFn: () => api.listTokens(),
-    enabled: canManageTeam,
-  });
-  const adminTeamItems = adminTeams.data?.items ?? [];
-  const selectedInviteTeamId = isAdmin
-    ? inviteTeamId || adminTeamItems[0]?.id || ""
-    : "";
-
-  function revealInvite(data: RevealedInvite): void {
-    setRevealedInvites((current) => [
-      data,
-      ...current.filter((item) => item.invite.id !== data.invite.id),
-    ]);
-  }
-
-  function revealAccountLink(
-    data: AccountActionApproval,
-    kind: RevealedAccountLink["kind"],
-  ): void {
-    const link = kind === "setup" ? data.setup_link : data.reset_link;
-    if (!link) return;
-    const id = `${kind}:${data.user.id}:${link}`;
-    setRevealedAccountLinks((current) => [
-      {
-        id,
-        kind,
-        username: data.user.username,
-        teamName: data.team?.name ?? null,
-        link,
-        tokenPrefix:
-          kind === "setup" ? data.setup_token_prefix : data.reset_token_prefix,
-      },
-      ...current.filter((item) => item.id !== id),
-    ]);
-  }
-
-  const approve = useMutation({
-    mutationFn: ({
-      id,
-      teamId,
-      role,
-    }: {
-      id: string;
-      teamId: string;
-      role: InviteRole;
-    }) =>
-      api.approveTeamRegistration(id, actor.trim(), {
-        team_id: teamId,
-        role,
-      }),
-    onSuccess: (data) => {
-      revealInvite(data);
-      queryClient.invalidateQueries({ queryKey: ["admin", "team-registrations"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-    },
-  });
-  const createTeam = useMutation({
-    mutationFn: () => api.createAdminTeam({ name: newTeamName.trim() }, actor.trim()),
-    onSuccess: () => {
-      setNewTeamName("");
-      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const updateTeam = useMutation({
-    mutationFn: ({ team, name }: { team: AdminTeam; name: string }) =>
-      api.updateAdminTeam(team.id, { name: name.trim() }, actor.trim()),
-    onSuccess: (team) => {
-      setTeamNameEdits((current) => {
-        const next = { ...current };
-        delete next[team.id];
-        return next;
-      });
-      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const enablePublicRegistration = useMutation({
-    mutationFn: (team: AdminTeam) =>
-      api.enableTeamPublicRegistration(team.id, actor.trim()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-      queryClient.invalidateQueries({ queryKey: ["public-teams"] });
-    },
-  });
-  const disablePublicRegistration = useMutation({
-    mutationFn: (team: AdminTeam) =>
-      api.disableTeamPublicRegistration(team.id, actor.trim()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "teams"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-      queryClient.invalidateQueries({ queryKey: ["public-teams"] });
-    },
-  });
-  const reject = useMutation({
-    mutationFn: (id: string) => api.rejectTeamRegistration(id, actor.trim(), rejectedReason[id]),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "team-registrations"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const createInvite = useMutation({
-    mutationFn: () =>
-      api.createInvite(
-        {
-          email: inviteEmail.trim(),
-          team_id: isAdmin ? selectedInviteTeamId || undefined : undefined,
-          role: inviteRole,
-          expires_in_days: 7,
-          max_uses: inviteMaxUses.trim() ? Number(inviteMaxUses) : null,
-          allowed_domain: inviteDomain.trim() || null,
-        },
-        actor.trim() || undefined,
-      ),
-    onSuccess: (data) => {
-      revealInvite(data);
-      setInviteEmail("");
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const revokeInvite = useMutation({
-    mutationFn: (invite: InviteEntry) =>
-      api.revokeInvite(invite.id, "revoked from admin access page", actor.trim()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const resendInvite = useMutation({
-    mutationFn: (invite: InviteEntry) => api.resendInvite(invite.id, actor.trim()),
-    onSuccess: (data) => {
-      revealInvite(data);
-      queryClient.invalidateQueries({ queryKey: ["invites"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const createToken = useMutation({
-    mutationFn: () =>
-      api.createToken(
-        {
-          name: tokenNameInput.trim(),
-          type: "team",
-          scopes: tokenScopes,
-          expires_in_days: tokenLifetimeDays(tokenExpiresDays),
-        },
-        actor.trim() || undefined,
-      ),
-    onSuccess: (data) => {
-      setRevealedToken(data);
-      setTokenNameInput("");
-      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const rotateToken = useMutation({
-    mutationFn: (token: ApiTokenEntry) =>
-      api.rotateToken(token.token_hash_prefix, actor.trim() || undefined),
-    onSuccess: (data) => {
-      setRevealedToken(data);
-      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const revokeToken = useMutation({
-    mutationFn: (token: ApiTokenEntry) =>
-      api.revokeToken(token.token_hash_prefix, actor.trim() || undefined),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const approveUserRegistration = useMutation({
-    mutationFn: (request: UserRegistrationEntry) =>
-      api.approveUserRegistrationRequest(
-        request.id,
-        accountApprovalRoles[request.id] ?? request.role ?? "member",
-      ),
-    onSuccess: (data) => {
-      revealAccountLink(data, "setup");
-      queryClient.invalidateQueries({ queryKey: ["admin", "user-registration-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const rejectUserRegistration = useMutation({
-    mutationFn: (request: UserRegistrationEntry) =>
-      api.rejectUserRegistrationRequest(request.id, rejectedReason[request.id]),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "user-registration-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const approvePasswordReset = useMutation({
-    mutationFn: (request: PasswordResetRequestEntry) =>
-      api.approvePasswordResetRequest(request.id),
-    onSuccess: (data) => {
-      revealAccountLink(data, "reset");
-      queryClient.invalidateQueries({ queryKey: ["admin", "password-reset-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-  const rejectPasswordReset = useMutation({
-    mutationFn: (request: PasswordResetRequestEntry) =>
-      api.rejectPasswordResetRequest(request.id, rejectedReason[request.id]),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["admin", "password-reset-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["admin", "audit-events"] });
-    },
-  });
-
-  const actorMissing = isAdmin && actor.trim().length === 0;
-  const tokenCreateDisabled =
-    actorMissing ||
-    tokenNameInput.trim().length === 0 ||
-    tokenScopes.length === 0 ||
-    createToken.isPending;
-  const inviteCreateDisabled =
-    actorMissing ||
-    !inviteEmail.trim() ||
-    (isAdmin && !selectedInviteTeamId) ||
-    createInvite.isPending;
-  const latestRevealedInvite = revealedInvites[0];
-
-  function resetDestructiveMutation(
-    action: AccessDestructiveAction | null,
-  ): void {
-    switch (action?.kind) {
-      case "reject-user-registration":
-        rejectUserRegistration.reset();
-        break;
-      case "reject-password-reset":
-        rejectPasswordReset.reset();
-        break;
-      case "reject-team-registration":
-        reject.reset();
-        break;
-      case "rotate-token":
-        rotateToken.reset();
-        break;
-      case "revoke-token":
-        revokeToken.reset();
-        break;
-      case "revoke-invite":
-        revokeInvite.reset();
-        break;
-      case "resend-invite":
-        resendInvite.reset();
-        break;
-      case "enable-public-registration":
-        enablePublicRegistration.reset();
-        break;
-      case "disable-public-registration":
-        disablePublicRegistration.reset();
-        break;
-    }
-  }
-
-  function openDestructiveAction(action: AccessDestructiveAction): void {
-    resetDestructiveMutation(action);
-    setDestructiveAction(action);
-  }
-
-  function closeDestructiveAction(): void {
-    resetDestructiveMutation(destructiveAction);
-    setDestructiveAction(null);
-  }
-
-  async function confirmDestructiveAction(): Promise<void> {
-    if (!destructiveAction) return;
-    switch (destructiveAction.kind) {
-      case "reject-user-registration":
-        await rejectUserRegistration.mutateAsync(destructiveAction.request);
-        break;
-      case "reject-password-reset":
-        await rejectPasswordReset.mutateAsync(destructiveAction.request);
-        break;
-      case "reject-team-registration":
-        await reject.mutateAsync(destructiveAction.request.id);
-        break;
-      case "rotate-token":
-        await rotateToken.mutateAsync(destructiveAction.token);
-        break;
-      case "revoke-token":
-        await revokeToken.mutateAsync(destructiveAction.token);
-        break;
-      case "revoke-invite":
-        await revokeInvite.mutateAsync(destructiveAction.invite);
-        break;
-      case "resend-invite":
-        await resendInvite.mutateAsync(destructiveAction.invite);
-        break;
-      case "enable-public-registration":
-        await enablePublicRegistration.mutateAsync(destructiveAction.team);
-        break;
-      case "disable-public-registration":
-        await disablePublicRegistration.mutateAsync(destructiveAction.team);
-        break;
-    }
-    setDestructiveAction(null);
-  }
-
-  const destructiveDialog = (() => {
-    switch (destructiveAction?.kind) {
-      case "reject-user-registration":
-        return {
-          title: "Reject account request",
-          target: `${destructiveAction.request.username} (${destructiveAction.request.team_name ?? destructiveAction.request.team_id})`,
-          consequence:
-            "The pending account request will be rejected and no password setup link will be issued.",
-          confirmLabel: "Reject account",
-          pendingLabel: "Rejecting…",
-          pending: rejectUserRegistration.isPending,
-          error: rejectUserRegistration.error,
-        };
-      case "reject-password-reset":
-        return {
-          title: "Reject password reset",
-          target: destructiveAction.request.username,
-          consequence:
-            "The pending password-reset request will be rejected and no reset link will be issued.",
-          confirmLabel: "Reject reset",
-          pendingLabel: "Rejecting…",
-          pending: rejectPasswordReset.isPending,
-          error: rejectPasswordReset.error,
-        };
-      case "reject-team-registration":
-        return {
-          title: "Reject team registration",
-          target: `${destructiveAction.request.name} (${destructiveAction.request.contact_email})`,
-          consequence:
-            "The legacy team-registration request will be rejected and no invite will be issued.",
-          confirmLabel: "Reject registration",
-          pendingLabel: "Rejecting…",
-          pending: reject.isPending,
-          error: reject.error,
-        };
-      case "rotate-token":
-        return {
-          title: "Rotate API token",
-          target: `${tokenName(destructiveAction.token)} (${destructiveAction.token.token_hash_prefix})`,
-          consequence:
-            "The current token will be revoked. Its replacement is shown once after server confirmation.",
-          confirmLabel: "Rotate token",
-          pendingLabel: "Rotating…",
-          pending: rotateToken.isPending,
-          error: rotateToken.error,
-        };
-      case "revoke-token":
-        return {
-          title: "Revoke API token",
-          target: `${tokenName(destructiveAction.token)} (${destructiveAction.token.token_hash_prefix})`,
-          consequence:
-            "This token will no longer be able to authenticate to the Loom API.",
-          confirmLabel: "Revoke token",
-          pendingLabel: "Revoking…",
-          pending: revokeToken.isPending,
-          error: revokeToken.error,
-        };
-      case "revoke-invite":
-        return {
-          title: "Revoke invite",
-          target: `${destructiveAction.invite.email} (${destructiveAction.invite.code_prefix})`,
-          consequence:
-            "The pending invite link will no longer be accepted.",
-          confirmLabel: "Revoke invite",
-          pendingLabel: "Revoking…",
-          pending: revokeInvite.isPending,
-          error: revokeInvite.error,
-        };
-      case "resend-invite":
-        return {
-          title: "Resend invite",
-          target: `${destructiveAction.invite.email} (${destructiveAction.invite.code_prefix})`,
-          consequence:
-            "The current invite link will be invalidated. Its replacement is shown once after server confirmation.",
-          confirmLabel: "Resend invite",
-          pendingLabel: "Resending…",
-          pending: resendInvite.isPending,
-          error: resendInvite.error,
-        };
-      case "enable-public-registration":
-        return {
-          title: "Enable public registration",
-          target: destructiveAction.team.name,
-          consequence:
-            "This team will appear on /auth/login and accept account requests until disabled again.",
-          confirmLabel: "Enable public registration",
-          pendingLabel: "Enabling…",
-          pending: enablePublicRegistration.isPending,
-          error: enablePublicRegistration.error,
-        };
-      case "disable-public-registration":
-        return {
-          title: "Disable public registration",
-          target: destructiveAction.team.name,
-          consequence:
-            "This team will leave the public list and reject new account requests for its UUID.",
-          confirmLabel: "Disable public registration",
-          pendingLabel: "Disabling…",
-          pending: disablePublicRegistration.isPending,
-          error: disablePublicRegistration.error,
-        };
-      default:
-        return {
-          title: "",
-          target: "",
-          consequence: "",
-          confirmLabel: "Confirm",
-          pendingLabel: "Working…",
-          pending: false,
-          error: null,
-        };
-    }
-  })();
-
-  function userRegistrationBusy(request: UserRegistrationEntry): boolean {
-    return (
-      (approveUserRegistration.isPending &&
-        approveUserRegistration.variables?.id === request.id) ||
-      (rejectUserRegistration.isPending &&
-        rejectUserRegistration.variables?.id === request.id)
-    );
-  }
-
-  function passwordResetBusy(request: PasswordResetRequestEntry): boolean {
-    return (
-      (approvePasswordReset.isPending &&
-        approvePasswordReset.variables?.id === request.id) ||
-      (rejectPasswordReset.isPending &&
-        rejectPasswordReset.variables?.id === request.id)
-    );
-  }
-
-  function teamRegistrationBusy(request: TeamRegistrationEntry): boolean {
-    return (
-      (approve.isPending && approve.variables?.id === request.id) ||
-      (reject.isPending && reject.variables === request.id)
-    );
-  }
-
-  function tokenBusy(token: ApiTokenEntry): boolean {
-    return (
-      (rotateToken.isPending &&
-        rotateToken.variables?.token_hash_prefix === token.token_hash_prefix) ||
-      (revokeToken.isPending &&
-        revokeToken.variables?.token_hash_prefix === token.token_hash_prefix)
-    );
-  }
-
-  function inviteBusy(invite: InviteEntry): boolean {
-    return (
-      (revokeInvite.isPending && revokeInvite.variables?.id === invite.id) ||
-      (resendInvite.isPending && resendInvite.variables?.id === invite.id)
-    );
-  }
-
-  function publicRegistrationBusy(team: AdminTeam): boolean {
-    return (
-      (enablePublicRegistration.isPending &&
-        enablePublicRegistration.variables?.id === team.id) ||
-      (disablePublicRegistration.isPending &&
-        disablePublicRegistration.variables?.id === team.id)
-    );
-  }
-
-  function toggleTokenScope(scope: string, checked: boolean): void {
-    setTokenScopes((current) => {
-      if (checked) return current.includes(scope) ? current : [...current, scope];
-      return current.filter((item) => item !== scope);
-    });
-  }
-
+  const state = useAdminAccess();
+  const {
+    isLoading,
+    canManageTeam,
+    userRegistrationRequests,
+    accountApprovalRoles,
+    setAccountApprovalRoles,
+    userRegistrationBusy,
+    approveUserRegistration,
+    openDestructiveAction,
+    isAdmin,
+    actor,
+    setActor,
+    latestRevealedInvite,
+    revealedInvites,
+    revealedAccountLinks,
+    revealedToken,
+    visibleSections,
+    activeSection,
+    setSection,
+    actorMissing,
+    passwordResetRequests,
+    passwordResetBusy,
+    approvePasswordReset,
+    inviteEmail,
+    setInviteEmail,
+    selectedInviteTeamId,
+    adminTeamItems,
+    setInviteTeamId,
+    me,
+    inviteRole,
+    setInviteRole,
+    inviteMaxUses,
+    setInviteMaxUses,
+    inviteDomain,
+    setInviteDomain,
+    inviteCreateDisabled,
+    createInvite,
+    invites,
+    inviteStatus,
+    setInviteStatus,
+    inviteBusy,
+    destructiveAction,
+    closeDestructiveAction,
+    destructiveDialog,
+    confirmDestructiveAction,
+  } = state;
   if (isLoading) return <LoadingState />;
 
   if (!canManageTeam) {
     return (
       <Card>
-        <Card.Header
-          title="Team access"
-          description="Team access management requires the owner role."
-        />
+        <Card.Header title="Team access" description="Team access management requires the owner role." />
         <Card.Body>
           <p className="text-sm text-slate-600">
             Ask a team owner to manage invites, members, and CLI tokens.
@@ -736,38 +79,42 @@ export default function AdminAccess(): JSX.Element {
   }
 
   const accountRequestsCard = (
-    <Card
-      data-loom-query="registration-requests"
-      data-loom-query-status={userRegistrationRequests.status}
-    >
+    <Card data-loom-query="registration-requests" data-loom-query-status={userRegistrationRequests.status}>
       <Card.Header
         title="Account requests"
         description="Approve a username into its requested team, then share the one-time password setup link manually."
       />
       <Card.Body className="space-y-3">
         {userRegistrationRequests.isPending ? <LoadingState /> : null}
-        {userRegistrationRequests.isError ? (
-          <ErrorState error={userRegistrationRequests.error} />
-        ) : null}
+        {userRegistrationRequests.isError ? <ErrorState error={userRegistrationRequests.error} /> : null}
         {userRegistrationRequests.data ? (
           userRegistrationRequests.data.items.length === 0 ? (
             <EmptyState label="No pending account requests." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Account requests scroll area">
+              <table aria-label="Account requests" className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                   <tr>
-                    <th className="px-3 py-2 font-semibold">Username</th>
-                    <th className="px-3 py-2 font-semibold">Team</th>
-                    <th className="px-3 py-2 font-semibold">Requested</th>
-                    <th className="px-3 py-2 font-semibold">Role</th>
-                    <th className="px-3 py-2 font-semibold">Actions</th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Username
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Team
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Requested
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Role
+                    </th>
+                    <th scope="col" className="px-3 py-2 font-semibold">
+                      Actions
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
                   {userRegistrationRequests.data.items.map((request) => {
-                    const role =
-                      accountApprovalRoles[request.id] ?? request.role ?? "member";
+                    const role = accountApprovalRoles[request.id] ?? request.role ?? "member";
                     return (
                       <tr key={request.id}>
                         <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
@@ -791,13 +138,11 @@ export default function AdminAccess(): JSX.Element {
                               }))
                             }
                           >
-                            {(["member", "owner", "viewer"] as InviteRole[]).map(
-                              (option) => (
-                                <option key={option} value={option}>
-                                  {option}
-                                </option>
-                              ),
-                            )}
+                            {(["member", "owner", "viewer"] as InviteRole[]).map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
                           </select>
                         </td>
                         <td className="px-3 py-2">
@@ -834,9 +179,7 @@ export default function AdminAccess(): JSX.Element {
             </div>
           )
         ) : null}
-        {approveUserRegistration.isError ? (
-          <ErrorState error={approveUserRegistration.error} />
-        ) : null}
+        {approveUserRegistration.isError ? <ErrorState error={approveUserRegistration.error} /> : null}
       </Card.Body>
     </Card>
   );
@@ -909,9 +252,7 @@ export default function AdminAccess(): JSX.Element {
                   <Button
                     size="sm"
                     aria-label={`Download invite link for ${revealed.invite.email}`}
-                    onClick={() =>
-                      downloadInviteLink(revealed.invite_link, revealed.invite.team_name)
-                    }
+                    onClick={() => downloadInviteLink(revealed.invite_link, revealed.invite.team_name)}
                   >
                     Download
                   </Button>
@@ -970,10 +311,7 @@ export default function AdminAccess(): JSX.Element {
               <span>Prefix: {revealedToken.token_hash_prefix}</span>
               <span>Expires: {formatDate(revealedToken.expires_at)}</span>
             </div>
-            <Button
-              size="sm"
-              onClick={() => navigator.clipboard.writeText(revealedToken.token)}
-            >
+            <Button size="sm" onClick={() => navigator.clipboard.writeText(revealedToken.token)}>
               Copy token
             </Button>
             <CliSetupCommands token={revealedToken.token} />
@@ -990,710 +328,303 @@ export default function AdminAccess(): JSX.Element {
         tabListClassName="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-1"
         tabClassName={({ selected }) =>
           `rounded-md px-3 py-2 text-sm font-medium ${
-            selected
-              ? "bg-accent text-white"
-              : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+            selected ? "bg-accent text-white" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
           }`
         }
         panelClassName="space-y-6"
         renderPanel={() => (
           <>
-      {isAdmin && activeSection === "teams" ? (
-        <Card
-          data-loom-query="admin-teams"
-          data-loom-query-status={adminTeams.status}
-        >
-          <Card.Header
-            title="Internal teams"
-            description="Maintain fixed teams and which ones accept public account requests on /auth/login."
-          />
-          <Card.Body className="space-y-5">
-            <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem]">
-              <Input
-                aria-label="New team name"
-                value={newTeamName}
-                onChange={(event) => setNewTeamName(event.target.value)}
-                placeholder="Team name"
-              />
-              <Button
-                variant="primary"
-                disabled={actorMissing || !newTeamName.trim() || createTeam.isPending}
-                onClick={() => createTeam.mutate()}
-              >
-                Create team
-              </Button>
-            </div>
-            {adminTeams.isPending ? <LoadingState /> : null}
-            {adminTeams.isError ? <ErrorState error={adminTeams.error} /> : null}
-            {adminTeams.data ? (
-              adminTeams.data.items.length === 0 ? (
-                <EmptyState label="No teams have been created yet." />
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-slate-200 text-sm">
-                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                      <tr>
-                        <th className="px-3 py-2 font-semibold">Team</th>
-                        <th className="px-3 py-2 font-semibold">Members</th>
-                        <th className="px-3 py-2 font-semibold">Status</th>
-                        <th className="px-3 py-2 font-semibold">Public registration</th>
-                        <th className="px-3 py-2 font-semibold">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 bg-white">
-                      {adminTeams.data.items.map((team) => {
-                        const editName = teamNameEdits[team.id] ?? team.name;
-                        const unchanged = editName.trim() === team.name;
-                        const isAdminName = team.name.toLowerCase() === "admin";
-                        const publicEnabled = Boolean(team.public_registration_enabled);
-                        const rowBusy = publicRegistrationBusy(team);
-                        return (
-                          <tr key={team.id}>
-                            <td className="min-w-64 px-3 py-2">
-                              <Input
-                                aria-label={`Team name for ${team.name}`}
-                                value={editName}
-                                onChange={(event) =>
-                                  setTeamNameEdits((current) => ({
-                                    ...current,
-                                    [team.id]: event.target.value,
-                                  }))
-                                }
-                              />
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                              {team.user_members?.length ?? 0}
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                              {team.disabled_at ? "Disabled" : "Active"}
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                              {publicEnabled ? "Enabled" : "Private"}
-                            </td>
-                            <td className="px-3 py-2">
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  size="sm"
-                                  disabled={
-                                    actorMissing ||
-                                    !editName.trim() ||
-                                    unchanged ||
-                                    updateTeam.isPending
-                                  }
-                                  onClick={() => updateTeam.mutate({ team, name: editName })}
-                                >
-                                  Save
-                                </Button>
-                                {!isAdminName ? (
-                                  <Button
-                                    size="sm"
-                                    variant={publicEnabled ? "danger" : "secondary"}
-                                    disabled={actorMissing || rowBusy}
-                                    onClick={() =>
-                                      openDestructiveAction({
-                                        kind: publicEnabled
-                                          ? "disable-public-registration"
-                                          : "enable-public-registration",
-                                        team,
-                                      })
-                                    }
-                                  >
-                                    {publicEnabled
-                                      ? "Disable public registration"
-                                      : "Enable public registration"}
-                                  </Button>
-                                ) : null}
-                              </div>
-                              {enablePublicRegistration.isError &&
-                              enablePublicRegistration.variables?.id === team.id ? (
-                                <div className="mt-2">
-                                  <ErrorState error={enablePublicRegistration.error} />
-                                </div>
-                              ) : null}
-                              {disablePublicRegistration.isError &&
-                              disablePublicRegistration.variables?.id === team.id ? (
-                                <div className="mt-2">
-                                  <ErrorState error={disablePublicRegistration.error} />
-                                </div>
-                              ) : null}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )
+            {isAdmin && activeSection === "teams" ? <AdminTeams {...state} /> : null}
+
+            {isAdmin && activeSection === "accounts" ? (
+              <div className="grid gap-4 xl:grid-cols-2">
+                {accountRequestsCard}
+
+                <Card
+                  data-loom-query="password-reset-requests"
+                  data-loom-query-status={passwordResetRequests.status}
+                >
+                  <Card.Header
+                    title="Password resets"
+                    description="Approve reset requests only after verifying the request out of band, then share the one-time reset link manually."
+                  />
+                  <Card.Body className="space-y-3">
+                    {passwordResetRequests.isPending ? <LoadingState /> : null}
+                    {passwordResetRequests.isError ? (
+                      <ErrorState error={passwordResetRequests.error} />
+                    ) : null}
+                    {passwordResetRequests.data ? (
+                      passwordResetRequests.data.items.length === 0 ? (
+                        <EmptyState label="No pending password resets." />
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table
+                            aria-label="Password reset requests"
+                            className="min-w-full divide-y divide-slate-200 text-sm"
+                          >
+                            <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                              <tr>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Username
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Requested
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Actions
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 bg-white">
+                              {passwordResetRequests.data.items.map((request) => (
+                                <tr key={request.id}>
+                                  <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
+                                    {request.username}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                                    {formatDate(request.requested_at)}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="flex flex-wrap gap-2">
+                                      <Button
+                                        size="sm"
+                                        aria-label={`Approve reset ${request.username}`}
+                                        disabled={passwordResetBusy(request)}
+                                        onClick={() => approvePasswordReset.mutate(request)}
+                                      >
+                                        Approve
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="secondary"
+                                        aria-label={`Reject reset ${request.username}`}
+                                        disabled={passwordResetBusy(request)}
+                                        onClick={() =>
+                                          openDestructiveAction({
+                                            kind: "reject-password-reset",
+                                            request,
+                                          })
+                                        }
+                                      >
+                                        Reject
+                                      </Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )
+                    ) : null}
+                    {approvePasswordReset.isError ? <ErrorState error={approvePasswordReset.error} /> : null}
+                  </Card.Body>
+                </Card>
+              </div>
             ) : null}
-            {createTeam.isError ? <ErrorState error={createTeam.error} /> : null}
-            {updateTeam.isError ? <ErrorState error={updateTeam.error} /> : null}
-          </Card.Body>
-        </Card>
-      ) : null}
 
-      {isAdmin && activeSection === "accounts" ? (
-        <div className="grid gap-4 xl:grid-cols-2">
-          {accountRequestsCard}
+            {activeSection === "tokens" ? <AdminApiTokens {...state} /> : null}
 
-          <Card
-            data-loom-query="password-reset-requests"
-            data-loom-query-status={passwordResetRequests.status}
-          >
-            <Card.Header
-              title="Password resets"
-              description="Approve reset requests only after verifying the request out of band, then share the one-time reset link manually."
-            />
-            <Card.Body className="space-y-3">
-              {passwordResetRequests.isPending ? <LoadingState /> : null}
-              {passwordResetRequests.isError ? (
-                <ErrorState error={passwordResetRequests.error} />
-              ) : null}
-              {passwordResetRequests.data ? (
-                passwordResetRequests.data.items.length === 0 ? (
-                  <EmptyState label="No pending password resets." />
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-slate-200 text-sm">
-                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                        <tr>
-                          <th className="px-3 py-2 font-semibold">Username</th>
-                          <th className="px-3 py-2 font-semibold">Requested</th>
-                          <th className="px-3 py-2 font-semibold">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 bg-white">
-                        {passwordResetRequests.data.items.map((request) => (
-                          <tr key={request.id}>
-                            <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
-                              {request.username}
-                            </td>
-                            <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                              {formatDate(request.requested_at)}
-                            </td>
-                            <td className="px-3 py-2">
-                              <div className="flex flex-wrap gap-2">
-                                <Button
-                                  size="sm"
-                                  aria-label={`Approve reset ${request.username}`}
-                                  disabled={passwordResetBusy(request)}
-                                  onClick={() => approvePasswordReset.mutate(request)}
-                                >
-                                  Approve
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="secondary"
-                                  aria-label={`Reject reset ${request.username}`}
-                                  disabled={passwordResetBusy(request)}
-                                  onClick={() =>
-                                    openDestructiveAction({
-                                      kind: "reject-password-reset",
-                                      request,
-                                    })
-                                  }
-                                >
-                                  Reject
-                                </Button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              ) : null}
-              {approvePasswordReset.isError ? (
-                <ErrorState error={approvePasswordReset.error} />
-              ) : null}
-            </Card.Body>
-          </Card>
-        </div>
-      ) : null}
-
-      {activeSection === "tokens" ? (
-      <Card
-        data-loom-query="api-tokens"
-        data-loom-query-status={tokens.status}
-      >
-        <Card.Header
-          title="API tokens"
-          description="Create scoped tokens for CLI and automation. Raw token values are shown only once after create or rotate."
-        />
-        <Card.Body className="space-y-5">
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_9rem_auto]">
-            <div>
-              <label className="block text-sm font-medium text-slate-700" htmlFor="api-token-name">
-                Token name
-              </label>
-              <Input
-                id="api-token-name"
-                className="mt-2"
-                value={tokenNameInput}
-                onChange={(event) => setTokenNameInput(event.target.value)}
-                placeholder="Nightly CLI"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700" htmlFor="api-token-expires">
-                Lifetime days
-              </label>
-              <Input
-                id="api-token-expires"
-                className="mt-2"
-                type="number"
-                min={1}
-                value={tokenExpiresDays}
-                onChange={(event) => setTokenExpiresDays(event.target.value)}
-              />
-            </div>
-            <div className="flex items-end">
-              <Button
-                variant="primary"
-                disabled={tokenCreateDisabled}
-                onClick={() => createToken.mutate()}
-              >
-                Create API token
-              </Button>
-            </div>
-          </div>
-
-          <fieldset className="grid gap-2 md:grid-cols-2">
-            <legend className="mb-1 text-sm font-medium text-slate-700">
-              Token scopes
-            </legend>
-            {TOKEN_SCOPE_OPTIONS.map((option) => (
-              <label
-                key={option.value}
-                className="flex gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm"
-              >
-                <input
-                  aria-label={option.label}
-                  type="checkbox"
-                  className="mt-1"
-                  checked={tokenScopes.includes(option.value)}
-                  onChange={(event) =>
-                    toggleTokenScope(option.value, event.currentTarget.checked)
-                  }
-                />
-                <span>
-                  <span className="block font-medium text-slate-800">
-                    {option.label}
-                  </span>
-                  <span className="block text-xs text-slate-500">
-                    {option.description}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </fieldset>
-
-          {tokens.isPending ? <LoadingState /> : null}
-          {tokens.isError ? <ErrorState error={tokens.error} /> : null}
-          {tokens.data ? (
-            tokens.data.items.length === 0 ? (
-              <EmptyState label="No API tokens." />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
-                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2 font-semibold">Name</th>
-                      <th className="px-3 py-2 font-semibold">Prefix</th>
-                      <th className="px-3 py-2 font-semibold">Scopes</th>
-                      <th className="px-3 py-2 font-semibold">Last used</th>
-                      <th className="px-3 py-2 font-semibold">Expires</th>
-                      <th className="px-3 py-2 font-semibold">Status</th>
-                      <th className="px-3 py-2 font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 bg-white">
-                    {tokens.data.items.map((token) => {
-                      const status = tokenStatus(token);
-                      const label = tokenName(token);
-                      const inactive = token.revoked_at !== null;
-                      return (
-                        <tr key={token.token_hash_prefix}>
-                          <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">
-                            {label}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
-                            {token.token_hash_prefix}
-                          </td>
-                          <td className="max-w-sm px-3 py-2 text-slate-600">
-                            {formatTokenScopes(token.scopes)}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                            {token.last_used_at ? formatDate(token.last_used_at) : "Never"}
-                          </td>
-                          <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                            {formatDate(token.expires_at)}
-                          </td>
-                          <td className={`whitespace-nowrap px-3 py-2 font-medium ${status.className}`}>
-                            {status.label}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                aria-label={`Rotate ${label}`}
-                                disabled={inactive || actorMissing || tokenBusy(token)}
-                                onClick={() =>
-                                  openDestructiveAction({
-                                    kind: "rotate-token",
-                                    token,
-                                  })
-                                }
-                              >
-                                Rotate
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="danger"
-                                aria-label={`Revoke ${label}`}
-                                disabled={inactive || actorMissing || tokenBusy(token)}
-                                onClick={() =>
-                                  openDestructiveAction({
-                                    kind: "revoke-token",
-                                    token,
-                                  })
-                                }
-                              >
-                                Revoke
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            {isAdmin && activeSection === "requests" ? (
+              <div className="grid gap-4">
+                {accountRequestsCard}
+                <AdminLegacyRegistrations {...state} />
               </div>
-            )
-          ) : null}
-          {createToken.isError ? <ErrorState error={createToken.error} /> : null}
-        </Card.Body>
-      </Card>
-      ) : null}
+            ) : null}
 
-      {isAdmin && activeSection === "requests" ? (
-        <div className="grid gap-4">
-          {accountRequestsCard}
-          <Card
-            data-loom-query="team-registrations"
-            data-loom-query-status={registrations.status}
-          >
-            <Card.Header
-              title="Legacy team registrations"
-              description="Approve older team-registration requests into an invite link. Username/password account approvals are listed above."
-            />
-            <Card.Body>
-              {registrations.isPending ? <LoadingState /> : null}
-              {registrations.isError ? <ErrorState error={registrations.error} /> : null}
-              {registrations.data ? (
-                registrations.data.items.length === 0 ? (
-                  <EmptyState label="No pending legacy team registrations." />
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-slate-200 text-sm">
-                      <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                        <tr>
-                          <th className="px-3 py-2 font-semibold">Team</th>
-                          <th className="px-3 py-2 font-semibold">Contact</th>
-                          <th className="px-3 py-2 font-semibold">Requested</th>
-                          <th className="px-3 py-2 font-semibold">Assign to</th>
-                          <th className="px-3 py-2 font-semibold">Role</th>
-                          <th className="px-3 py-2 font-semibold">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 bg-white">
-                        {registrations.data.items.map((item) => {
-                          const selectedTeamId =
-                            approvalTeamIds[item.id] ?? adminTeams.data?.items[0]?.id ?? "";
-                          const selectedRole = approvalRoles[item.id] ?? "member";
-                          return (
-                            <tr key={item.id}>
-                              <td className="whitespace-nowrap px-3 py-2 font-medium text-slate-900">{item.name}</td>
-                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">{item.contact_email}</td>
-                              <td className="whitespace-nowrap px-3 py-2 text-slate-600">{formatDate(item.requested_at)}</td>
-                              <td className="min-w-48 px-3 py-2">
-                                <select
-                                  aria-label={`Approval team for ${item.name}`}
-                                  className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
-                                  value={selectedTeamId}
-                                  onChange={(event) =>
-                                    setApprovalTeamIds((current) => ({
-                                      ...current,
-                                      [item.id]: event.target.value,
-                                    }))
-                                  }
-                                >
-                                  {adminTeams.data?.items.map((team) => (
-                                    <option key={team.id} value={team.id}>
-                                      {team.name}
-                                    </option>
-                                  ))}
-                                </select>
-                              </td>
-                              <td className="px-3 py-2">
-                                <select
-                                  aria-label={`Approval role for ${item.name}`}
-                                  className="block w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-800"
-                                  value={selectedRole}
-                                  onChange={(event) =>
-                                    setApprovalRoles((current) => ({
-                                      ...current,
-                                      [item.id]: event.target.value as InviteRole,
-                                    }))
-                                  }
-                                >
-                                  <option value="member">member</option>
-                                  <option value="viewer">viewer</option>
-                                  <option value="owner">owner</option>
-                                </select>
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <Button
-                                    size="sm"
-                                    variant="primary"
-                                    disabled={
-                                      actorMissing ||
-                                      !selectedTeamId ||
-                                      teamRegistrationBusy(item)
-                                    }
-                                    onClick={() =>
-                                      approve.mutate({
-                                        id: item.id,
-                                        teamId: selectedTeamId,
-                                        role: selectedRole,
-                                      })
-                                    }
+            {activeSection === "invites" ? (
+              <>
+                <Card>
+                  <Card.Header
+                    title="Create invite"
+                    description="Create a team invite; the raw link is shown only once."
+                  />
+                  <Card.Body className="grid gap-3 md:grid-cols-5">
+                    <Input
+                      aria-label="Invite recipient email"
+                      value={inviteEmail}
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                      placeholder="person@example.com"
+                    />
+                    {isAdmin ? (
+                      <select
+                        aria-label="Invite team"
+                        className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        value={selectedInviteTeamId}
+                        disabled={adminTeamItems.length === 0}
+                        onChange={(event) => setInviteTeamId(event.target.value)}
+                      >
+                        {adminTeamItems.length === 0 ? (
+                          <option value="">No team available</option>
+                        ) : (
+                          adminTeamItems.map((team) => (
+                            <option key={team.id} value={team.id}>
+                              {team.name}
+                            </option>
+                          ))
+                        )}
+                      </select>
+                    ) : (
+                      <Input
+                        aria-label="Invite team"
+                        value={me?.current_team?.name ?? "Current team"}
+                        readOnly
+                        disabled
+                      />
+                    )}
+                    <select
+                      aria-label="Invite role"
+                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+                      value={inviteRole}
+                      onChange={(event) => setInviteRole(event.target.value as InviteRole)}
+                    >
+                      <option value="viewer">viewer</option>
+                      <option value="member">member</option>
+                      <option value="owner">owner</option>
+                    </select>
+                    <Input
+                      aria-label="Invite max uses"
+                      type="number"
+                      min={1}
+                      value={inviteMaxUses}
+                      onChange={(event) => setInviteMaxUses(event.target.value)}
+                      placeholder="max uses"
+                    />
+                    <Input
+                      aria-label="Allowed domain"
+                      value={inviteDomain}
+                      onChange={(event) => setInviteDomain(event.target.value)}
+                      placeholder="allowed domain"
+                    />
+                    <div className="md:col-span-5">
+                      <Button
+                        variant="primary"
+                        disabled={inviteCreateDisabled}
+                        onClick={() => createInvite.mutate()}
+                      >
+                        Create invite
+                      </Button>
+                    </div>
+                    {createInvite.isError ? <ErrorState error={createInvite.error} /> : null}
+                  </Card.Body>
+                </Card>
+
+                <Card data-loom-query="invites" data-loom-query-status={invites.status}>
+                  <Card.Header
+                    title={`${inviteStatus[0].toUpperCase()}${inviteStatus.slice(1)} invites`}
+                    description="Invite links are listed by status without exposing raw codes."
+                    actions={
+                      <select
+                        aria-label="Invite status"
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
+                        value={inviteStatus}
+                        onChange={(event) => setInviteStatus(event.target.value as InviteStatus)}
+                      >
+                        <option value="pending">pending</option>
+                        <option value="accepted">accepted</option>
+                        <option value="expired">expired</option>
+                        <option value="revoked">revoked</option>
+                      </select>
+                    }
+                  />
+                  <Card.Body>
+                    {invites.isPending ? <LoadingState /> : null}
+                    {invites.isError ? <ErrorState error={invites.error} /> : null}
+                    {invites.data ? (
+                      invites.data.items.length === 0 ? (
+                        <EmptyState label={`No ${inviteStatus} invites.`} />
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table
+                            aria-label="Invitations"
+                            className="min-w-full divide-y divide-slate-200 text-sm"
+                          >
+                            <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                              <tr>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Team
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Email
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Role
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Prefix
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Status
+                                </th>
+                                <th scope="col" className="px-3 py-2 font-semibold">
+                                  Actions
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 bg-white">
+                              {invites.data.items.map((invite) => (
+                                <tr key={invite.id}>
+                                  <td className="whitespace-nowrap px-3 py-2 text-slate-700">
+                                    {invite.team_name ?? invite.team_id}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                                    {invite.email}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 text-slate-600">
+                                    {invite.role}
+                                  </td>
+                                  <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
+                                    {invite.code_prefix}
+                                  </td>
+                                  <td
+                                    className={`whitespace-nowrap px-3 py-2 font-medium ${statusClass(invite.status)}`}
                                   >
-                                    Approve
-                                  </Button>
-                                  <Input
-                                    aria-label={`Reject reason for ${item.name}`}
-                                    className="w-48"
-                                    value={rejectedReason[item.id] ?? ""}
-                                    onChange={(event) =>
-                                      setRejectedReason((current) => ({
-                                        ...current,
-                                        [item.id]: event.target.value,
-                                      }))
-                                    }
-                                    placeholder="reason"
-                                  />
-                                  <Button
-                                    size="sm"
-                                    variant="danger"
-                                    disabled={
-                                      actorMissing || teamRegistrationBusy(item)
-                                    }
-                                    onClick={() =>
-                                      openDestructiveAction({
-                                        kind: "reject-team-registration",
-                                        request: item,
-                                      })
-                                    }
-                                  >
-                                    Reject
-                                  </Button>
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )
-              ) : null}
-              {approve.isError ? <ErrorState error={approve.error} /> : null}
-            </Card.Body>
-          </Card>
-        </div>
-      ) : null}
-
-      {activeSection === "invites" ? (
-        <>
-      <Card>
-        <Card.Header
-          title="Create invite"
-          description="Create a team invite; the raw link is shown only once."
-        />
-        <Card.Body className="grid gap-3 md:grid-cols-5">
-          <Input
-            aria-label="Invite recipient email"
-            value={inviteEmail}
-            onChange={(event) => setInviteEmail(event.target.value)}
-            placeholder="person@example.com"
-          />
-          {isAdmin ? (
-            <select
-              aria-label="Invite team"
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-              value={selectedInviteTeamId}
-              disabled={adminTeamItems.length === 0}
-              onChange={(event) => setInviteTeamId(event.target.value)}
-            >
-              {adminTeamItems.length === 0 ? (
-                <option value="">No team available</option>
-              ) : (
-                adminTeamItems.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                  </option>
-                ))
-              )}
-            </select>
-          ) : (
-            <Input
-              aria-label="Invite team"
-              value={me?.current_team?.name ?? "Current team"}
-              readOnly
-              disabled
-            />
-          )}
-          <select
-            aria-label="Invite role"
-            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
-            value={inviteRole}
-            onChange={(event) => setInviteRole(event.target.value as InviteRole)}
-          >
-            <option value="viewer">viewer</option>
-            <option value="member">member</option>
-            <option value="owner">owner</option>
-          </select>
-          <Input
-            aria-label="Invite max uses"
-            type="number"
-            min={1}
-            value={inviteMaxUses}
-            onChange={(event) => setInviteMaxUses(event.target.value)}
-            placeholder="max uses"
-          />
-          <Input
-            aria-label="Allowed domain"
-            value={inviteDomain}
-            onChange={(event) => setInviteDomain(event.target.value)}
-            placeholder="allowed domain"
-          />
-          <div className="md:col-span-5">
-            <Button
-              variant="primary"
-              disabled={inviteCreateDisabled}
-              onClick={() => createInvite.mutate()}
-            >
-              Create invite
-            </Button>
-          </div>
-          {createInvite.isError ? <ErrorState error={createInvite.error} /> : null}
-        </Card.Body>
-      </Card>
-
-      <Card
-        data-loom-query="invites"
-        data-loom-query-status={invites.status}
-      >
-        <Card.Header
-          title={`${inviteStatus[0].toUpperCase()}${inviteStatus.slice(1)} invites`}
-          description="Invite links are listed by status without exposing raw codes."
-          actions={
-            <select
-              aria-label="Invite status"
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700"
-              value={inviteStatus}
-              onChange={(event) => setInviteStatus(event.target.value as InviteStatus)}
-            >
-              <option value="pending">pending</option>
-              <option value="accepted">accepted</option>
-              <option value="expired">expired</option>
-              <option value="revoked">revoked</option>
-            </select>
-          }
-        />
-        <Card.Body>
-          {invites.isPending ? <LoadingState /> : null}
-          {invites.isError ? <ErrorState error={invites.error} /> : null}
-          {invites.data ? (
-            invites.data.items.length === 0 ? (
-              <EmptyState label={`No ${inviteStatus} invites.`} />
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
-                  <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
-                    <tr>
-                      <th className="px-3 py-2 font-semibold">Team</th>
-                      <th className="px-3 py-2 font-semibold">Email</th>
-                      <th className="px-3 py-2 font-semibold">Role</th>
-                      <th className="px-3 py-2 font-semibold">Prefix</th>
-                      <th className="px-3 py-2 font-semibold">Status</th>
-                      <th className="px-3 py-2 font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 bg-white">
-                    {invites.data.items.map((invite) => (
-                      <tr key={invite.id}>
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-700">
-                          {invite.team_name ?? invite.team_id}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                          {invite.email}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 text-slate-600">
-                          {invite.role}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-slate-600">
-                          {invite.code_prefix}
-                        </td>
-                        <td className={`whitespace-nowrap px-3 py-2 font-medium ${statusClass(invite.status)}`}>
-                          {invite.status}
-                        </td>
-                        <td className="px-3 py-2">
-                          <div className="flex gap-2">
-                            {invite.status === "pending" ? (
-                              <Button
-                                size="sm"
-                                variant="danger"
-                                disabled={actorMissing || inviteBusy(invite)}
-                                onClick={() =>
-                                  openDestructiveAction({
-                                    kind: "revoke-invite",
-                                    invite,
-                                  })
-                                }
-                              >
-                                Revoke
-                              </Button>
-                            ) : null}
-                            {invite.status === "pending" || invite.status === "expired" ? (
-                              <Button
-                                size="sm"
-                                disabled={actorMissing || inviteBusy(invite)}
-                                onClick={() =>
-                                  openDestructiveAction({
-                                    kind: "resend-invite",
-                                    invite,
-                                  })
-                                }
-                              >
-                                Resend
-                              </Button>
-                            ) : null}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : null}
-        </Card.Body>
-      </Card>
-        </>
-      ) : null}
+                                    {invite.status}
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="flex gap-2">
+                                      {invite.status === "pending" ? (
+                                        <Button
+                                          size="sm"
+                                          variant="danger"
+                                          disabled={actorMissing || inviteBusy(invite)}
+                                          onClick={() =>
+                                            openDestructiveAction({
+                                              kind: "revoke-invite",
+                                              invite,
+                                            })
+                                          }
+                                        >
+                                          Revoke
+                                        </Button>
+                                      ) : null}
+                                      {invite.status === "pending" || invite.status === "expired" ? (
+                                        <Button
+                                          size="sm"
+                                          disabled={actorMissing || inviteBusy(invite)}
+                                          onClick={() =>
+                                            openDestructiveAction({
+                                              kind: "resend-invite",
+                                              invite,
+                                            })
+                                          }
+                                        >
+                                          Resend
+                                        </Button>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )
+                    ) : null}
+                  </Card.Body>
+                </Card>
+              </>
+            ) : null}
 
             {isAdmin && activeSection === "audit" ? <AdminAuditLog /> : null}
           </>

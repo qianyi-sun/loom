@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   pipelineArtifactFileUrl,
   type PipelineArtifactDetail,
-} from "../../api/client";
+} from "../../api";
 import ErrorState from "../ErrorState";
 import LoadingState from "../LoadingState";
 import { useBoundedJson } from "./useBoundedJson";
@@ -287,8 +287,8 @@ export default function BehaviorRolloutViewer({
       <h2 id="rollout-scene" className="text-lg font-semibold">Scene projection</h2>
       {sceneState.status === "loading" || sceneState.status === "idle" ? <LoadingState /> : sceneState.status === "error" ? <ErrorState error={sceneState.error} /> : !scene ? <ErrorState error={new Error("Scene projection contract is invalid")} /> : <>
         <p>Robot: <strong>{scene.robot}</strong></p>
-        <table className="w-full"><caption>Scene objects</caption><thead><tr><th>Ordinal</th><th>Name</th><th>Joint positions</th></tr></thead><tbody>{scene.objects.map((item) => <tr key={item.ordinal}><td>{item.ordinal}</td><td>{item.scene_name}</td><td>{item.joint_position_count}</td></tr>)}</tbody></table>
-        <table className="w-full"><caption>Instance identities</caption><thead><tr><th>Scope</th><th>Scene name</th></tr></thead><tbody>{scene.identities.map((item) => <tr key={item.scope_name}><td>{item.scope_name}</td><td>{item.scene_name}</td></tr>)}</tbody></table>
+        <table className="w-full"><caption>Scene objects</caption><thead><tr><th scope="col">Ordinal</th><th scope="col">Name</th><th scope="col">Joint positions</th></tr></thead><tbody>{scene.objects.map((item) => <tr key={item.ordinal}><td>{item.ordinal}</td><td>{item.scene_name}</td><td>{item.joint_position_count}</td></tr>)}</tbody></table>
+        <table className="w-full"><caption>Instance identities</caption><thead><tr><th scope="col">Scope</th><th scope="col">Scene name</th></tr></thead><tbody>{scene.identities.map((item) => <tr key={item.scope_name}><td>{item.scope_name}</td><td>{item.scene_name}</td></tr>)}</tbody></table>
       </>}
     </section>
     <section aria-labelledby="rollout-downloads">

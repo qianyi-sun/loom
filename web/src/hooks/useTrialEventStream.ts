@@ -45,7 +45,7 @@ export interface UseTrialEventStreamOptions {
   enabled?: boolean;
   /**
    * Override the base URL the EventSource opens against. Defaults to
-   * the runtime frontend API base, matching `apiBase()` in `api/client.ts`.
+   * the runtime frontend API base, matching `apiBase()` in `api/core.ts`.
    */
   baseUrl?: string;
   /**

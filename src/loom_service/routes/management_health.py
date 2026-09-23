@@ -7,10 +7,12 @@ import asyncio
 from fastapi import APIRouter, Request, Response
 from sqlalchemy import text
 
+from loom_service import wire_responses as wire
+
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/health", response_model=wire.GetHealthResponse, response_model_exclude_unset=True)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 

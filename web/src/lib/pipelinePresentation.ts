@@ -2,7 +2,7 @@ import type {
   PipelineExecutionAttemptList,
   PipelineRunListItem,
   PipelineStageRunSummary,
-} from "../api/client";
+} from "../api";
 import type { StatusVariant } from "../components/StatusPill";
 
 type RunState = PipelineRunListItem["state"];

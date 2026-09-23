@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 
-import type { PipelineArtifactDetail } from "../../api/client";
+import type { PipelineArtifactDetail } from "../../api";
 import BehaviorRolloutViewer from "./BehaviorRolloutViewer";
 import GenericArtifactViewer from "./GenericArtifactViewer";
 

@@ -16,7 +16,7 @@ import { fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CreateBatchBody } from "../../api/client";
+import type { CreateBatchBody } from "../../api";
 import { useAuth } from "../../auth/useAuth";
 import NewBatch from "../../pages/NewBatch";
 import type { FetchMock } from "../../test-utils/fetchMock";
@@ -416,7 +416,7 @@ function mockEndpoints(opts: {
   };
   return vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation((input: RequestInfo | URL) => {
+    .mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : String(input);
       const json = (b: unknown, status = 200, delayMs = 0) => {
         const response = new Response(JSON.stringify(b), {
@@ -474,10 +474,15 @@ function mockEndpoints(opts: {
       if (url.includes("/api/v1/models?view=raw")) return json(RAW_MODELS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
       if (url.includes("/api/v1/local-servers")) return json(LOCAL_SERVERS_RESPONSE);
-      const tagsMatch = url.match(/\/api\/v1\/benchmarks\/([^/]+)\/tags/);
-      if (tagsMatch) {
-        const id = decodeURIComponent(tagsMatch[1]);
-        return json(BENCHMARK_TAGS_RESPONSES[id] ?? { items: [] });
+      if (url.includes("/api/v1/benchmarks/discover")) {
+        const ids = (JSON.parse(String(init?.body)) as { benchmark_ids: string[] }).benchmark_ids;
+        const merged = new Map<string, Set<string>>();
+        for (const id of ids) for (const tag of BENCHMARK_TAGS_RESPONSES[id]?.items ?? []) {
+          const values = merged.get(tag.key) ?? new Set<string>();
+          tag.values.forEach((value) => values.add(value));
+          merged.set(tag.key, values);
+        }
+        return json({ items: [...merged].map(([key, values]) => ({ key, values: [...values].sort() })), readiness: [] });
       }
       if (url.includes("/api/v1/benchmarks")) {
         const includeEmpty = url.includes("include_empty=true");
@@ -1337,6 +1342,7 @@ describe("NewBatch", () => {
       }),
     );
     await pickBenchmark("humaneval");
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: SUBMIT_BTN })).toBeEnabled());
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(batchCall(spy)!.body.task_filter).toEqual({

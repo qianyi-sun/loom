@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Submit-trial dialog. Plan 25 redesign: the agent + model values
  * are pulled from server-side catalogs (`/agents`, `/models`) and
@@ -10,7 +11,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import {
   AgentModelPicker,
   type AgentModelValue,
@@ -52,7 +53,7 @@ export function SubmitTrialModal({
   const [error, setError] = useState<unknown>(null);
 
   const agents = useQuery({
-    queryKey: ["agents"],
+    queryKey: queryKeys["agents"](),
     queryFn: () => api.listAgents(),
     staleTime: 5 * 60 * 1000,
   });

@@ -1,0 +1,758 @@
+import { queryKeys } from "../api/queryKeys";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  api,
+  type Combination,
+  type CreateBatchBody,
+  type ModelEntry,
+  type ProviderConnectionEntry,
+} from "../api";
+import { useAuth } from "../auth/useAuth";
+import {
+  buildAgentModel,
+  buildProviderOverride,
+  type ProviderOverride,
+} from "../components/agentModelSelection";
+import { useBenchmarkDiscovery } from "../hooks/useBenchmarkDiscovery";
+import { agentReadinessMessage, agentServiceModeReady } from "../lib/agentReadiness";
+import { parseTaskIds } from "../lib/parseTaskIds";
+import {
+  INITIAL_ADVANCED,
+  buildAdvancedConfig,
+  type AdvancedState,
+  type RetryReason,
+} from "./newBatch/advancedConfig";
+import {
+  NEBIUS_BACKEND,
+  newRow,
+  type BatchPurpose,
+  type ComboRow,
+  type SubsetKind,
+} from "./newBatch/formState";
+import { buildIdentityPreview } from "./newBatch/identityPreview";
+import { isTaskSetId, type BenchmarkItem } from "./newBatch/taskSources";
+import {
+  FAN_OUT_CONFIRM_THRESHOLD,
+  MAX_COMBINATIONS,
+  ProviderSelectionResult,
+  freshSeed,
+  preflightLabel,
+} from "./newBatchState";
+
+export function useNewBatch() {
+  const { currentTeamId } = useAuth();
+
+  const [nameSuffix, setNameSuffix] = useState("");
+
+  const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>("evaluation");
+
+  const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(() => new Set());
+
+  const [tagFilters, setTagFilters] = useState<Record<string, Set<string>>>({});
+
+  const [subsetKind, setSubsetKind] = useState<SubsetKind>("all");
+
+  const [subsetN, setSubsetN] = useState("10");
+
+  const [subsetSeed, setSubsetSeed] = useState<string>(() => String(freshSeed()));
+
+  const [explicitText, setExplicitText] = useState("");
+
+  const [rows, setRows] = useState<ComboRow[]>(() => [newRow()]);
+
+  const [advanced, setAdvanced] = useState<AdvancedState>(INITIAL_ADVANCED);
+
+  const [confirmedLargeFanOut, setConfirmedLargeFanOut] = useState(false);
+
+  const [budgetUsd, setBudgetUsd] = useState("");
+
+  const [budgetPolicy, setBudgetPolicy] = useState<"none" | "soft" | "hard">("none");
+
+  const [budgetConfirmed, setBudgetConfirmed] = useState(false);
+
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const navigate = useNavigate();
+
+  const benchmarks = useQuery({
+    queryKey: queryKeys["benchmarks"]("with-pending"),
+    // New Batch is the user-facing benchmark surface. Keep pending benchmark
+    // rows visible with backend readiness diagnostics so users can see the
+    // supported catalog roadmap, while disabled checkboxes still prevent
+    // submitting rows that need publish/repair work.
+    queryFn: () => api.listBenchmarks({ limit: "200", include_empty: "true" }),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const evalTaskSets = useQuery({
+    queryKey: queryKeys["taskSets"]("batch-purpose", batchPurpose),
+    queryFn: () => api.listTaskSets(),
+    staleTime: 5 * 60 * 1000,
+    enabled: batchPurpose === "trajectory_generation",
+  });
+
+  const agents = useQuery({
+    queryKey: queryKeys["agents"](),
+    queryFn: () => api.listAgents(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const backends = useQuery({
+    queryKey: queryKeys["backends"](),
+    queryFn: () => api.listBackends(),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const providerConnections = useQuery({
+    queryKey: queryKeys["provider-connections"](currentTeamId),
+    queryFn: () => api.listProviderConnections(currentTeamId ?? undefined),
+    enabled: currentTeamId !== null,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const models = useQuery({
+    queryKey: queryKeys["models"]("default"),
+    queryFn: () => api.listModels("default"),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  // Drop TaskSet selections when switching to evaluation (native
+  // benchmarks only). Clear skip_verifier so evaluation cannot carry it.
+  useEffect(() => {
+    if (batchPurpose !== "evaluation") return;
+    setSelectedBenchmarks((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => !isTaskSetId(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    setAdvanced((prev) => (prev.skipVerifier ? { ...prev, skipVerifier: false } : prev));
+  }, [batchPurpose]);
+
+  // Parse the explicit textarea continuously so we can show the
+  // "Parsed N ids" preview as the user types.
+  const parsed = useMemo(() => parseTaskIds(explicitText), [explicitText]);
+
+  const selectedSourceIdsSorted = useMemo(() => Array.from(selectedBenchmarks).sort(), [selectedBenchmarks]);
+
+  const benchmarkIdsSorted = useMemo(
+    () => selectedSourceIdsSorted.filter((id) => !isTaskSetId(id)),
+    [selectedSourceIdsSorted],
+  );
+
+  const taskSetIdsSorted = useMemo(
+    () => selectedSourceIdsSorted.filter(isTaskSetId),
+    [selectedSourceIdsSorted],
+  );
+
+  const { query: tagQuery, settledIds: settledBenchmarkIds } = useBenchmarkDiscovery(benchmarkIdsSorted);
+  const tagSchema = useMemo(() => tagQuery.data?.items ?? [], [tagQuery.data]);
+
+  // Drop tag-filter entries whose key is no longer in the schema (the
+  // user deselected its benchmark). Keeps the submit payload tight.
+  useEffect(() => {
+    if (benchmarkIdsSorted.length > 0 && (benchmarkIdsSorted !== settledBenchmarkIds || !tagQuery.isSuccess))
+      return;
+    setTagFilters((prev) => {
+      const validKeys = new Set(benchmarkIdsSorted.length > 0 ? tagSchema.map((s) => s.key) : []);
+      let changed = false;
+      const next: Record<string, Set<string>> = {};
+      for (const [k, vs] of Object.entries(prev)) {
+        if (validKeys.has(k)) next[k] = vs;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [tagSchema, benchmarkIdsSorted, settledBenchmarkIds, tagQuery.isSuccess]);
+
+  // PR-2 backend takes the candidate count from a real query; the SPA
+  // gets a "good enough" estimate by summing per-benchmark task_count
+  // from /benchmarks. When tag_filters are active the estimate is a
+  // pure upper bound, so we now also issue a real count via
+  // POST /api/v1/tasks/count (issue #28) and prefer that when it's
+  // ready. The estimate stays as the live display while the count
+  // query is in flight.
+  const hasTagFilter = Object.values(tagFilters).some((v) => v.size > 0);
+
+  const tagSelectionPending =
+    hasTagFilter && (benchmarkIdsSorted !== settledBenchmarkIds || !tagQuery.isSuccess);
+
+  const sumOfSelectedTasks = useMemo(() => {
+    if (!benchmarks.data || selectedBenchmarks.size === 0) {
+      return undefined;
+    }
+    let total = 0;
+    let allKnown = true;
+    for (const b of benchmarks.data.items as BenchmarkItem[]) {
+      if (!selectedBenchmarks.has(b.id)) continue;
+      if (typeof b.task_count !== "number") {
+        allKnown = false;
+        break;
+      }
+      total += b.task_count;
+    }
+    if (batchPurpose === "trajectory_generation" && evalTaskSets.data) {
+      for (const ts of evalTaskSets.data.items) {
+        if (!selectedBenchmarks.has(ts.task_set_id)) continue;
+        if (typeof ts.task_count !== "number") {
+          allKnown = false;
+          break;
+        }
+        total += ts.task_count;
+      }
+    } else if (
+      batchPurpose === "trajectory_generation" &&
+      taskSetIdsSorted.length > 0 &&
+      !evalTaskSets.data
+    ) {
+      allKnown = false;
+    }
+    return allKnown ? total : undefined;
+  }, [benchmarks.data, evalTaskSets.data, selectedBenchmarks, batchPurpose, taskSetIdsSorted.length]);
+
+  // Build the same `task_filter` the submit handler would send. The
+  // count endpoint returns the runnable count after stored TaskConfig
+  // validation, so placeholder/unpublished rows do not make the form
+  // advertise launchable trials. Keyed by the filter shape so React
+  // Query dedupes and refetches only when the filter actually changes.
+  const tagFiltersPayload = useMemo(() => {
+    const out: Record<string, string[]> = {};
+    for (const [k, vs] of Object.entries(tagFilters)) {
+      if (vs.size > 0) out[k] = Array.from(vs).sort();
+    }
+    return out;
+  }, [tagFilters]);
+
+  const countTaskFilter = useMemo<Record<string, unknown> | null>(() => {
+    if (subsetKind === "explicit") return null; // explicit ⇒ count is local
+    if (selectedBenchmarks.size === 0) return null;
+    const f: Record<string, unknown> = {
+      subset_kind: subsetKind,
+    };
+    if (benchmarkIdsSorted.length > 0) f.benchmark_ids = benchmarkIdsSorted;
+    if (taskSetIdsSorted.length > 0) f.task_set_ids = taskSetIdsSorted;
+    if (Object.keys(tagFiltersPayload).length > 0) {
+      f.tag_filters = tagFiltersPayload;
+    }
+    if (subsetKind !== "all") {
+      const n = Number.parseInt(subsetN, 10);
+      if (Number.isFinite(n) && n > 0) f.n = n;
+    }
+    if (subsetKind === "random_n") {
+      const seed = Number.parseInt(subsetSeed, 10);
+      if (Number.isFinite(seed)) f.seed = seed;
+    }
+    return f;
+  }, [
+    subsetKind,
+    selectedBenchmarks.size,
+    benchmarkIdsSorted,
+    taskSetIdsSorted,
+    tagFiltersPayload,
+    subsetN,
+    subsetSeed,
+  ]);
+
+  // Only issue the count call when a tag filter is active — without
+  // one the estimate from sumOfSelectedTasks is exact and a network
+  // round-trip is wasted. Keyed on JSON-stringified filter so the
+  // cache key is stable for identical shapes.
+  const exactCount = useQuery({
+    queryKey: queryKeys["tasks-count"](JSON.stringify(countTaskFilter)),
+    queryFn: () => api.countTasks({ task_filter: countTaskFilter ?? {} }),
+    enabled: countTaskFilter !== null && hasTagFilter,
+    staleTime: 30 * 1000,
+  });
+
+  const matchedTaskCount: number | undefined = (() => {
+    if (subsetKind === "explicit") return parsed.ids.length;
+    // When a tag filter is active and we have a real count, use it.
+    // Otherwise fall back to the upper-bound estimate.
+    if (hasTagFilter && exactCount.data !== undefined) {
+      return exactCount.data.count;
+    }
+    if (sumOfSelectedTasks === undefined) return undefined;
+    if (subsetKind === "all") return sumOfSelectedTasks;
+    const n = Number.parseInt(subsetN, 10);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.min(sumOfSelectedTasks, Math.max(0, n));
+  })();
+
+  const create = useMutation({
+    mutationFn: (body: CreateBatchBody) => api.createBatch(body),
+    onSuccess: (res) => {
+      navigate(`/batches/${res.batch_id}`);
+    },
+  });
+
+  const setAdv = <K extends keyof AdvancedState>(key: K, val: AdvancedState[K]): void => {
+    setAdvanced((s) => ({ ...s, [key]: val }));
+  };
+
+  const toggleRetryReason = (reason: RetryReason): void => {
+    setAdvanced((s) => {
+      const next = new Set(s.retryOn);
+      if (next.has(reason)) next.delete(reason);
+      else next.add(reason);
+      return { ...s, retryOn: next };
+    });
+  };
+
+  const updateRow = (i: number, patch: Partial<ComboRow>): void => {
+    setRows((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  };
+
+  const addRow = (): void => {
+    setRows((rs) => (rs.length >= MAX_COMBINATIONS ? rs : [...rs, newRow()]));
+  };
+
+  const removeRow = (i: number): void => {
+    setRows((rs) => (rs.length <= 1 ? rs : rs.filter((_, idx) => idx !== i)));
+  };
+
+  const sumNPerTask = rows.reduce((acc, r) => {
+    const n = Number.parseInt(r.nPerTask, 10);
+    return acc + (Number.isFinite(n) && n > 0 ? n : 0);
+  }, 0);
+
+  const totalTrials =
+    matchedTaskCount !== undefined && sumNPerTask > 0 ? matchedTaskCount * sumNPerTask : undefined;
+
+  const showLargeFanOutConfirm = totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD;
+
+  function buildCombinations(): { ok: true; value: Combination[] } | { ok: false; error: string } {
+    const labels = new Set<string>();
+    const out: Combination[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const selectedAgent = agents.data?.items.find((a) => a.name === r.picker.agentName);
+      if (!selectedAgent) {
+        return { ok: false, error: `Combination ${i + 1}: pick an agent.` };
+      }
+      if (!agentServiceModeReady(selectedAgent)) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: ${agentReadinessMessage(selectedAgent)}`,
+        };
+      }
+      if (
+        r.picker.agentVersion &&
+        (selectedAgent.name !== "terminus-2" ||
+          !selectedAgent.versions?.some((v) => v.agent_version === r.picker.agentVersion))
+      ) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: choose an available agent version for Nebius Terminus-2, or use Deployment default.`,
+        };
+      }
+      const agentModel = buildAgentModel(r.picker, selectedAgent.needs_model);
+      if (selectedAgent.needs_model && agentModel === null) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: ${selectedAgent.name} needs a model — pick one from the dropdown or use the custom-model fields.`,
+        };
+      }
+      const n = Number.parseInt(r.nPerTask, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: samples per task must be between 1 and 100.`,
+        };
+      }
+      const label = r.label.trim();
+      if (label) {
+        if (labels.has(label)) {
+          return { ok: false, error: `Combination labels must be unique — "${label}" is repeated.` };
+        }
+        labels.add(label);
+      }
+      const combo: Combination = {
+        agent_name: selectedAgent.name,
+        ...(r.picker.agentVersion ? { agent_version: r.picker.agentVersion } : {}),
+        agent_model: agentModel,
+        n_per_task: n,
+      };
+      const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
+      if (override) {
+        combo.provider_connection_id = override.provider_connection_id;
+        combo.provider_model_id = override.provider_model_id;
+      }
+      if (label) combo.label = label;
+      out.push(combo);
+    }
+    return { ok: true, value: out };
+  }
+
+  function buildProviderSelection(): ProviderSelectionResult {
+    const overrides: Array<{ index: number; value: ProviderOverride }> = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const selectedAgent = agents.data?.items.find((a) => a.name === r.picker.agentName);
+      if (!selectedAgent) continue;
+      const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
+      if (override) overrides.push({ index: i, value: override });
+    }
+    if (overrides.length === 0) return { ok: true, value: [] };
+    if (providerConnections.isPending) {
+      return {
+        ok: false,
+        error: "Provider connections for the active team are still loading.",
+      };
+    }
+    if (providerConnections.isError || !providerConnections.data) {
+      return {
+        ok: false,
+        error: "Provider connections for the active team could not be loaded. Retry before submitting.",
+      };
+    }
+    const activeProviderIds = new Set(providerConnections.data.items.map((connection) => connection.id));
+    for (const override of overrides) {
+      if (!activeProviderIds.has(override.value.provider_connection_id)) {
+        return {
+          ok: false,
+          error: `Combination ${override.index + 1}: select a provider connection for the active team.`,
+        };
+      }
+    }
+    return { ok: true, value: overrides.map((override) => override.value) };
+  }
+
+  const submit = async (): Promise<void> => {
+    setLocalError(null);
+    if (tagSelectionPending) {
+      setLocalError("Wait for benchmark tags to finish loading before submitting.");
+      return;
+    }
+    if (!currentTeamId) {
+      setLocalError("Select an active team before submitting a batch.");
+      return;
+    }
+    if (subsetKind === "explicit") {
+      if (parsed.error || parsed.ids.length === 0) {
+        setLocalError("Paste at least one task id.");
+        return;
+      }
+    } else {
+      if (selectedBenchmarks.size === 0) {
+        setLocalError(
+          batchPurpose === "evaluation"
+            ? "Pick at least one native benchmark."
+            : "Pick at least one benchmark or TaskSet.",
+        );
+        return;
+      }
+      if (subsetKind !== "all") {
+        const n = Number.parseInt(subsetN, 10);
+        if (!Number.isFinite(n) || n < 1) {
+          setLocalError("Subset N must be a positive integer.");
+          return;
+        }
+      }
+      if (subsetKind === "random_n") {
+        const seedN = Number.parseInt(subsetSeed, 10);
+        if (!Number.isFinite(seedN) || seedN < 0 || seedN > 2 ** 31 - 1) {
+          setLocalError("Seed must be a non-negative 32-bit integer.");
+          return;
+        }
+      }
+      if (matchedTaskCount === undefined) {
+        setLocalError("Still counting matching tasks — try again in a moment.");
+        return;
+      }
+      // Issue #28: with tag_filters active the SPA used to skip this
+      // check because the local estimate was a pure upper bound; the
+      // user could submit a batch that resolved to zero tasks and got
+      // a confusing late 400. Now `matchedTaskCount` comes from the
+      // real `/tasks/count` endpoint when `hasTagFilter`, so the gate
+      // applies uniformly.
+      if (matchedTaskCount === 0) {
+        setLocalError(
+          hasTagFilter
+            ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
+            : "No tasks match the current source selection + subset.",
+        );
+        return;
+      }
+    }
+
+    const combos = buildCombinations();
+    if (!combos.ok) {
+      setLocalError(combos.error);
+      return;
+    }
+    const providerSelection = buildProviderSelection();
+    if (!providerSelection.ok) {
+      setLocalError(providerSelection.error);
+      return;
+    }
+
+    if (totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD && !confirmedLargeFanOut) {
+      setLocalError(`This will launch ${totalTrials} trials. Tick the confirm box below, then submit again.`);
+      return;
+    }
+
+    const budgetText = budgetUsd.trim();
+    const budgetValue = budgetText ? Number.parseFloat(budgetText) : undefined;
+    if (budgetText && (!Number.isFinite(budgetValue) || budgetValue! < 0)) {
+      setLocalError("Budget USD must be a non-negative number.");
+      return;
+    }
+
+    const adv = buildAdvancedConfig(
+      batchPurpose === "evaluation" ? { ...advanced, skipVerifier: false } : advanced,
+    );
+    if (!adv.ok) {
+      setLocalError(`Advanced options: ${adv.error}`);
+      return;
+    }
+
+    const trial_config: Record<string, unknown> = { ...adv.value };
+    const mm = trial_config.multi_model as
+      | { enabled?: boolean; secondary_model?: Record<string, unknown> }
+      | undefined;
+    if (mm?.enabled && mm.secondary_model) {
+      const first = combos.value[0]?.agent_model;
+      if (first && typeof first === "object") {
+        mm.secondary_model = {
+          ...mm.secondary_model,
+          provider: first.provider,
+          ...("source" in first && first.source ? { source: first.source } : {}),
+        };
+        trial_config.multi_model = mm;
+      }
+    }
+    const task_filter: CreateBatchBody["task_filter"] = {
+      subset_kind: subsetKind,
+    };
+    if (subsetKind === "explicit") {
+      task_filter.task_ids = parsed.ids;
+    } else {
+      if (benchmarkIdsSorted.length > 0) {
+        task_filter.benchmark_ids = benchmarkIdsSorted;
+      }
+      if (taskSetIdsSorted.length > 0) {
+        task_filter.task_set_ids = taskSetIdsSorted;
+      }
+      const tagPayload: Record<string, string[]> = {};
+      for (const [k, vs] of Object.entries(tagFilters)) {
+        if (vs.size > 0) tagPayload[k] = Array.from(vs).sort();
+      }
+      if (Object.keys(tagPayload).length > 0) {
+        task_filter.tag_filters = tagPayload;
+      }
+      if (subsetKind !== "all") {
+        task_filter.n = Number.parseInt(subsetN, 10);
+      }
+      if (subsetKind === "random_n") {
+        task_filter.seed = Number.parseInt(subsetSeed, 10);
+      }
+    }
+
+    const providerOverrides = providerSelection.value;
+    try {
+      const manualOverrides = new Map<string, ProviderOverride>();
+      for (const override of providerOverrides) {
+        if (!override.manual_model) continue;
+        manualOverrides.set(
+          `${override.provider_connection_id}\u0000${override.provider_model_id}`,
+          override,
+        );
+      }
+      for (const override of manualOverrides.values()) {
+        await api.addProviderConnectionModel(override.provider_connection_id, {
+          model_id: override.provider_model_id,
+        });
+      }
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : "Could not save manual model id.");
+      return;
+    }
+
+    const payload: CreateBatchBody = {
+      team_id: currentTeamId,
+      purpose: batchPurpose,
+      task_filter,
+      trial_config,
+      combinations: combos.value,
+    };
+    const suffix = nameSuffix.trim();
+    if (suffix) payload.name_suffix = suffix;
+    if (budgetValue !== undefined) {
+      payload.budget_usd = budgetValue;
+      payload.budget_policy = budgetPolicy === "none" ? "hard" : budgetPolicy;
+      payload.budget_confirmed = budgetConfirmed;
+    }
+    create.mutate(payload);
+  };
+
+  const submitButtonLabel = (() => {
+    if (create.isPending) return "Submitting…";
+    if (totalTrials === undefined || totalTrials === 0) {
+      return "Submit batch";
+    }
+    return `Submit ${totalTrials} trial${totalTrials === 1 ? "" : "s"}`;
+  })();
+
+  let countSummary = "";
+
+  const hasTaskSetSelection = taskSetIdsSorted.length > 0;
+
+  const sourceN = selectedBenchmarks.size;
+
+  const sourceLabel = hasTaskSetSelection ? "source" : "benchmark";
+
+  if (subsetKind === "explicit") {
+    countSummary = "";
+  } else if (selectedBenchmarks.size === 0) {
+    countSummary =
+      batchPurpose === "evaluation"
+        ? "Pick at least one native benchmark to count matching tasks."
+        : "Pick at least one benchmark or TaskSet to count matching tasks.";
+  } else if (hasTagFilter && exactCount.isLoading) {
+    // Real count is in flight; show the running upper-bound while we
+    // wait so the page stays responsive.
+    countSummary =
+      sumOfSelectedTasks !== undefined
+        ? `Counting tasks under tag filters (up to ${sumOfSelectedTasks})…`
+        : "Counting matching tasks…";
+  } else if (matchedTaskCount === undefined) {
+    countSummary = "Counting matching tasks…";
+  } else if (matchedTaskCount === 0) {
+    countSummary = hasTagFilter
+      ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
+      : "No runnable tasks are provisioned for the selected sources. Ask an admin or operator to run the deployment catalog provisioning step, or pick a different ready source.";
+  } else if (hasTagFilter) {
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match the current benchmark + tag filters.`;
+  } else {
+    countSummary = `${matchedTaskCount} task${matchedTaskCount === 1 ? "" : "s"} match across ${sourceN} ${sourceLabel}${sourceN === 1 ? "" : "s"}.`;
+  }
+
+  const nebiusStatus = backends.data?.items.find((b) => b.name === NEBIUS_BACKEND);
+
+  const firstProviderConnectionId = rows.find((r) => r.picker.providerConnectionId)?.picker
+    .providerConnectionId;
+
+  const selectedProviderConnection: ProviderConnectionEntry | undefined =
+    providerConnections.data?.items.find((c) => c.id === firstProviderConnectionId);
+
+  const firstSelectedModel = rows.find((r) => r.picker.modelName && r.picker.modelProvider)?.picker;
+
+  const selectedModel: ModelEntry | undefined =
+    firstSelectedModel && models.data
+      ? models.data.items.find(
+          (m) =>
+            m.name === firstSelectedModel.modelName &&
+            m.provider === firstSelectedModel.modelProvider &&
+            (m.provider_connection_id ?? undefined) ===
+              (firstSelectedModel.providerConnectionId ?? undefined),
+        )
+      : undefined;
+
+  const releaseNeedsProvider = rows.some((row) => {
+    const agent = agents.data?.items.find((a) => a.name === row.picker.agentName);
+    return agent?.needs_model !== false;
+  });
+
+  const releaseScopeText =
+    subsetKind === "all"
+      ? `Full ${hasTaskSetSelection ? "source" : "benchmark"} run: ${matchedTaskCount ?? 0} tasks selected.`
+      : subsetKind === "explicit"
+        ? `Explicit task-id run: ${matchedTaskCount ?? 0} tasks selected.`
+        : `Subset run: ${matchedTaskCount ?? 0} tasks selected.`;
+
+  const releaseTrialText =
+    totalTrials === undefined ? "Trial count is still being calculated." : `${totalTrials} trials planned.`;
+
+  const releaseBackendText =
+    nebiusStatus === undefined
+      ? "Runs on Nebius (availability is not loaded yet)."
+      : nebiusStatus.available
+        ? "Runs on Nebius, which has a live worker."
+        : nebiusStatus.cold_start_available
+          ? `Runs on Nebius, which can scale from zero via ${nebiusStatus.cold_start_pools.join(", ")}.`
+          : "Runs on Nebius, which has no healthy execution target right now.";
+
+  const releaseProviderText = releaseNeedsProvider
+    ? selectedProviderConnection
+      ? `${selectedProviderConnection.name} provider status is ${selectedProviderConnection.status}.`
+      : "Pick a provider connection before submitting."
+    : "No provider connection required for the selected agent.";
+
+  const releaseModelText = releaseNeedsProvider
+    ? firstSelectedModel?.modelName
+      ? `${firstSelectedModel.modelName} ${
+          selectedModel ? preflightLabel(selectedModel.last_preflight_status) : "not preflighted"
+        }.`
+      : "Pick a model before submitting."
+    : "No model required for the selected agent.";
+
+  const generatedIdentity = buildIdentityPreview({
+    sourceIds: selectedSourceIdsSorted,
+    tagFilters: tagFiltersPayload,
+    subsetKind,
+    subsetN,
+    subsetSeed,
+    explicitCount: parsed.ids.length,
+    rows,
+    suffix: nameSuffix,
+  });
+  return {
+    batchPurpose,
+    setBatchPurpose,
+    subsetKind,
+    evalTaskSets,
+    selectedBenchmarks,
+    setSelectedBenchmarks,
+    benchmarks,
+    tagSchema,
+    tagFilters,
+    setTagFilters,
+    benchmarkIdsSorted,
+    settledBenchmarkIds,
+    tagQuery,
+    setSubsetKind,
+    subsetN,
+    setSubsetN,
+    subsetSeed,
+    setSubsetSeed,
+    explicitText,
+    setExplicitText,
+    parsed,
+    matchedTaskCount,
+    countSummary,
+    advanced,
+    setAdv,
+    toggleRetryReason,
+    addRow,
+    rows,
+    removeRow,
+    updateRow,
+    create,
+    currentTeamId,
+    releaseScopeText,
+    releaseTrialText,
+    releaseBackendText,
+    releaseProviderText,
+    releaseModelText,
+    budgetUsd,
+    setBudgetUsd,
+    budgetPolicy,
+    setBudgetPolicy,
+    setBudgetConfirmed,
+    budgetConfirmed,
+    nameSuffix,
+    setNameSuffix,
+    generatedIdentity,
+    totalTrials,
+    sumNPerTask,
+    agents,
+    showLargeFanOutConfirm,
+    confirmedLargeFanOut,
+    setConfirmedLargeFanOut,
+    localError,
+    submit,
+    tagSelectionPending,
+    submitButtonLabel,
+  };
+}
+export type NewBatchViewState = ReturnType<typeof useNewBatch>;

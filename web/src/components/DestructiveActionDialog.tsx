@@ -151,7 +151,7 @@ export function DestructiveActionDialog({
 
         {error && !effectivePending ? (
           <div role="alert">
-            <ErrorState error={error} />
+            <ErrorState announce={false} error={error} />
           </div>
         ) : null}
 

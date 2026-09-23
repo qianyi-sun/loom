@@ -1,10 +1,12 @@
-import type { ApiError } from "../api/client";
+import type { ApiError } from "../api";
 import { redactText } from "../lib/redaction";
 
 export default function ErrorState({
   error,
+  announce = true,
 }: {
   error: unknown;
+  announce?: boolean;
 }): JSX.Element {
   let title = "Something went wrong";
   let detail = "";
@@ -18,7 +20,7 @@ export default function ErrorState({
     detail = String(error);
   }
   return (
-    <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm">
+    <div role={announce ? "alert" : undefined} className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm">
       <p className="font-semibold text-red-800">{title}</p>
       {detail ? (
         <p className="mt-1 font-mono text-xs leading-relaxed text-red-700">

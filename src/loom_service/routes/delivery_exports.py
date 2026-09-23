@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from loom.auth import AuthContext
 from loom.db.schema import Batch
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import require_scope, require_team_or_admin
 from loom_service.delivery_export import (
     DeliveryExportError,
@@ -93,7 +94,7 @@ async def _load_authorized_batch(
     return batch, ctx
 
 
-@router.get("/batches/{batch_id}/delivery-export")
+@router.get("/batches/{batch_id}/delivery-export", response_model=wire.DeliveryExport, response_model_exclude_unset=True)
 async def get_batch_delivery_export(
     request: Request,
     sc: SessionAndCtx,
@@ -108,7 +109,7 @@ async def get_batch_delivery_export(
     )
 
 
-@router.post("/batches/{batch_id}/delivery-export", status_code=201)
+@router.post("/batches/{batch_id}/delivery-export", status_code=201, response_model=wire.DeliveryExport, response_model_exclude_unset=True)
 async def create_batch_delivery_export(
     request: Request,
     sc: SessionAndCtx,

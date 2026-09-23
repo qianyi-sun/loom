@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -8,7 +9,7 @@ import {
   type CombinationSummary,
   type RunLibraryArtifact,
   type RunLibraryBatchDetail,
-} from "../api/client";
+} from "../api";
 import { useAuth } from "../auth/useAuth";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
@@ -319,19 +320,19 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   const [providerConnectionId, setProviderConnectionId] = useState("");
 
   const query = useQuery({
-    queryKey: ["run-library-batch", batchId],
+    queryKey: queryKeys["run-library-batch"](batchId),
     queryFn: () => api.getRunLibraryBatch(batchId!),
     enabled: !!batchId,
   });
 
   const diagnosticsQuery = useQuery({
-    queryKey: ["run-library-batch-diagnostics", batchId],
+    queryKey: queryKeys["run-library-batch-diagnostics"](batchId),
     queryFn: () => api.getRunLibraryBatch(batchId!, true),
     enabled: false,
   });
 
   const providers = useQuery({
-    queryKey: ["providers"],
+    queryKey: queryKeys["providers"](),
     queryFn: () => api.listProviderConnections(),
   });
 

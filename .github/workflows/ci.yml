@@ -822,8 +822,8 @@ jobs:
         run: go test -race ./cmd/...
 
   # Required frontend gate. It builds and serves the production bundle under
-  # a route prefix, then exercises logged-out, user, and admin paths at both
-  # supported viewports with strict browser failure ledgers and axe.
+  # a route prefix, then exercises logged-out, user, and admin paths at
+  # four viewports with strict browser failure ledgers and axe.
   web-checks:
     name: web-checks
     runs-on: ubuntu-24.04
@@ -846,6 +846,18 @@ jobs:
       - name: Install frozen frontend dependencies
         working-directory: web
         run: npm ci
+
+      - name: Set up offline API code generation
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install locked service contract dependencies
+        run: uv sync --locked --extra dev --python 3.11
+
+      - name: Verify generated API types
+        working-directory: web
+        run: npm run gen-api -- --check
 
       - name: TypeScript strict and ESLint
         working-directory: web
@@ -890,6 +902,15 @@ jobs:
       - name: Prefix-route browser, axe, console, and network gate
         working-directory: web
         run: npm run test:e2e
+
+      - name: Retain frontend browser evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-browser-evidence
+          path: web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Fast integration tier — testcontainers Postgres + MinIO only.
   # Excludes the `@pytest.mark.docker` tests (real DockerDriver,

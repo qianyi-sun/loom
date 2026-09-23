@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Side-by-side comparison of two trials. Useful for A/B'ing model
  * choices: same task, different agent/model, eyeball the trajectory
@@ -12,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { useEffect, useState } from "react";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -32,7 +33,7 @@ type TrajEvent = components["schemas"]["TrajectoryEvent"];
 
 function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
   const trial = useQuery<Trial>({
-    queryKey: ["trial", trialId],
+    queryKey: queryKeys["trial"](trialId),
     queryFn: () => api.getTrial(trialId),
     enabled: !!trialId,
   });
@@ -40,7 +41,7 @@ function TrialColumn({ trialId }: { trialId: string }): JSX.Element {
   // Load a single page of the trajectory — sufficient for at-a-glance
   // comparison; users can open the full TrialDetail for a deep dive.
   const traj = useQuery<{ events: TrajEvent[]; next_cursor: number | null }>({
-    queryKey: ["trajectory", trialId, "compare-first-page"],
+    queryKey: queryKeys["trajectory"](trialId, "compare-first-page"),
     queryFn: () => api.getTrajectoryPage(trialId, undefined, 200),
     enabled: !!trialId,
   });

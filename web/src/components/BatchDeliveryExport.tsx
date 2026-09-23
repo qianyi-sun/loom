@@ -1,6 +1,7 @@
+import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, type DeliveryExport } from "../api/client";
+import { api, type DeliveryExport } from "../api";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
 import { StatusPill } from "./StatusPill";
@@ -39,7 +40,7 @@ export function BatchDeliveryExport({ batchId, state }: {
 }): JSX.Element {
   const queryClient = useQueryClient();
   const deliveryQuery = useQuery({
-    queryKey: ["batch-delivery-export", batchId],
+    queryKey: queryKeys["batch-delivery-export"](batchId),
     queryFn: () => api.getBatchDeliveryExport(batchId),
     enabled: !!batchId && !ACTIVE_STATES.has(state),
   });

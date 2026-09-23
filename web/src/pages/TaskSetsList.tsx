@@ -1,8 +1,9 @@
+import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
 
-import { api, type TaskSetListItem } from "../api/client";
+import { api, type TaskSetListItem } from "../api";
 import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import LoadingState from "../components/LoadingState";
@@ -38,7 +39,7 @@ export default function TaskSetsList(): JSX.Element {
   const location = useLocation();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const { data, isLoading, error } = useQuery({
-    queryKey: ["taskSets"],
+    queryKey: queryKeys["taskSets"](),
     queryFn: () => api.listTaskSets(),
   });
   const focusHeading =
@@ -92,12 +93,12 @@ export default function TaskSetsList(): JSX.Element {
       ) : (
         <Card>
           <Card.Body className="p-0">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <table aria-label="Task sets" className="min-w-full divide-y divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {["Name", "Status", "Capability", "Tasks", "Created"].map(
                     (h) => (
-                      <th
+                      <th scope="col"
                         key={h}
                         className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
                       >

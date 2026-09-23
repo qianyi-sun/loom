@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api, type PipelineArtifactDetail as ArtifactDetail } from "../../api/client";
+import { api, type PipelineArtifactDetail as ArtifactDetail } from "../../api";
 import PipelineArtifactDetail from "../../pages/PipelineArtifactDetail";
 
 const artifact: ArtifactDetail = {
@@ -80,8 +80,7 @@ describe("PipelineArtifactDetail", () => {
     expect(screen.getByText("input-artifact-1", { exact: false })).toHaveTextContent(
       `input-artifact-1 · sha256:${"3".repeat(64)}`,
     );
-    expect(screen.getByRole("link", { name: "Pipelines" })).toHaveAttribute("href", "/pipelines");
-    expect(screen.getByRole("link", { name: "run-1" })).toHaveAttribute("href", "/pipelines/run-1");
+    expect(screen.getByRole("link", { name: "Back to pipeline run" })).toHaveAttribute("href", "/pipelines/run-1");
   });
 
   it("renders null storage metadata and empty lineage explicitly", async () => {

@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * /providers — list of all team provider connections.
  * Empty state CTA + populated table. Closes #167 (slice 1 of 5).
@@ -6,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import LoadingState from "../components/LoadingState";
@@ -26,7 +27,7 @@ export default function ProvidersList(): JSX.Element {
   const location = useLocation();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const { data, isLoading, error } = useQuery({
-    queryKey: ["providers"],
+    queryKey: queryKeys["providers"](),
     queryFn: () => api.listProviderConnections(),
   });
   const focusHeading =
@@ -98,12 +99,12 @@ export default function ProvidersList(): JSX.Element {
         </Link>
       </header>
       <Card>
-        <table className="min-w-full">
+        <table aria-label="Providers" className="min-w-full">
           <thead>
             <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wider text-slate-500">
-              <th className="px-4 py-2">Name</th>
-              <th className="px-4 py-2">Type</th>
-              <th className="px-4 py-2">Status</th>
+              <th scope="col" className="px-4 py-2">Name</th>
+              <th scope="col" className="px-4 py-2">Type</th>
+              <th scope="col" className="px-4 py-2">Status</th>
             </tr>
           </thead>
           <tbody>

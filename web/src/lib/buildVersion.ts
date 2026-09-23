@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * #2009: staleness check for the persistent version entry.
  *
@@ -22,7 +23,7 @@
  */
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 
-import { apiFetch } from "../api/client";
+import { apiFetch } from "../api";
 import { fetchServedBuildInfo, getFrontendConfig } from "./frontendConfig";
 
 const STALE_TIME_MS = 60_000;
@@ -44,7 +45,7 @@ export function useServedFrontendBuild(): UseQueryResult<
   { revision: string | null; sourceRef: string | null; buildTime: string | null } | null
 > {
   return useQuery({
-    queryKey: ["build-version", "frontend-served"],
+    queryKey: queryKeys["build-version"]("frontend-served"),
     queryFn: fetchServedBuildInfo,
     // Seed from startup's own already-fetched config instead of issuing a
     // second request for the same resource on mount.
@@ -65,7 +66,7 @@ export function useServedFrontendBuild(): UseQueryResult<
 
 export function useBackendVersion(): UseQueryResult<BackendVersion | null> {
   return useQuery({
-    queryKey: ["build-version", "backend"],
+    queryKey: queryKeys["build-version"]("backend"),
     queryFn: fetchBackendVersion,
     refetchOnWindowFocus: true,
     staleTime: STALE_TIME_MS,

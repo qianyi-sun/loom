@@ -10,6 +10,7 @@ import os
 
 from fastapi import APIRouter, Request, Response
 
+from loom_service import wire_responses as wire
 from loom_service.build_info import read_build_revision, read_build_time
 from loom_service.dependencies import SessionAndCtx
 from loom_service.readiness import probe_dependencies
@@ -17,7 +18,7 @@ from loom_service.readiness import probe_dependencies
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/health", response_model=wire.GetHealthResponse, response_model_exclude_unset=True)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 

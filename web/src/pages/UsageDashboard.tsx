@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Usage dashboard — date-range picker + per-bucket SVG bar chart.
  * Inline SVG keeps deps small; no charting library.
@@ -6,7 +7,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import type { components } from "../api/schema";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
@@ -46,7 +47,7 @@ export default function UsageDashboard(): JSX.Element {
   const [teamId, setTeamId] = useState("");
 
   const teamsQuery = useQuery({
-    queryKey: ["admin-teams", auth.isAdmin],
+    queryKey: queryKeys["admin-teams"](auth.isAdmin),
     queryFn: () => api.listAdminTeams(),
     enabled: auth.isAdmin,
   });
@@ -56,7 +57,7 @@ export default function UsageDashboard(): JSX.Element {
   const currentTeamName = currentTeam?.name ?? "Current team";
 
   const query = useQuery({
-    queryKey: ["usage", start, end, groupBy, teamId, auth.isAdmin],
+    queryKey: queryKeys["usage"](start, end, groupBy, teamId, auth.isAdmin),
     enabled: auth.isAuthenticated,
     queryFn: () =>
       api.getUsage({
@@ -247,8 +248,8 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
       <Card>
         <Card.Header title="Breakdown" />
         <Card.Body className="p-0">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
+          <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Usage breakdown scroll area">
+            <table aria-label="Usage breakdown" className="min-w-full divide-y divide-slate-200 text-sm">
               <thead>
                 <tr className="bg-slate-50/50">
                   {[
@@ -262,7 +263,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
                     "Usage confidence",
                     "LLM cost",
                   ].map((h) => (
-                    <th
+                    <th scope="col"
                       key={h}
                       className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
                     >
@@ -327,8 +328,8 @@ function UsageBucketRows({
       {showBatchBreakdown && (bucket.batches ?? []).length > 0 ? (
         <tr>
           <td colSpan={9} className="bg-slate-50/70 px-4 py-3">
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Batch usage scroll area">
+              <table aria-label="Batch usage" className="min-w-full text-xs">
                 <thead>
                   <tr>
                     {[
@@ -341,7 +342,7 @@ function UsageBucketRows({
                       "Usage confidence",
                       "LLM cost",
                     ].map((h) => (
-                      <th
+                      <th scope="col"
                         key={h}
                         className="px-3 py-2 text-left font-medium uppercase tracking-wider text-slate-500"
                       >

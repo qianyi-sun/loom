@@ -4,7 +4,7 @@ import {
   listPipelineEvents,
   type ApiError,
   type PipelineEventPage,
-} from "../api/client";
+} from "../api";
 
 type PipelineEvent = PipelineEventPage["events"][number];
 

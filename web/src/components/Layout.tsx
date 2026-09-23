@@ -9,6 +9,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/useAuth";
 import { cn } from "../lib/cn";
 import { frontendHomePath } from "../lib/frontendConfig";
+import { RouteContext } from "./RouteContext";
 import NavBar from "./NavBar";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { RouteRecoveryBoundary } from "./RouteRecoveryBoundary";
@@ -87,14 +88,17 @@ export default function Layout(): JSX.Element {
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-50 px-4 py-8 sm:px-6 lg:px-8">
+        <SkipLink />
         <main
           id="main-content"
+          tabIndex={-1}
           data-testid="public-onboarding-shell"
           className={cn(
             "mx-auto w-full",
             isAuthLogin ? "max-w-6xl" : "max-w-3xl",
           )}
         >
+          <RouteContext />
           <RouteRecoveryBoundary />
         </main>
       </div>
@@ -103,14 +107,16 @@ export default function Layout(): JSX.Element {
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50 lg:h-screen lg:flex-row">
+      <SkipLink />
       <NavBar
         isAdmin={isAdmin}
         currentUsername={me?.user.username ?? null}
         currentTeamName={me?.current_team?.name ?? null}
         currentTeamRole={me?.current_team?.role ?? null}
       />
-      <main id="main-content" className="min-w-0 flex-1 overflow-y-auto">
+      <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl animate-fade-in px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
+          <RouteContext />
           <RouteRecoveryBoundary />
         </div>
       </main>
