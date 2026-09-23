@@ -327,6 +327,61 @@ def test_secret_identity_must_remain_owned_during_tls_probe(controller, change):
         module().qualify_controller(**arguments)
 
 
+@pytest.mark.parametrize("case", ["matching", "api-error", "foreign-owner", "foreign-namespace",
+                                  "foreign-name", "missing-version", "deleting", "duplicate-tls"])
+def test_tls_switch_is_one_exact_identity_conditioned_patch(inputs, controller, tmp_path, monkeypatch, case):
+    arguments, deployment, _replicas, _pods, _probes = controller
+    binding = inputs[1]
+    deployment["metadata"].update(resourceVersion="version-before", name="loom-shared-ingress")
+    if case == "foreign-owner":
+        deployment["metadata"]["labels"]["loom.nebius/ingress-installation-id"] = str(uuid4())
+    elif case == "foreign-namespace":
+        deployment["metadata"]["namespace"] = "another-owner"
+    elif case == "foreign-name":
+        deployment["metadata"]["name"] = "other-controller"
+    elif case == "missing-version":
+        del deployment["metadata"]["resourceVersion"]
+    elif case == "deleting":
+        deployment["metadata"]["deletionTimestamp"] = NOW.isoformat()
+    elif case == "duplicate-tls":
+        deployment["spec"]["template"]["spec"]["volumes"].append(
+            copy.deepcopy(deployment["spec"]["template"]["spec"]["volumes"][0]))
+    kubeconfig = tmp_path / "switch-kubeconfig"
+    kubeconfig.write_text("fixture")
+    kubeconfig.chmod(0o600)
+    api = module().KubectlControllerAPI(kubeconfig, binding=binding, executable=Path("/usr/bin/kubectl"))
+    calls = []
+    verified = []
+    monkeypatch.setattr(api, "verify_identity", lambda value: verified.append(value))
+
+    def execute(args, *, payload=None):
+        calls.append((args, json.loads(payload)))
+        if case == "api-error":
+            raise module().IngressError("protected Kubernetes outcome unavailable")
+        return b"deployment.apps/loom-shared-ingress"
+
+    monkeypatch.setattr(api, "_run", execute)
+    before = copy.deepcopy(deployment)
+    if case == "matching":
+        api.switch_controller_tls(deployment, "loom-ingress-tls-next")
+        assert verified == [binding]
+        assert len(calls) == 1
+        assert calls[0] == (["patch", "deployment", "loom-shared-ingress", "-n", binding.namespace,
+                             "--type=json", "--patch-file=/dev/stdin", "-o", "name"], [
+            {"op": "test", "path": "/metadata/uid", "value": arguments["deployment_uid"]},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "version-before"},
+            {"op": "test", "path": "/spec/template/spec/volumes/0/name", "value": "tls"},
+            {"op": "test", "path": "/spec/template/spec/volumes/0/secret/secretName",
+             "value": arguments["tls_receipt"]["secret_name"]},
+            {"op": "replace", "path": "/spec/template/spec/volumes/0/secret/secretName", "value": "loom-ingress-tls-next"},
+        ])
+    else:
+        with pytest.raises(module().IngressError):
+            api.switch_controller_tls(deployment, "loom-ingress-tls-next")
+        assert len(calls) == int(case == "api-error")
+    assert deployment == before
+
+
 @pytest.mark.parametrize("wrong_certificate", [False, True])
 def test_real_tls_probe_uses_verified_hostname_and_stops_forwarder(inputs, tmp_path, monkeypatch, wrong_certificate):
     import hashlib
