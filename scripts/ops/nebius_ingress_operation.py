@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI
+from scripts.ops.nebius_ingress_gateway import TLSBinding
+
+from loom.nebius_environment_contract import FoundationBinding
 from loom_execution_capacity_collector import kubernetes as accounting
 
 
 class OperationError(RuntimeError):
     """Payload-free installation failure; never expose inventory or credentials."""
+
+
+class LiveIngressAPI(KubectlCutoverAPI):
+    def __init__(self, kubeconfig: Path, *, binding: TLSBinding, executable: Path, candidate: str,
+                 cluster_id: str, api_server: str, ingress_class: str, image: str):
+        super().__init__(kubeconfig, binding=binding, executable=executable, candidate=candidate)
+        self.cluster_id, self.api_server = cluster_id, api_server
+        self.ingress_class, self.image = ingress_class, image
+
+    def foundation(self) -> FoundationBinding:
+        raise NotImplementedError
 
 
 def qualify_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[str, Any]]) -> dict[str, Any]:
