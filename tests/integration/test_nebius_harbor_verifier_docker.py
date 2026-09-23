@@ -12,8 +12,8 @@ from uuid import uuid4
 import pytest
 
 from loom.models.verifier import VerifierResult
-from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
 from loom.nebius_terminus_image import prepare_nebius_terminus_image
+from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(60)]
 
@@ -125,7 +125,7 @@ def test_prepared_image_preserves_task_shell_and_python_alias(tmp_path: Path):
         built = client.images.get(tag)
         assert built.attrs["Config"]["Shell"] == ["/task-shell", "-c"]
         container = client.containers.run(
-            tag, entrypoint="/bin/sh", command=["-ec", (
+            tag, entrypoint="/bin/sh", command=["-exc", (
                 'test "$(id -u)" = 65532; test -f /authored-run; '
                 'test "$(cat /authored-shell.log)" = called; '
                 'test "$(readlink /usr/bin/python)" = /usr/local/bin/python; '
