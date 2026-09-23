@@ -15,6 +15,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+from tests.support.process_observation import process_exited
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
 NAMES = ("*.dev.example.test", "management.example.test")
@@ -363,8 +364,7 @@ def test_real_client_timeout_terminates_descendant_hook_before_unlocking(tmp_pat
                               start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     pid = int(pid_file.read_text())
     for _ in range(50):
-        status = Path(f"/proc/{pid}/stat")
-        if not status.exists() or status.read_text().split()[2] in {"Z", "X"}:
+        if process_exited(pid):
             break
         time.sleep(0.02)
     else:

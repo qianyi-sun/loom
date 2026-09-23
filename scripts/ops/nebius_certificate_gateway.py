@@ -230,13 +230,34 @@ def safe_report(raw: bytes) -> dict[str, Any]:
         raise GatewayError("invalid certificate report") from None
 
 
-def main() -> int:
+def qualify_bundle(content: bytes) -> dict[str, Any]:
+    release, config = prepare_release(content)
+    result = run_private([str(release / "venv" / "bin" / "python"),
+                          str(release / "scripts" / "ops" / "nebius_certificates.py"),
+                          "issue", "--config", str(config)], timeout=1900)
+    return safe_report(result)
+
+
+def authorized_main(expected_sha256: str) -> int:
+    """Forced-command boundary: expected digest is installed, never caller input."""
+    if (os.environ.get("SSH_ORIGINAL_COMMAND") != "loom-nebius-certificate-v1"
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
+        return 126
+    content = sys.stdin.buffer.read(MAX_BUNDLE + 1)
+    if not 0 < len(content) <= MAX_BUNDLE or hashlib.sha256(content).hexdigest() != expected_sha256:
+        return 126
     try:
-        release, config = prepare_release(sys.stdin.buffer.read(MAX_BUNDLE + 1))
-        result = run_private([str(release / "venv" / "bin" / "python"),
-                              str(release / "scripts" / "ops" / "nebius_certificates.py"),
-                              "issue", "--config", str(config)], timeout=1900)
-        print(json.dumps(safe_report(result), sort_keys=True))
+        print(json.dumps(qualify_bundle(content), sort_keys=True))
+        return 0
+    except Exception:
+        print("protected certificate operation failed; preserve gateway state for reconciliation", file=sys.stderr)
+        return 1
+
+
+def main() -> int:
+    # Operator-local compatibility; CI uses only an installed authorized_main.
+    try:
+        print(json.dumps(qualify_bundle(sys.stdin.buffer.read(MAX_BUNDLE + 1)), sort_keys=True))
         return 0
     except Exception:
         print("protected certificate operation failed; preserve gateway state for reconciliation", file=sys.stderr)

@@ -14,10 +14,44 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from tests.support.process_observation import process_exited
 
 
 def module():
     return importlib.import_module("scripts.ops.nebius_certificate_gateway")
+
+
+@pytest.mark.parametrize("command", ["", "python3 -c pass", "loom-nebius-certificate-v1; id",
+                                      "loom-nebius-certificate-v1 extra"])
+def test_forced_entrypoint_rejects_other_commands_before_reading_input(command, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", command)
+    monkeypatch.setattr(sys, "stdin", object())
+    assert module().authorized_main("a" * 64) == 126
+
+
+def test_forced_entrypoint_rejects_unapproved_bundle_before_preparation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    content, root = bundle(tmp_path)
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-certificate-v1")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
+    assert module().authorized_main("a" * 64) == 126
+    assert not root.exists()
+
+
+def test_forced_entrypoint_accepts_only_the_exact_installed_bundle(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    content, _ = bundle(tmp_path)
+    report = {"status": "qualified", "installation_id": "024cfbfb-a7e8-4d85-9c60-c1d838730f9a",
+              "fingerprint_sha256": "a" * 64, "generation": "b" * 64,
+              "expires_at": "2026-12-02T12:00:00+00:00",
+              "sans": ["*.dev.example.test", "management.example.test"]}
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-certificate-v1")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
+    monkeypatch.setattr(module(), "qualify_bundle", lambda payload: report if payload == content else None)
+    assert module().authorized_main(hashlib.sha256(content).hexdigest()) == 0
+    assert json.loads(capsys.readouterr().out) == report
 
 
 def bundle(tmp_path, *, extra=None, altered_hash=False):
@@ -172,8 +206,7 @@ def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client
     client_pid = int(pid.read_text())
     try:
         for _ in range(200):
-            status = Path(f"/proc/{client_pid}/stat")
-            if not status.exists() or status.read_text().split()[2] in {"Z", "X"}:
+            if process_exited(client_pid):
                 break
             time.sleep(0.01)
         else:
@@ -184,3 +217,28 @@ def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client
             os.killpg(client_pid, 9)
         except ProcessLookupError:
             pass
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, ProcessLookupError])
+def test_process_exit_observation_handles_proc_disappearing_during_read(monkeypatch, error):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+
+    def disappeared(path, *args, **kwargs):
+        assert str(path) == "/proc/123456/stat"
+        raise error()
+
+    monkeypatch.setattr(Path, "read_text", disappeared)
+    assert process_exited(123456)
+
+
+def test_process_exit_observation_does_not_hide_live_process_or_read_errors(monkeypatch):
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self: "123456 (python) S 1 2 3")
+    assert not process_exited(123456)
+
+    def denied(path, *args, **kwargs):
+        raise PermissionError()
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(PermissionError):
+        process_exited(123456)
