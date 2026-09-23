@@ -399,6 +399,25 @@ async def test_equal_allocated_status_and_unrelated_pool_resize_do_not_block_inv
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["allocatedResources", "resources"])
+@pytest.mark.parametrize("shape,want_cpu", [("containers", 1000), ("init_sidecar", 1500), ("pod_level", 3000)])
+async def test_pod_status_summary_matches_effective_request_without_false_resize(field, shape, want_cpu):
+    pod = _pod(1)
+    with k8s.ApiClient() as api:
+        raw = api.sanitize_for_serialization(pod)
+    if shape == "init_sidecar":
+        raw["spec"]["initContainers"] = [{"name": "sidecar", "restartPolicy": "Always", "image": "test",
+                                          "resources": {"requests": {"cpu": "500m"}}}]
+    elif shape == "pod_level":
+        raw["spec"]["resources"] = {"requests": {"cpu": "3"}}
+    observed = {"cpu": str(want_cpu) + "m", "memory": "1Gi"}
+    raw["status"][field] = observed if field == "allocatedResources" else {"requests": observed}
+    snapshot = await _capture([_node()], [pod], raw_pods=[raw])
+    assert snapshot.requested.cpu_millis == want_cpu
+    assert snapshot.requested.memory_mib == 1024
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["verifier", None])
 async def test_wrong_or_missing_execution_role_cannot_discount_trial_grant(role):
     pod = _pod()

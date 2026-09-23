@@ -33,6 +33,19 @@ def test_exact_two_pod_ingress_envelope_fits_after_foreign_load(inventory):
                       "cpu_millis": 200, "memory_mib": 256, "storage_mib": 128}
 
 
+@pytest.mark.parametrize("field", ["allocatedResources", "resources"])
+@pytest.mark.parametrize("excess", [False, True])
+def test_pod_level_observed_allocation_is_compared_with_container_requests(inventory, field, excess):
+    pod = inventory["pods"][0]
+    requests = {"cpu": "801m" if excess else "800m", "memory": "768Mi", "ephemeral-storage": "1920Mi"}
+    pod["status"][field] = requests if field == "allocatedResources" else {"requests": requests}
+    if excess:
+        with pytest.raises(module().OperationError):
+            module().qualify_capacity(**inventory)
+    else:
+        assert module().qualify_capacity(**inventory)["reserved_pods"] == 2
+
+
 @pytest.mark.parametrize("resource,value", [("cpu", "801m"), ("memory", "769Mi"), ("ephemeral-storage", "1921Mi")])
 def test_any_resource_exhaustion_blocks_without_borrowing_legacy_node(inventory, resource, value):
     legacy = copy.deepcopy(inventory["nodes"][0])
