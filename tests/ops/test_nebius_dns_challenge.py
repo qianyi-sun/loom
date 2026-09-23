@@ -143,3 +143,119 @@ def test_credential_requires_private_regular_file_and_unexpired_token(tmp_path):
     link.symlink_to(path)
     with pytest.raises(module().DNSChallengeError):
         module().load_token(link, today=date(2026, 9, 23))
+
+
+class ProviderState:
+    def __init__(self):
+        self.rows = [record(recordId="foreign", data="f" * 43)]
+        self.calls = []
+        self.lose_create_reply = False
+
+    def handle(self, request):
+        self.calls.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json={"items": self.rows})
+        if request.method == "POST":
+            self.rows.append(record())
+            if self.lose_create_reply:
+                raise httpx.ReadTimeout("private-response", request=request)
+            return httpx.Response(201, json=record())
+        assert request.method == "DELETE"
+        self.rows = [row for row in self.rows if row["recordId"] != "record-1"]
+        return httpx.Response(204)
+
+
+def hook(dns, root, action, wait=lambda *_args: None, domain="dev.nebius.yylx.world"):
+    return module().run_hook(dns, state_dir=root, action=action, certbot_domain=domain,
+                             validation="v" * 43, wait=wait)
+
+
+def test_hook_replay_and_cleanup_preserve_foreign_records(tmp_path):
+    state = ProviderState()
+    waits = []
+    root = tmp_path / "journal"
+    with provider(state.handle) as dns:
+        assert hook(dns, root, "auth", lambda *args: waits.append(args), domain="*.dev.nebius.yylx.world") == "present"
+        assert hook(dns, root, "auth", lambda *args: waits.append(args)) == "present"
+        assert state.calls.count("POST") == 1
+        assert waits == [("yylx.world", "_acme-challenge.dev.nebius.yylx.world", "v" * 43)] * 2
+        assert hook(dns, root, "cleanup") == "cleaned"
+        assert hook(dns, root, "cleanup") == "cleaned"
+        assert state.calls.count("DELETE") == 1
+        assert state.rows == [record(recordId="foreign", data="f" * 43)]
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, root, "auth")
+    assert root.stat().st_mode & 0o777 == 0o700
+    for path in root.iterdir():
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert "private-pat" not in path.read_text()
+
+
+def test_hook_lost_create_reply_keeps_pending_intent_without_retry_or_guessed_delete(tmp_path):
+    state = ProviderState()
+    state.lose_create_reply = True
+    with provider(state.handle) as dns:
+        for action in ("auth", "auth", "cleanup"):
+            with pytest.raises(module().DNSChallengeError):
+                hook(dns, tmp_path / "journal", action)
+    assert state.calls.count("POST") == 1
+    assert state.calls.count("DELETE") == 0
+    journal = json.loads(next((tmp_path / "journal").glob("*.json")).read_text())
+    assert journal["stage"] == "pending"
+
+
+def test_hook_propagation_failure_keeps_record_for_safe_retry_and_cleanup(tmp_path):
+    state = ProviderState()
+
+    def unavailable(*_args):
+        raise module().DNSChallengeError("propagation deadline")
+
+    with provider(state.handle) as dns:
+        with pytest.raises(module().DNSChallengeError, match="propagation"):
+            hook(dns, tmp_path / "journal", "auth", unavailable)
+        assert state.calls.count("DELETE") == 0
+        assert hook(dns, tmp_path / "journal", "auth") == "present"
+        assert state.calls.count("POST") == 1
+        assert hook(dns, tmp_path / "journal", "cleanup") == "cleaned"
+
+
+def test_hook_does_not_adopt_preexisting_validation_without_a_journal(tmp_path):
+    state = ProviderState()
+    state.rows.append(record())
+    with provider(state.handle) as dns:
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, tmp_path / "journal", "auth")
+    assert state.calls == ["GET"]
+
+
+def test_hook_rejects_cross_scope_and_insecure_journal_before_provider_write(tmp_path):
+    state = ProviderState()
+    root = tmp_path / "journal"
+    root.mkdir(mode=0o755)
+    with provider(state.handle) as dns:
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, root, "auth")
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, root, "auth", domain="foreign.yylx.world")
+    assert state.calls == []
+
+
+def test_hook_rejects_symlink_and_malformed_journal_without_provider_writes(tmp_path):
+    state = ProviderState()
+    root = tmp_path / "journal"
+    with provider(state.handle) as dns:
+        hook(dns, root, "auth")
+        journal = next(root.glob("*.json"))
+        preserved = journal.read_text()
+        journal.write_text('{"stage":"created"}')
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, root, "cleanup")
+        target = tmp_path / "protected.json"
+        target.write_text(preserved)
+        target.chmod(0o600)
+        journal.unlink()
+        journal.symlink_to(target)
+        with pytest.raises(module().DNSChallengeError):
+            hook(dns, root, "cleanup")
+    assert state.calls.count("POST") == 1
+    assert state.calls.count("DELETE") == 0
