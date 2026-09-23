@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import os
 import subprocess
 import zipfile
 from pathlib import Path
@@ -89,3 +90,19 @@ def test_certificate_operation_is_protected_and_not_a_route_to_application_rollo
     assert "--only-group nebius-certificates" in commands
     artifact = next(step for step in job["steps"] if step.get("name") == "Preserve sanitized certificate evidence")
     assert artifact["with"]["path"].endswith("/certificate-result.json")
+
+
+@pytest.mark.skipif(not os.environ.get("LOOM_TEST_CERTIFICATE_REQUIREMENTS"), reason="isolated locked gateway qualification")
+def test_actual_locked_bundle_bootstraps_without_using_existing_operator_environment(tmp_path):
+    from scripts.ops.nebius_certificate_gateway import prepare_release, run_private
+
+    config = {"state_dir": str(tmp_path / "nebius-certificates" / "state")}
+    content = module().build_bundle(config, uv=Path(os.environ["LOOM_TEST_CERTIFICATE_UV"]),
+                                    requirements=Path(os.environ["LOOM_TEST_CERTIFICATE_REQUIREMENTS"]))
+    release, _ = prepare_release(content)
+    python = str(release / "venv" / "bin" / "python")
+    result = run_private([python, "-c", "from certbot.main import main; raise SystemExit(main())", "--version"], timeout=30)
+    assert result.strip() == b"certbot 5.8.0"
+    result = run_private([python, str(release / "scripts" / "ops" / "nebius_certificates.py"), "--help"], timeout=30)
+    assert b"issue" in result and b"hook" in result
+    assert not (tmp_path / "nebius-certificates" / "state").exists(), "tooling qualification started live issuance"

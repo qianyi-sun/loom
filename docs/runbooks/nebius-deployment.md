@@ -129,8 +129,9 @@ PAT** provider boundary for Certbot manual authentication/cleanup hooks. Install
 the locked `cluster` extra for `httpx` and `dnspython`. The hook does not implement
 ACME, install certificates, change Kubernetes, or expose a public management
 endpoint. Its presence is not permission to perform an ad-hoc ingress cutover.
-The protected issuance/renewal caller still needs a pinned ACME client, private
-account/certificate recovery, SAN/expiry checks and safe certificate reload.
+The protected certificate operation below supplies the pinned ACME client,
+private account state and SAN/expiry qualification. Safe Kubernetes Secret
+delivery, controller reload and scheduled renewal remain installation boundaries.
 
 The caller supplies `auth` or `cleanup`, `--zone`, `--certificate-domain`,
 `--credential-file` and `--state-dir`; Certbot supplies `CERTBOT_DOMAIN` and
@@ -165,6 +166,76 @@ cleanup idempotently. GoDaddy supplies no conditional delete in this API: the
 protected caller must exclude competing management of its recorded challenge
 IDs between readback and DELETE. Arbitrary external DNS administration is not
 made transactional by these hooks.
+
+### Protected certificate qualification
+
+`nebius-rollout` supports the manual `certificate` operation on protected `dev`:
+
+```bash
+gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=certificate
+```
+
+It does not require enabling automatic application rollout and cannot select
+application deployment. The same workflow concurrency group serializes it with
+rollout and inspection. There is **no renewal schedule yet**: recurring issuance
+without corresponding Secret delivery/reload would give false confidence.
+
+Configure `NEBIUS_CERTIFICATE_INSTALLATION_JSON` in the protected
+`nebius-integration` GitHub Environment. This is non-secret installation metadata,
+not the DNS token or private key. Its exact fields are:
+
+```json
+{
+  "schema": "loom.nebius-certificate-installation.v1",
+  "installation_id": "024cfbfb-a7e8-4d85-9c60-c1d838730f9a",
+  "zone": "example.test",
+  "child_domain": "dev.example.test",
+  "management_host": "management.example.test",
+  "credential_file": "/home/operator/.loom/private/godaddy.json",
+  "state_dir": "/home/operator/.loom/nebius-certificates/state",
+  "email": "operator@example.test"
+}
+```
+
+These are examples, not provisioned names or an installation identity to reuse.
+Choose a non-nil installation UUID; the state root must be a private owned
+`nebius-certificates/state` below an existing trusted parent. Both subjects must
+be below the selected DNS zone, and management must be outside the personal
+child zone. The only requested SANs are the child wildcard and exact management
+host. Use an operator contact email, or explicitly set `email` to `null` for an
+ACME account without email. Arrange PAT rotation before its recorded expiry;
+certificate lifetime does not extend credential lifetime.
+
+The protected runner sends only two reviewed scripts, deterministic configuration,
+the pinned uv executable and hash-locked wheel requirements. Certbot 5.8.0 is
+installed in an isolated gateway virtual environment. DNS credentials, ACME
+account keys, certificate keys, journals and private logs stay on the gateway;
+they are not workflow artifacts or ingress mounts. It neither changes the old
+operator environment nor runs hooks from personal source. At most eight
+content-addressed tooling releases are retained; further new versions stop until
+an operator retires exact obsolete tooling. State/accounts are never deleted as
+part of tooling installation.
+
+Issuance holds an owner-local lock and records durable intent. Existing pending,
+created or unknown DNS journals block a new issuance, even if Certbot would use
+a different challenge value. Failure retains its intent and previous selected
+certificate. Do not delete `issuance.json` or retry until private process state,
+ACME outcome and exact DNS record ownership have been reconciled. Automated
+recovery of ambiguous issuance is not provided by this operation.
+
+Successful issuance validates the leaf/key pair, exact two SANs, public trust
+chain, server authentication, non-CA leaf and at least seven days of remaining
+validity. A private generation is fsynced before atomic `selected.json` publication;
+the prior generation remains available. Certbot's original account/lineage and
+the challenge journal also remain private for recovery. Public evidence contains
+only installation ID, generation/fingerprint, SANs, expiry and a fixed status.
+
+`qualified` means a recoverable certificate exists on the gateway. It does **not**
+mean public DNS, Kubernetes TLS Secret delivery, safe reload, shared ingress or
+management is installed. Preserve standalone Caddy, its certificate/PVC and the
+existing public LoadBalancer. The protected ingress installer must verify exact
+Secret ownership/UID and delivered fingerprint before activation, and connect
+renewal to verified reload before enabling a schedule.
 
 ### Render management manifests
 
