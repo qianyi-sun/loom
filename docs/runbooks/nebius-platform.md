@@ -208,8 +208,9 @@ Deployment first retains restricted PSS while it installs the exact policy and
 binding, checks observed generation and CEL type-checking, and performs positive
 and negative server-side admission probes. The negative probe must be rejected
 by this specific policy. Only then may the deployment apply the namespace mode.
-Probe Pods are dry runs: they create no workloads or image pulls. Failure leaves
-restricted PSS and the deployment guard in place.
+Probe Pods declare bounded CPU and memory requests so the execution namespace
+quota can admit them. They are dry runs: they create no workloads or image pulls.
+Failure leaves restricted PSS and the deployment guard in place.
 
 Prepare this policy with identity readiness disabled. Qualify the installed
 Kubernetes version, the intended root and non-root container shapes, actual

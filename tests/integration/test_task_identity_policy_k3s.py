@@ -65,6 +65,15 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             }, "automountServiceAccountToken": False},
         ])
         assert result.exit_code == 0, result.output.decode()
+        # Match the deployed execution quota: even admission-only dry runs
+        # must declare the resource requests enforced by this namespace.
+        config, candidate, profile = platform_inputs
+        files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+        quota = deepcopy(next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "ResourceQuota"))
+        quota["metadata"]["namespace"] = namespace
+        quota["spec"]["hard"]["requests.ephemeral-storage"] = "16Gi"
+        result = apply([quota])
+        assert result.exit_code == 0, result.output.decode()
         pod = _pod(namespace)
         assert apply([pod], dry_run=True).exit_code != 0  # Existing default refuses root.
         policies = identity_policy_documents(namespace, "disposable-k3s")
@@ -77,6 +86,11 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         kubeconfig.chmod(0o600)
         (tmp_path / "00-task-identity-policy.yaml").write_text(yaml.safe_dump_all(policies))
         install_task_identity_policy(Kubectl(kubeconfig), {"execution_namespace": namespace}, tmp_path)
+        # Retain the default execution quota for the ordinary workload shapes;
+        # bootstrap above additionally exercises the supported storage override.
+        quota["spec"]["hard"].pop("requests.ephemeral-storage")
+        result = apply([quota])
+        assert result.exit_code == 0, result.output.decode()
         assert apply([pod], dry_run=True).exit_code != 0  # Policy setup retains restricted PSS.
         result = apply([{"apiVersion": "v1", "kind": "Namespace", "metadata": {
             "name": namespace, "labels": identity_namespace_labels(),
