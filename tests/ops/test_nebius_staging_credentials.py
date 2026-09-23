@@ -721,7 +721,7 @@ def seed_config(tmp_path: Path, auth_config: dict) -> dict:
     runtime = {
         "schema_version": "loom.service-execution-runtime-profile.v1",
         "candidate_sha": "b" * 40,
-        "execution_class_id": "nebius-test",
+        "execution_class_id": "linux-amd64-cpu-pod-v1",
         "task_image_ref": task_image,
         "runtime_image_ref": runtime_image,
         "runtime_binary_sha256": "sha256:" + "3" * 64,
