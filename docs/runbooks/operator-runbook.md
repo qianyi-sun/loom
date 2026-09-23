@@ -41,6 +41,63 @@ The rollout extra installs the implementations under
 After syncing, use `uv run --no-sync` so an operational command cannot change
 the environment implicitly.
 
+## Platform administrator grant and revoke
+
+Use an existing platform administrator's personal CLI login. Confirm the server
+environment and exact target user UUID from `GET /api/v1/teams/{team_id}`
+(`user_members[].user_id`) or the user's `GET /api/v1/auth/me` response (`user.id`).
+Do not select a person by display name or share the singleton operator secret as
+their identity. Grant/revoke changes live account authority, so use the approved
+environment and intended account.
+
+```bash
+loom auth login --server "$LOOM_SERVER_URL" --username "$OPERATOR_USERNAME" --password env:OPERATOR_PASSWORD
+loom admin platform-admin grant --user-id "$TARGET_USER_ID"
+loom admin platform-admin revoke --user-id "$TARGET_USER_ID" --credential-policy revoke_all
+```
+
+Grant defaults to ensuring `owner` membership in the existing enabled reserved
+`admin` team; `--no-ensure-admin-team` changes only the platform role. A missing,
+disabled or ambiguous reserved team fails closed when membership is requested;
+inspect and reconcile the team through normal team administration before retrying.
+All other memberships remain intact. The CLI prints JSON with before/after state,
+`changed`, credential policy and revocation counts. Repeated calls are safe; they
+produce audit records even when no state changes.
+
+Revocation requires the explicit `revoke_all` acknowledgement. It removes reserved
+`admin` membership and invalidates all existing sessions and user-owned tokens,
+including cross-team tokens. Self-revocation invalidates the calling login after
+returning the result. The user must log in again and mint ordinary scoped tokens.
+Credentials created after a revoke are invalidated by a later repeated revoke.
+Requests authorized before the transaction commits are not cancelled.
+
+For the existing break-glass singleton login, add `--admin-actor IDENTIFIER`.
+Personal sessions and user-owned tokens derive the audit actor from the login;
+the flag cannot impersonate another human. Read
+`GET /api/v1/admin/audit-events` and match `target_id` plus actions
+`user.platform_admin.grant` / `user.platform_admin.revoke`. Audit failure rolls
+back role, membership and credential changes together. Never record raw tokens,
+session cookies or passwords in evidence.
+
+For acceptance of a fixed deployed candidate in the existing independent Nebius
+integration environment:
+
+1. Use a disposable active non-admin account with an ordinary team membership.
+   Keep a separate administrator session available for the revoke.
+2. Log the test user in and mint a user-owned token; both must be denied an admin
+   endpoint. Grant by UUID and verify both existing credentials can access it.
+3. Repeat grant and verify `changed=false`. Verify `admin:owner` was added while
+   the ordinary membership was preserved. Inspect actor and prior/new audit state.
+4. Revoke with `revoke_all`. Both old credentials must return 401. Repeat revoke
+   and verify zero newly revoked credentials and `changed=false`.
+5. Log in again as the test user: ordinary access succeeds and admin access is
+   denied. Verify a newly minted scoped token has ordinary access only. Retain
+   this account as non-admin for ordinary-user release gates; record candidate,
+   safe account IDs, responses and audit IDs, not credentials.
+
+Local tests or a merged PR do not substitute for this deployed check. The retired
+shared-cluster staging lane is not part of this procedure.
+
 ## Hosted deployment
 
 Nebius is the only supported hosted platform. Use the
