@@ -27,7 +27,8 @@ def test_bundle_is_repeatable_and_does_not_include_dns_credentials(tmp_path):
     assert first == module().build_bundle(config, uv=uv, requirements=requirements)
     with zipfile.ZipFile(io.BytesIO(first)) as archive:
         assert set(archive.namelist()) == {"uv", "requirements.txt", "installation.json", "manifest.json",
-                                           "scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py"}
+                                           "scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py",
+                                           "scripts/ops/nebius_certificate_gateway.py"}
         assert json.loads(archive.read("installation.json")) == config
 
 
@@ -106,3 +107,46 @@ def test_actual_locked_bundle_bootstraps_without_using_existing_operator_environ
     result = run_private([python, str(release / "scripts" / "ops" / "nebius_certificates.py"), "--help"], timeout=30)
     assert b"issue" in result and b"hook" in result
     assert not (tmp_path / "nebius-certificates" / "state").exists(), "tooling qualification started live issuance"
+
+
+@pytest.mark.skipif(not os.environ.get("LOOM_TEST_CERTBOT_PYTHON"), reason="actual pinned Certbot account/lineage compatibility")
+def test_actual_certbot_account_and_lineage_pass_private_recovery_audit(tmp_path):
+    from tests.ops.test_nebius_certificates import material
+
+    chain, key, _ = material()
+    certificate = tmp_path / "certificate.pem"
+    private = tmp_path / "key.pem"
+    certificate.write_bytes(chain)
+    private.write_bytes(key)
+    private.chmod(0o600)
+    # The real pinned storage implementation creates its normal file modes,
+    # directory structure, links, account metadata and renewal configuration.
+    script = '''
+import os, sys
+from pathlib import Path
+import josepy
+from acme import messages
+from cryptography.hazmat.primitives.asymmetric import rsa
+from certbot._internal import account, cli, storage
+from certbot._internal.plugins.disco import PluginsRegistry
+os.umask(0o077)
+root = Path(sys.argv[1])
+for name in ('acme', 'work', 'logs'):
+    (root / name).mkdir(mode=0o700, parents=True, exist_ok=True)
+config = cli.prepare_and_parse_args(PluginsRegistry.find_all(), [
+    'certonly', '--manual', '--config', '/dev/null', '--config-dir', str(root/'acme'),
+    '--work-dir', str(root/'work'), '--logs-dir', str(root/'logs'),
+    '--server', 'https://acme-v02.api.letsencrypt.org/directory'])
+key = josepy.JWKRSA(key=rsa.generate_private_key(public_exponent=65537, key_size=2048))
+registration = messages.RegistrationResource(body=messages.Registration(), uri='https://example.test/account/1')
+owner = account.Account(registration, key)
+account.AccountFileStorage(config).save(owner, client=None)
+storage.RenewableCert.new_lineage('loom-managed', Path(sys.argv[2]).read_bytes(), Path(sys.argv[3]).read_bytes(), b'', config)
+'''
+    result = subprocess.run([os.environ["LOOM_TEST_CERTBOT_PYTHON"], "-c", script,
+                             str(tmp_path / "state"), str(certificate), str(private)],
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr.decode()
+    from scripts.ops.nebius_certificates import _audit_recovery
+
+    _audit_recovery(tmp_path / "state", sync=True)

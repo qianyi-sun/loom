@@ -7,7 +7,11 @@ import io
 import json
 import os
 import stat
+import subprocess
+import sys
+import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +26,7 @@ def bundle(tmp_path, *, extra=None, altered_hash=False):
     files = {"uv": b"qualified tool", "requirements.txt": b"certbot==5.8.0 --hash=sha256:fixture\n",
              "scripts/ops/nebius_certificates.py": b"qualified issuer",
              "scripts/ops/nebius_dns_challenge.py": b"qualified hook",
+             "scripts/ops/nebius_certificate_gateway.py": b"qualified watchdog",
              "installation.json": json.dumps(config).encode()}
     manifest = {name: hashlib.sha256(value).hexdigest() for name, value in files.items()}
     if altered_hash:
@@ -134,3 +139,48 @@ def test_private_command_has_no_ambient_credentials_or_public_logs(tmp_path, mon
     assert result.strip() == b"ok"
     assert "private-key" not in path.read_text()
     assert os.stat(path).st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("termination", ["outer_timeout", "owner_sigkill"])
+def test_owner_death_or_outer_timeout_does_not_leave_detached_certificate_client(tmp_path, termination):
+    pid = tmp_path / "certificate.pid"
+    script = (
+        "import subprocess,sys; from pathlib import Path; "
+        "from scripts.ops.nebius_certificates import _run_client,_locked_state; "
+        "root=Path(sys.argv[1]); "
+        "\nwith _locked_state(root):\n"
+        " _run_client([sys.executable,'-c',"
+        "\"import os,sys,time; open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(90)\",sys.argv[2]],"
+        "timeout=80,start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)"
+    )
+    root = tmp_path / "state"
+    args = [sys.executable, "-c", script, str(root), str(pid)]
+    worker = None
+    if termination == "outer_timeout":
+        with pytest.raises(subprocess.TimeoutExpired):
+            module().run_private(args, timeout=2)
+    else:
+        worker = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(200):
+            if pid.exists():
+                break
+            assert worker.poll() is None, "issuer failed to start"
+            time.sleep(0.01)
+        worker.kill()
+        worker.wait(timeout=5)
+    assert pid.exists(), "substitute certificate client was never started"
+    client_pid = int(pid.read_text())
+    try:
+        for _ in range(200):
+            status = Path(f"/proc/{client_pid}/stat")
+            if not status.exists() or status.read_text().split()[2] in {"Z", "X"}:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("certificate client outlived terminated issuer")
+    finally:
+        # Also clean the intentionally reproduced pre-fix orphan.
+        try:
+            os.killpg(client_pid, 9)
+        except ProcessLookupError:
+            pass

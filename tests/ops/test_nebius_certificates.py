@@ -220,6 +220,19 @@ def client_output(state, chain, key):
         path.chmod(0o600)
         link = live / (name + ".pem")
         link.symlink_to(Path("../../archive/loom-managed") / path.name)
+    account = state / "acme" / "accounts" / "acme-v02.api.letsencrypt.org" / "directory" / ("a" * 32)
+    account.mkdir(parents=True, mode=0o700, exist_ok=True)
+    for name in ("private_key.json", "regr.json", "meta.json"):
+        (account / name).write_text("{}")
+        (account / name).chmod(0o600)
+    renewal = state / "acme" / "renewal"
+    renewal.mkdir(mode=0o700, exist_ok=True)
+    (renewal / "loom-managed.conf").write_text("account = " + "a" * 32)
+    (renewal / "loom-managed.conf").chmod(0o600)
+    # Mirror the issuer's private process umask in this external-client double.
+    for directory in (state / "acme").rglob("*"):
+        if directory.is_dir() and not directory.is_symlink():
+            directory.chmod(0o700)
 
 
 def test_issuer_pins_client_and_scope_then_publishes_only_validated_output(tmp_path, monkeypatch):
@@ -401,3 +414,84 @@ def test_hook_adds_and_cleans_only_selected_subject_through_real_dns_boundary(tm
     assert module().certificate_hook(config, "cleanup") == "cleaned"
     assert [row["recordId"] for row in records] == ["foreign"]
     module()._clean_challenges(state, module().load_installation(config))
+
+
+@pytest.mark.parametrize("descendant", ["accounts", "renewal", "archive", "renewal-hooks"])
+def test_preexisting_acme_descendant_link_is_rejected_before_client_write(tmp_path, monkeypatch, descendant):
+    config = installation(tmp_path)
+    state = tmp_path / "certificate-state"
+    state.mkdir(mode=0o700)
+    acme = state / "acme"
+    acme.mkdir(mode=0o700)
+    external = tmp_path / "foreign"
+    external.mkdir(mode=0o700)
+    (acme / descendant).symlink_to(external, target_is_directory=True)
+    calls = []
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+    monkeypatch.setattr(module(), "_run_client", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 1))
+    with pytest.raises(module().CertificateError):
+        module().issue_certificate(config, now=NOW)
+    assert not calls, "client received an ACME path escaping its private state"
+    assert not list(external.iterdir())
+
+
+def test_account_lineage_and_renewal_recovery_are_synced_before_completed_intent(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    chain, key, roots = material()
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+    synced = []
+    real_sync, atomic = os.fsync, module()._atomic_json
+
+    def client(args, **kwargs):
+        client_output(tmp_path / "certificate-state", chain, key)
+        return subprocess.CompletedProcess(args, 0)
+
+    def fsync(fd):
+        synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real_sync(fd)
+
+    def publish(path, value):
+        if path.name == "issuance.json" and value.get("stage") == "complete":
+            for name in ("private_key.json", "regr.json", "meta.json", "loom-managed.conf", "fullchain1.pem", "privkey1.pem"):
+                assert any(item.endswith("/" + name) for item in synced), name + " not durable"
+            assert str(tmp_path / "certificate-state" / "acme") in synced
+        atomic(path, value)
+
+    monkeypatch.setattr(module(), "_run_client", client)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(module(), "_atomic_json", publish)
+    assert module().issue_certificate(config, now=NOW, roots=roots)["status"] == "qualified"
+
+
+def test_same_generation_cannot_replay_corrupt_persisted_identity(tmp_path):
+    root = tmp_path / "state"
+    candidate = material()
+    publish(root, *candidate)
+    path = root / "selected.json"
+    value = json.loads(path.read_text())
+    value["fingerprint_sha256"] = "0" * 64
+    path.write_text(json.dumps(value))
+    with pytest.raises(module().CertificateError):
+        publish(root, *candidate)
+
+
+def test_delivery_window_uses_validation_time_not_issuance_start(tmp_path, monkeypatch):
+    config = installation(tmp_path)
+    chain, key, roots = material(days=7)
+    clock = [NOW]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    def client(args, **kwargs):
+        client_output(tmp_path / "certificate-state", chain, key)
+        clock[0] += timedelta(minutes=10)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(module(), "datetime", Clock)
+    monkeypatch.setattr(module(), "_certbot_version", lambda: "5.8.0")
+    monkeypatch.setattr(module(), "_run_client", client)
+    with pytest.raises(module().CertificateError):
+        module().issue_certificate(config, roots=roots)
