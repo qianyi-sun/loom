@@ -79,6 +79,48 @@ DNS/TLS, provisioning IAM, management installation, live Nebius quota and pool
 limits, and installed concurrent-owner acceptance still require qualification.
 Keep this evidence outside the repository.
 
+### Render management manifests
+
+Prepare the protected `loom.nebius-management-deployment.v1` JSON described in
+[the management architecture](../architecture/nebius-primary-platform.md#management-deployment-manifests)
+outside the repository. Its nested `installation.provider_runtime` is mandatory
+for this deployment. Set its Kubernetes endpoint to the foundation's exact API
+origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
+`credentials_file` to `/var/run/loom-management-kubernetes/credentials.json`, and
+`cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
+These are explicit projected-file paths, not an ambient operator login.
+
+```bash
+uv run --no-sync python scripts/ops/render_nebius_management.py \
+  --deployment /secure/management-deployment.json \
+  --candidate /secure/publication/candidate.json \
+  --runtime-profile /secure/publication/runtime-profile.json \
+  --output /secure/management-render
+```
+
+The output directory must not already exist. It and its files are private; errors
+do not echo input values. `rendered-not-installed` reports the manifest list,
+candidate, revision and fixed platform-resource envelope. Rendering validates
+source identity, registry/digest binding and configuration, not successful remote
+CI/publication or installed readiness. Select a protected `dev` publication, never
+a personal snapshot or the retired integration branch.
+
+All referenced Secrets belong only to the management namespace:
+`loom-platform-db` (admin/service credentials and database CA),
+`loom-management-db-tls`, `loom-platform-auth` (secret-store master key),
+`loom-admin-secret`, `loom-management-publications` (`token`, read-only GitHub),
+`loom-management-kubernetes` (`ca.crt`, `credentials.json`),
+`loom-management-cloud` (`credentials.json`), and `loom-platform-storage`
+(`backup-access-key`, `backup-secret-key`). Identical names in another namespace
+do not authorize copying that namespace's values. Preserve generated keys and
+their recovery material; Kubernetes/cloud identities must be separately scoped.
+
+Do not pass this render to the standalone platform deployer or apply it manually.
+Management ownership/readback, initial Secret delivery, HTTPS ingress/TLS,
+off-node backup and the protected management rollout must be qualified before
+activation. No `nebius-rollout` management-install operation is introduced by the
+render-only command, and it purchases no capacity or storage.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

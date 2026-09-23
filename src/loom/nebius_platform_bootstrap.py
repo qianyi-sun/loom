@@ -145,7 +145,6 @@ def database_url(value: str, namespace: str) -> str:
 
 
 def bootstrap_database(config: dict[str, Any]) -> None:
-    connection_url = database_url(os.environ["LOOM_DB_URL"], config["namespace"])
     tokens = (
         (
             "collector",
@@ -162,6 +161,18 @@ def bootstrap_database(config: dict[str, Any]) -> None:
         "loom_" + name: os.environ["LOOM_DB_" + name.upper() + "_PASSWORD"]
         for name in ("service", "control_plane", "gateway", "actuator")
     }
+    _bootstrap_database(config, roles=roles, tokens=tokens)
+
+
+def bootstrap_management_database(config: dict[str, Any]) -> None:
+    """Separate management DB: one ordinary service role, no task authorities."""
+    _bootstrap_database(config, roles={"loom_service": os.environ["LOOM_DB_SERVICE_PASSWORD"]}, tokens=())
+
+
+def _bootstrap_database(
+    config: dict[str, Any], *, roles: dict[str, str], tokens: tuple[tuple[str, str, str, str], ...],
+) -> None:
+    connection_url = database_url(os.environ["LOOM_DB_URL"], config["namespace"])
     if any(len(password) < 24 for password in roles.values()):
         raise ValueError("database role passwords must have at least 24 characters")
     with psycopg.connect(connection_url) as connection:
@@ -538,11 +549,12 @@ def upload_backup(config: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("database", "configure", "backup"))
+    parser.add_argument("phase", choices=("database", "management-database", "configure", "backup"))
     args = parser.parse_args()
     try:
         config = json.loads(Path(os.environ["LOOM_PLATFORM_CONFIG"]).read_text())
-        {"database": bootstrap_database, "configure": configure_platform, "backup": upload_backup}[
+        {"database": bootstrap_database, "management-database": bootstrap_management_database,
+         "configure": configure_platform, "backup": upload_backup}[
             args.phase
         ](config)
     except Exception as exc:

@@ -1,0 +1,215 @@
+"""Management-only manifests reusing the platform database and backup templates.
+
+This pure renderer grants no cloud/Kubernetes authority and writes no Secrets.
+Its caller verifies protected publication and provisions independently scoped
+credentials before applying to an ownership-qualified management namespace.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from loom.nebius_environment_contract import _hostname
+from loom.nebius_environment_render import PlatformEnvelope, _envelope
+from loom.nebius_platform_render import (
+    _build_platform,
+    _env,
+    _mount_secret,
+    _namespace,
+    _network_policy,
+    _obj,
+    _peer,
+    _secret_env,
+    canonical,
+    digest,
+)
+from loom_service.environment_management.installation import ManagementInstallation
+
+_LABEL = "loom.nebius/management-installation"
+_CONFIG_PATH = "/var/run/loom-management"
+_KUBERNETES_PATH = "/var/run/loom-management-kubernetes"
+_CLOUD_PATH = "/var/run/loom-management-cloud"
+
+
+class ManagementDeployment(BaseModel):
+    """Protected bootstrap input; fixed overhead is separate from child allowance."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["loom.nebius-management-deployment.v1"]
+    installation_id: UUID
+    namespace: str = Field(pattern=r"^loom-nebius-management(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$", max_length=53)
+    public_host: str
+    postgres_storage_gi: int = Field(ge=10, le=1024, strict=True)
+    backup_bucket: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
+    installation: ManagementInstallation
+
+    _public_host = field_validator("public_host")(_hostname)
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> ManagementDeployment:
+        foundation = self.installation.foundation
+        config = foundation.platform_config
+        if self.installation_id.int == 0:
+            raise ValueError("management installation requires a non-nil identity")
+        if self.namespace in {config["namespace"], config["execution_namespace"],
+                              config["execution_namespace"] + "-build", foundation.ingress_namespace}:
+            raise ValueError("management requires an independent namespace")
+        if (self.public_host == config["public_host"]
+                or self.public_host == foundation.public_dns_zone
+                or self.public_host.endswith("." + foundation.public_dns_zone)):
+            raise ValueError("management host must be separate from existing and child routes")
+        if self.backup_bucket in config["buckets"].values():
+            raise ValueError("management requires an independent backup bucket")
+        runtime = self.installation.provider_runtime
+        if runtime is None:
+            raise ValueError("management deployment requires an explicit provider runtime")
+        if (runtime.kubernetes.endpoint != config["kubernetes_api_server"].rstrip("/")
+                or runtime.kubernetes.ca_file != Path(_KUBERNETES_PATH + "/ca.crt")
+                or runtime.kubernetes.credentials_file != Path(_KUBERNETES_PATH + "/credentials.json")
+                or runtime.cloud_credentials_file != Path(_CLOUD_PATH + "/credentials.json")):
+            raise ValueError("management provider must use the bound cluster and mounted credentials")
+        return self
+
+
+@dataclass(frozen=True)
+class RenderedManagement:
+    config: dict[str, Any]
+    files: dict[str, list[dict[str, Any]]]
+    revision: str
+    platform_envelope: PlatformEnvelope
+
+
+def render_management(
+    deployment: ManagementDeployment, *, candidate: dict[str, Any], profile: dict[str, Any], repo_root: Path,
+) -> RenderedManagement:
+    """No execution stack, public allocation or existing application mutations."""
+    if candidate.get("source_ref") != "refs/heads/dev":
+        raise ValueError("management requires a protected dev publication")
+    images = candidate.get("images")
+    if not isinstance(images, dict) or not isinstance(images.get("service"), dict):
+        raise ValueError("management image must be an object in the candidate")
+    image = images["service"].get("image_ref", "")
+    if (not isinstance(image, str) or re.fullmatch(
+            re.escape(deployment.installation.registry_prefix) + r"/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", image,
+    ) is None):
+        raise ValueError("management image must be digest-pinned in the installation registry")
+    foundation = deployment.installation.foundation
+    ns = deployment.namespace
+    # This is a fresh copy, not a modification of the standalone foundation.
+    config = foundation.platform_config
+    config.update(namespace=ns, execution_namespace=ns + "-execution",
+                  public_host=deployment.public_host, postgres_storage_gi=deployment.postgres_storage_gi,
+                  db_tls_secret_name="loom-management-db-tls", public_tls_bootstrap=False)
+    config["buckets"]["backup"] = deployment.backup_bucket
+    config.pop("task_image_builder", None)
+    # The standalone template validates its original execution policy. None of
+    # that policy, its execution manifests or its configure Job is emitted here.
+    revision = digest({"deployment": deployment.model_dump(mode="json"), "candidate": candidate, "profile": profile})
+    templates = _build_platform(config, candidate, profile, deployment.installation.keyring, repo_root=repo_root)
+    # The shared bootstrap/backup commands consume only these fields. Do not
+    # mount the old environment's task/model/storage configuration into management.
+    runtime_config = {
+        "namespace": ns, "region": config["region"], "storage_endpoint": config["storage_endpoint"],
+        "buckets": {"backup": deployment.backup_bucket},
+    }
+    cm = _obj("ConfigMap", "loom-platform-config", ns)
+    cm["data"] = {
+        "environment.json": canonical(runtime_config).decode(),
+        "installation.json": deployment.installation.model_dump_json(),
+    }
+    account = _obj("ServiceAccount", "loom-platform", ns)
+    account["automountServiceAccountToken"] = False
+    ingress_peer = {
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": foundation.ingress_namespace}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": foundation.ingress_controller_label}},
+    }
+    files = {
+        "00-namespaces.yaml": [_namespace(ns)],
+        "10-config-network.yaml": [
+            cm, account, _network_policy("default-deny-ingress", ns, {}, []),
+            _network_policy("management-api", ns, {"matchLabels": {"app": "loom-service"}},
+                            [{"from": [ingress_peer], "ports": [{"protocol": "TCP", "port": 8090}]}]),
+            _network_policy("postgres-private", ns, {"matchLabels": {"app": "loom-postgres"}},
+                            [{"from": [_peer(ns)], "ports": [{"protocol": "TCP", "port": 5432}]}]),
+        ],
+        "20-database.yaml": templates["20-database.yaml"],
+        "30-migrate.yaml": templates["30-migrate.yaml"],
+        "40-services.yaml": [doc for doc in templates["40-services.yaml"]
+                             if doc["metadata"]["name"] == "loom-service"],
+        "80-backup.yaml": templates["80-backup.yaml"],
+    }
+    service = next(doc for doc in files["40-services.yaml"] if doc["kind"] == "Deployment")
+    pod = service["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    container["env"] = [
+        *_env({"LOOM_ENV": "development", "LOOM_NAMESPACE": ns, "LOOM_SVC_SERVICE_MODE": "management",
+               "LOOM_SVC_BIND_HOST": "0.0.0.0", "LOOM_SVC_BIND_PORT": 8090,
+               "LOOM_SVC_PUBLIC_BASE_URL": "https://" + deployment.public_host,
+               "LOOM_SVC_AUTH_LOCAL_HTTP": "false", "LOOM_SVC_TEAM_REGISTRATION_OPEN": "false",
+               "LOOM_SVC_ADMIN_SECRET_FILE": "/var/run/loom/admin/secrets.toml",
+               "LOOM_SVC_ENVIRONMENT_MANAGEMENT_CONFIG_FILE": _CONFIG_PATH + "/installation.json"}),
+        _secret_env("LOOM_SVC_DB_URL", "loom-platform-db", "service-url"),
+        _secret_env("LOOM_SECRET_STORE_MASTER_KEY", "loom-platform-auth", "secret-store-master-key"),
+        _secret_env("LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN", "loom-management-publications", "token"),
+    ]
+    container["readinessProbe"]["httpGet"]["path"] = "/api/v1/health/ready"
+    pod["volumes"].append({"name": "management-config", "configMap": {
+        "name": cm["metadata"]["name"], "items": [{"key": "installation.json", "path": "installation.json"}],
+    }})
+    container["volumeMounts"].append({"name": "management-config", "mountPath": _CONFIG_PATH, "readOnly": True})
+    _mount_secret(pod, "management-kubernetes", "loom-management-kubernetes", _KUBERNETES_PATH)
+    _mount_secret(pod, "management-cloud", "loom-management-cloud", _CLOUD_PATH)
+    pod["volumes"][-1]["secret"]["items"] = [{"key": "credentials.json", "path": "credentials.json"}]
+    pod["volumes"][-2]["secret"]["items"] = [
+        {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
+    ]
+    migration = files["30-migrate.yaml"][0]
+    migration["metadata"]["name"] = "loom-management-migrate-" + revision.removeprefix("sha256:")[:12]
+    migration_pod = migration["spec"]["template"]["spec"]
+    migration_pod.pop("initContainers", None)
+    migration_pod["volumes"] = [v for v in migration_pod["volumes"] if v["name"] in {"platform-config", "db-ca"}]
+    migrate = migration_pod["containers"][0]
+    migrate["command"] = ["python", "-m", "loom.nebius_platform_bootstrap", "management-database"]
+    migrate["env"] = [
+        {"name": "LOOM_PLATFORM_CONFIG", "value": "/var/run/loom-platform/environment.json"},
+        _secret_env("LOOM_DB_URL", "loom-platform-db", "admin-url"),
+        _secret_env("LOOM_DB_SERVICE_PASSWORD", "loom-platform-db", "service-password"),
+    ]
+    migrate["volumeMounts"] = [v for v in migrate["volumeMounts"] if v["name"] in {"platform-config", "db-ca"}]
+    ingress = _obj("Ingress", "loom-management", ns, api="networking.k8s.io/v1")
+    ingress["spec"] = {
+        "ingressClassName": foundation.ingress_class_name,
+        "tls": [{"hosts": [deployment.public_host]}],
+        "rules": [{"host": deployment.public_host, "http": {"paths": [{
+            "path": "/", "pathType": "Prefix", "backend": {"service": {"name": "loom-service", "port": {"number": 8090}}},
+        }]}}],
+    }
+    files["70-public.yaml"] = [ingress]
+    # Include rollout, migration, backup scratch and credential preparation in
+    # the fixed overhead. This envelope is not an automatic platform resize.
+    for docs in files.values():
+        for doc in docs:
+            doc["metadata"].setdefault("labels", {})[_LABEL] = str(deployment.installation_id)
+            if doc["kind"] not in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+                continue
+            spec = doc["spec"]
+            if doc["kind"] == "CronJob":
+                spec = spec["jobTemplate"]["spec"]
+            template = spec["template"]
+            template["metadata"].setdefault("labels", {})[_LABEL] = str(deployment.installation_id)
+            template["metadata"]["annotations"]["loom.nebius/configuration-revision"] = revision
+            if doc["kind"] in {"Job", "CronJob"}:
+                for volume in template["spec"].get("volumes", []):
+                    if volume.get("configMap", {}).get("name") == "loom-platform-config":
+                        volume["configMap"]["items"] = [{"key": "environment.json", "path": "environment.json"}]
+            size = deployment.postgres_storage_gi * 1024 if doc["kind"] == "CronJob" else 256
+            for c in template["spec"].get("initContainers", []) + template["spec"]["containers"]:
+                c["resources"]["requests"]["ephemeral-storage"] = f"{size}Mi"
+                c["resources"]["limits"]["ephemeral-storage"] = f"{size}Mi"
+    return RenderedManagement(runtime_config, files, revision, _envelope(files))
