@@ -101,6 +101,40 @@ def _run(container, *args, payload=None, timeout=120):
     return result.stdout
 
 
+def _add_failure_diagnostics(container, namespace, error):
+    """Best-effort reads must not hide the original failing assertion/timeout."""
+    ident = container.get_wrapped_container().id
+    commands = [
+        ["docker", "logs", "--tail=100", ident],
+        ["docker", "inspect", "--format={{json .State}}", ident],
+        *[["docker", "exec", ident, *command] for command in (
+            ["kubectl", "--request-timeout=3s", "get", "pods", "-A", "-o", "wide"],
+            ["kubectl", "--request-timeout=3s", "get", "events", "-A", "--field-selector", "type=Warning"],
+            ["iptables-save", "-c", "-t", "filter"],
+            ["kubectl", "--request-timeout=3s", "logs", "-n", namespace,
+             "deployment/loom-shared-ingress", "--tail=60"],
+            ["kubectl", "--request-timeout=3s", "get", "services,endpointslices", "-n", namespace, "-o", "wide"],
+            ["kubectl", "--request-timeout=3s", "get", "networkpolicies", "-n", "loom-dev-alice", "-o", "yaml"],
+        )],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, timeout=5)
+            detail = f"exit={result.returncode}\n{result.stdout}{result.stderr}"
+        except subprocess.TimeoutExpired as diagnostic_error:
+            # communicate() carries bytes even with text=True on a timeout.
+            output = diagnostic_error.output or b""
+            stderr = diagnostic_error.stderr or b""
+            if isinstance(output, bytes):
+                output = output.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            detail = f"TimeoutExpired\n{output}{stderr}"
+        except Exception as diagnostic_error:
+            detail = f"{type(diagnostic_error).__name__}: {diagnostic_error}"
+        error.add_note(" ".join(command) + "\n" + detail[-16384:])
+
+
 @pytest.mark.parametrize("original", [AssertionError("readiness failed"),
                                      subprocess.TimeoutExpired(["kubectl", "rollout"], 75),
                                      pytest.fail.Exception("route did not become ready")])
@@ -221,14 +255,10 @@ def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_
         }} for namespace in (ns, "loom-dev-alice", "loom-dev-bob")]
         _run(container, "kubectl", "apply", "-f", "-", payload=yaml.safe_dump_all(prerequisites))
         _run(container, "kubectl", "apply", "--validate=strict", "-f", "-", payload=yaml.safe_dump_all(docs))
-        try:
-            _run(container, "kubectl", "rollout", "status", "deployment/loom-shared-ingress", "-n", ns, "--timeout=150s", timeout=165)
-            _run(container, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s", timeout=75)
-            for namespace in (ns, "loom-dev-alice", "loom-dev-bob"):
-                _run(container, "kubectl", "wait", "pods", "--all", "-n", namespace, "--for=condition=Ready", "--timeout=60s", timeout=75)
-        except AssertionError:
-            pytest.fail(_run(container, "kubectl", "get", "pods", "-A", "-o", "wide") +
-                        _run(container, "kubectl", "get", "events", "-A", "--field-selector", "type=Warning"))
+        _run(container, "kubectl", "rollout", "status", "deployment/loom-shared-ingress", "-n", ns, "--timeout=150s", timeout=165)
+        _run(container, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s", timeout=75)
+        for namespace in (ns, "loom-dev-alice", "loom-dev-bob"):
+            _run(container, "kubectl", "wait", "pods", "--all", "-n", namespace, "--for=condition=Ready", "--timeout=60s", timeout=75)
         networks = json.loads(subprocess.check_output(["docker", "inspect", ident]))[0]["NetworkSettings"]["Networks"]
         addresses = [network["IPAddress"] for network in networks.values() if network.get("IPAddress")]
         assert len(addresses) == 1, "disposable test node must have one local Docker network"
@@ -336,16 +366,8 @@ except urllib.error.URLError as exc:
             assert _run(container, "kubectl", "exec", "-n", "loom-dev-alice", "loom-web", "--",
                         "python", "-c", probe, url).strip() == "loom-dev-alice:8090"
         assert get("alice.dev.example.com", "/api") == (200, b"loom-dev-alice:8090")
-    except Exception as exc:
-        exc.add_note(_run(container, "iptables-save", "-c", "-t", "filter"))
-        exc.add_note(_run(container, "kubectl", "get", "pods", "-A", "-o", "wide"))
-        exc.add_note(_run(container, "kubectl", "logs", "-n", ns, "deployment/loom-shared-ingress", "--tail=60"))
-        exc.add_note(_run(container, "kubectl", "get", "services,endpointslices", "-n", ns, "-o", "wide"))
-        exc.add_note(_run(container, "kubectl", "get", "networkpolicies", "-n", "loom-dev-alice", "-o", "yaml"))
-        probe = container.exec(["kubectl", "exec", "-n", ns, "deployment/loom-shared-ingress", "--",
-                                "wget", "-T", "3", "-O", "-", "--no-check-certificate",
-                                "https://loom-web-origin." + ns + ".svc.cluster.local"])
-        exc.add_note(probe.output.decode())
+    except (Exception, pytest.fail.Exception) as exc:
+        _add_failure_diagnostics(container, ns, exc)
         raise
     finally:
         container.stop()
