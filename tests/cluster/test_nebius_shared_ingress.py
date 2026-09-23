@@ -28,9 +28,6 @@ from tests.unit.test_nebius_environment_contract import BOB, registration_for
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_shared_ingress import ingress_input as ingress_input
 
-pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
-                                reason="requires an explicitly disposable Kubernetes API")
-
 # Qualified upstream versions; production inputs require their native registry mirrors.
 TRAEFIK = "docker.io/library/traefik@sha256:3429c14149401de2ac82fc72ddc6a92642332b90deb3012301ff211b9d2d0f18"
 PYTHON = "docker.io/library/python@sha256:9b8dad7f66b5c7751df6cb7a64a07812e86bed85d0116efe82b3a11209f1440d"
@@ -104,6 +101,48 @@ def _run(container, *args, payload=None, timeout=120):
     return result.stdout
 
 
+@pytest.mark.parametrize("original", [AssertionError("readiness failed"),
+                                     subprocess.TimeoutExpired(["kubectl", "rollout"], 75),
+                                     pytest.fail.Exception("route did not become ready")])
+def test_failure_diagnostics_preserve_original_when_commands_timeout(monkeypatch, original):
+    def fail_command(*args, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"], output=b"partial output")
+
+    monkeypatch.setattr(subprocess, "run", fail_command)
+    from types import SimpleNamespace
+    container = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id="disposable-node"))
+    with pytest.raises(type(original)) as caught:
+        try:
+            raise original
+        except (Exception, pytest.fail.Exception) as exc:
+            _add_failure_diagnostics(container, "test-platform", exc)
+            raise
+    assert caught.value is original
+    assert len(original.__notes__) >= 4
+    assert all("TimeoutExpired" in note and "partial output" in note for note in original.__notes__)
+    assert any("docker logs" in note for note in original.__notes__)
+    assert any("events" in note for note in original.__notes__)
+
+
+def test_failure_diagnostics_continue_after_error_and_bound_output(monkeypatch):
+    from types import SimpleNamespace
+    container = SimpleNamespace(get_wrapped_container=lambda: SimpleNamespace(id="disposable-node"))
+
+    def command(args, **kwargs):
+        assert 0 < kwargs["timeout"] <= 5
+        if "iptables-save" in args:
+            return subprocess.CompletedProcess(args, 1, "", "rules unavailable")
+        return subprocess.CompletedProcess(args, 0, "x" * 100000 + "useful tail", "")
+
+    monkeypatch.setattr(subprocess, "run", command)
+    error = AssertionError("original")
+    _add_failure_diagnostics(container, "test-platform", error)
+    assert any("rules unavailable" in note for note in error.__notes__)
+    assert any("useful tail" in note for note in error.__notes__)
+    assert all(len(note) < 17000 for note in error.__notes__)
+
+
 def _backend(ns, name, port, *, tls=False):
     spec = {"automountServiceAccountToken": False,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000,
@@ -123,6 +162,8 @@ def _backend(ns, name, port, *, tls=False):
                                                              "labels": {"app": name}}, "spec": spec}
 
 
+@pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
+                    reason="requires an explicitly disposable Kubernetes API")
 @pytest.mark.timeout(240)
 def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_inputs, tmp_path):
     config, candidate, profile = platform_inputs
