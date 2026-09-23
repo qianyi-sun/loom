@@ -27,6 +27,7 @@ from loom.driver.task_image import (
     publish_local_image_to_registry,
     resolve_task_image,
 )
+from loom.execution_architecture import execution_cpu_arch
 from loom.models.task import TaskConfig
 from loom.task_image_materialization import (
     required_task_image_architectures,
@@ -141,12 +142,16 @@ async def _materialize_task_dir(**kwargs: Any):  # type: ignore[no-untyped-def]
 
 
 def host_cpu_arch() -> str:
+    """Return the architecture this builder publishes.
+
+    New Loom execution is x86_64-only (see ``execution_cpu_arch``). Laptop
+    Docker Desktop on Apple Silicon still builds ``linux/amd64`` via qemu, so
+    the local sidecar claims and publishes x86_64 digests (#1462).
+    """
     machine = platform.machine().lower()
-    if machine in {"aarch64", "arm64"}:
-        return "arm64"
-    if machine in {"amd64", "x86_64"}:
-        return "x86_64"
-    raise RuntimeError(f"unsupported builder CPU architecture {machine!r}")
+    if machine not in {"aarch64", "arm64", "amd64", "x86_64"}:
+        raise RuntimeError(f"unsupported builder CPU architecture {machine!r}")
+    return execution_cpu_arch("any")
 
 
 async def verify_local_image_architecture(
@@ -183,11 +188,11 @@ async def materialize_and_publish_task_images(
     *,
     publication_recorder: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> dict[str, str]:
-    native_arch = host_cpu_arch()
-    if claim.cpu_arch != native_arch:
+    builder_arch = host_cpu_arch()
+    if claim.cpu_arch != builder_arch:
         raise RuntimeError(
-            "task image claim does not match the builder's native architecture "
-            f"(claim={claim.cpu_arch}, builder={native_arch})"
+            "task image claim does not match the builder's execution architecture "
+            f"(claim={claim.cpu_arch}, builder={builder_arch})"
         )
     task_config = TaskConfig.model_validate(claim.task_config)
     if claim.cpu_arch not in required_task_image_architectures(task_config):
@@ -234,7 +239,9 @@ async def materialize_and_publish_task_images(
                     "materialized task bundle checksum mismatch "
                     f"expected={claim.task_checksum} actual={actual_checksum}"
                 )
-            expected_metadata_checksum = claim.task_source_provenance.get("bundle_file_metadata_sha256")
+            expected_metadata_checksum = claim.task_source_provenance.get(
+                "bundle_file_metadata_sha256"
+            )
             if expected_metadata_checksum is not None:
                 actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
                 if actual_metadata_checksum != expected_metadata_checksum:

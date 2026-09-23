@@ -143,11 +143,13 @@ trial Worker, a laptop Docker **task-image-builder** sidecar, and the React SPA.
 It runs migrations, seeds local tokens (including a least-privilege
 `task-image:build` token), and prints endpoint URLs.
 
-The local builder sidecar uses the laptop Docker daemon. Hosted task images
-use Nebius native build Jobs. Trial workers stay pull-only. Dockerfile-backed
-`loom eval batch create` trials remain `queued` until that sidecar publishes a
-ready digest for the laptop architecture. `loom run` (CLI, not service-mode)
-can still build locally without the registry.
+The local builder sidecar uses the laptop Docker daemon and publishes
+x86_64 (`linux/amd64`) digests — including on Apple Silicon via Docker
+Desktop qemu. Hosted task images use Nebius native build Jobs. Trial
+workers stay pull-only. Dockerfile-backed `loom eval batch create` trials
+remain `queued` until that sidecar publishes a ready digest.
+`loom run` (CLI, not service-mode) can still build locally without the
+registry.
 
 Default local URLs:
 
@@ -175,6 +177,14 @@ environment secrets, and release-promotion evidence. See
 Running the local service stack requires Docker CLI with the Compose
 plugin; on macOS, install and start Docker Desktop, then verify
 `docker compose version` before `loom service up`.
+
+If Compose fails pulling MinIO with `pull access denied for minio/minio`,
+confirm `deploy/docker-compose.dev.yml` still pins
+`quay.io/minio/minio@sha256:…` (Docker Hub no longer serves anonymous
+`minio/minio` pulls). Do not wipe `minio_data` to “fix” a pin mismatch —
+downgrading the MinIO image against an existing volume fails with
+`Unknown xl header version`; recreate only with `loom service down -v`
+when you intentionally reset local object storage.
 
 ## Quickstart: Submit from the CLI to a Loom Server
 
@@ -1520,10 +1530,12 @@ overwrite the bytes referenced by the live row. The worker uses the existing
 object-store materializer at runtime. If a
 task declares `environment.dockerfile`, that Dockerfile and its build context
 are part of the uploaded bundle. Service-mode trial workers are **pull-only**:
-they wait for a ready native-arch materialization in the loopback registry
+they wait for a ready x86_64 materialization in the loopback registry
 (local compose) or the shared registry (staging/prod). They do not build
 task-authored Dockerfiles. Local compose provides a laptop `task-image-builder`
-sidecar for that; until it publishes a digest, Dockerfile batches stay queued.
+sidecar that builds `linux/amd64` (including on Apple Silicon via Docker
+Desktop qemu) and publishes that digest; until it is ready, Dockerfile
+batches stay queued.
 The secret-bearing `publish-local` flags also accept safe references such as
 `--db-url env:LOOM_DB_URL`, `--minio-access-key env:LOOM_MINIO_ACCESS_KEY`,
 and `--minio-secret-key env:LOOM_MINIO_SECRET_KEY`, but literal credential
