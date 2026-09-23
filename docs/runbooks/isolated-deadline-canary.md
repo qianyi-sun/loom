@@ -1,10 +1,60 @@
-# Isolated deadline fixture (#1857)
+# Isolated deadline fixture (#1748)
 
-This is the first implementation slice of #1857, following the #1858 dispatch
-audit. It supplies a deployable fault-provider process, resource renderer and
+
+## Current Nebius qualification
+
+Hosted acceptance uses the native phase supervisor, Pod lease/generation and
+short-lived rotating credentials. Its immutable signed phase deadline remains
+the dispatch cutoff regardless of credential refresh. A provider hold must end
+in a Gateway `agent_timeout` / `attempt_deadline_reached` observation and a native
+`timed_out` agent phase, with no credential/scope error, new post-deadline dispatch
+or extra attempt. Preserve the native result vocabulary rather than rewriting
+historical results to the retired worker's event format.
+
+Run one explicitly bounded attempt (`max_attempts=1`, 10-second agent phase),
+through current submission/admission. The trusted receipt reader joins the
+opaque dispatch ID to the durable native token-mint audit and the still-current,
+unrevoked lease. Its projection contains the lease UUID and generation, never a
+fabricated legacy `agent_attempt_id`. Missing, replaced, foreign or expired
+authority fails closed. Rotation may change the grant ID, but cannot extend the
+phase or transfer the request to another lease.
+
+Collect the actual phase start/end, configured budget and termination grace;
+measure output persistence separately. Join runtime result, Trial, canonical
+trajectory/ATIF and Gateway call/receipt records. Verify the exact lease's
+cleanup and absence of owned Pods/Jobs. Node scale-down is a separate capacity
+observation. A timeout or HTTP 201 alone is insufficient.
+
+A bounded call through the configured testing provider can qualify the native
+deadline path if durable dispatch and completion records prove the request was
+still in flight at the signed cutoff and stopped for that deadline. Record this
+as real-provider acceptance, not an injected-fault fixture pass. Calls that all
+finish before the cutoff do not qualify. Use the isolated fixture when a
+deterministic hold is required; never weaken provider policy merely to deploy it.
+
+Native isolation is the canary's dedicated provider capability and exact
+Trial/lease/Pod ownership. No legacy worker pool, drain, old-fleet activation or
+within-worker Case B automatic-retry acceptance is required. The legacy Case B
+fixture remains regression coverage for its original supported path; it does
+not claim native agent retries. Current native credentials deliberately rotate,
+so the legacy one-JWT-per-long-attempt rule does not apply.
+
+The renderer accepts the selected namespace and a 30–300-second fixture lifetime
+(plus ten seconds of Job shutdown allowance), preserving no-retry execution.
+Do not change a team's private-endpoint permission for the canary. If using a
+public route on the existing ingress, use a unique authenticated path, ordinary
+provider validation, explicit bounded ingress policy, and remove only the
+run-owned route/resources afterward. Shared provider connections are unchanged.
+
+The fixture's `full_canary_passed=false` remains intentional: only the external
+collector with actual native lifecycle/output evidence can conclude acceptance.
+The legacy worker details below remain implementation history where they differ.
+
+The original fixture slice came from #1857, following the #1858 dispatch
+audit. Both were consolidated into #1748. It supplies a deployable fault-provider process, resource renderer and
 read-only receipt projection. It does **not** yet supply the protected live
 launcher, exclusive-worker preflight, single-trial orchestration or complete
-acceptance collector. Keep #1857 and #1748 open. Every fixture evidence response
+acceptance collector. Keep #1748 open until current deployed acceptance passes. Every fixture evidence response
 therefore has `full_canary_passed=false`.
 
 ## Protocol and trust
