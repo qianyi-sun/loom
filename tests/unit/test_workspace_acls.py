@@ -89,6 +89,8 @@ async def test_acl_archive_without_declaration_fails_before_destination_changes(
     ("SCHILY.acl.access", "user:alice:rwx\ngroup::r-x\nother::r-x", tarfile.DIRTYPE),
     ("SCHILY.acl.access", "user::rwx\ngroup::r-x\nother::r-x\nother::---", tarfile.DIRTYPE),
     ("SCHILY.acl.access", "user::rwx\nuser:123:rwx\ngroup::r-x\nother::r-x", tarfile.DIRTYPE),
+    ("SCHILY.acl.access", "user::rwx\nuser:1:rwx\nuser:01:rwx\ngroup::r-x\nmask::rwx\nother::r-x", tarfile.DIRTYPE),
+    ("SCHILY.acl.access", "user::rwx\vgroup::r-x\vother::r-x", tarfile.DIRTYPE),
 ])
 def test_malformed_or_unsupported_acl_metadata_is_rejected(tmp_path, key, value, kind):
     archive = tmp_path / "acl.tar"
