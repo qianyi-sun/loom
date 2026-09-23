@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import subprocess
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -54,6 +56,65 @@ class TLSAPI(Protocol):
     def create_secret(self, document: dict[str, Any]) -> None:
         """Create only; never apply/replace or silently retry an ambiguous write."""
         ...
+
+
+class KubectlTLSAPI:
+    """Gateway-local adapter, callable only through the protected installation."""
+
+    def __init__(self, kubeconfig: Path, *, binding: TLSBinding, executable: Path):
+        if (not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve()
+                or not executable.is_absolute()):
+            raise IngressError("protected Kubernetes tooling paths required")
+        try:
+            certificates._private_read(kubeconfig, limit=512 * 1024)
+        except Exception:
+            raise IngressError("private Kubernetes configuration unavailable") from None
+        self.prefix = [str(executable), "--kubeconfig", str(kubeconfig), "--request-timeout=30s"]
+        self.binding = binding
+
+    def _run(self, arguments: list[str], *, payload: bytes | None = None) -> bytes:
+        try:
+            result = subprocess.run([*self.prefix, *arguments], input=payload, capture_output=True,
+                                    timeout=40, check=False, env={"PATH": os.defpath, "LANG": "C.UTF-8"})
+            if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
+                raise IngressError("protected Kubernetes operation failed")
+            return result.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            raise IngressError("protected Kubernetes outcome unavailable") from None
+
+    def _get(self, arguments: list[str]) -> dict[str, Any] | None:
+        raw = self._run([*arguments, "--ignore-not-found", "-o", "json"])
+        if not raw.strip():
+            return None
+        try:
+            document = json.loads(raw)
+            if not isinstance(document, dict):
+                raise ValueError()
+            return document
+        except ValueError:
+            raise IngressError("protected Kubernetes readback is invalid") from None
+
+    def verify_identity(self, binding: TLSBinding) -> None:
+        if binding != self.binding:
+            raise IngressError("Kubernetes adapter binding differs")
+        for namespace, uid in (("kube-system", binding.kube_system_uid), (binding.namespace, binding.namespace_uid)):
+            observed = self._get(["get", "namespace", namespace])
+            metadata = (observed or {}).get("metadata", {})
+            if (not observed or observed.get("kind") != "Namespace" or metadata.get("name") != namespace
+                    or metadata.get("uid") != uid or metadata.get("deletionTimestamp") is not None):
+                raise IngressError("Kubernetes cluster or namespace identity differs")
+
+    def get_secret(self, namespace: str, name: str) -> dict[str, Any] | None:
+        if namespace != self.binding.namespace:
+            raise IngressError("TLS Secret namespace outside protected binding")
+        return self._get(["get", "secret", name, "-n", namespace])
+
+    def create_secret(self, document: dict[str, Any]) -> None:
+        if document.get("metadata", {}).get("namespace") != self.binding.namespace:
+            raise IngressError("TLS Secret namespace outside protected binding")
+        self.verify_identity(self.binding)
+        self._run(["create", "-n", self.binding.namespace, "-f", "-", "-o", "name"],
+                  payload=json.dumps(document).encode())
 
 
 def _verify_secret(observed: dict[str, Any], desired: dict[str, Any], recorded_uid: str | None) -> str:
