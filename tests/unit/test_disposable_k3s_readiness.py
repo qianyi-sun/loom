@@ -7,8 +7,8 @@ import pytest
 from kubernetes.client.exceptions import ApiException
 from urllib3.exceptions import MaxRetryError, ProtocolError, SSLError
 
-from tests.integration.test_execution_actuator_k3s import _wait_for_dns_pods
 from tests.integration import test_execution_actuator_k3s as fixture
+from tests.integration.test_execution_actuator_k3s import _wait_for_dns_pods
 
 
 @pytest.fixture
