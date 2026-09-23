@@ -227,3 +227,18 @@ def test_prepare_optional_worker_preserves_admitted_agent_image(tmp_path: Path) 
         required_image_refs=(profile.task_image_ref, profile.runtime_image_ref, target),
         keyring=ImageAdmissionKeyring.from_json(args.output_keyring.read_text()),
     )
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_prepare_preserves_explicit_runtime_readiness(tmp_path: Path, enabled: bool) -> None:
+    args = _inputs(tmp_path)
+    capabilities = ('supports_task_web_egress', 'service_lifecycle_ready', 'supports_task_identity')
+    for name in capabilities:
+        setattr(args, name, enabled)
+    prepare.prepare(args)
+    profile = json.loads(args.output_profile.read_text())
+    for name in capabilities:
+        if enabled:
+            assert profile[name] is True
+        else:
+            assert name not in profile

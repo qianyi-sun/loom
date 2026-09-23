@@ -19,17 +19,19 @@ components. Directory boundaries follow runtime, packaging and schema ownership.
 | `deploy/` | Images, local Compose, Kubernetes resources, Terraform and monitoring definitions |
 | `scripts/` | Repository checks, operator entrypoints and benchmark tooling |
 | `tests/` | Unit, contract, integration, system, CLI and operations coverage |
-| `migrations/` | Published application Alembic chain |
+| `database/migrations/` | Published application Alembic chain |
 | `database/capacity_migrations/`, `database/capacity_guard_migrations/`, `database/capacity_build_guard_migrations/` | Separate published historical schema chains required for reconstruction and qualified restores |
 | `third_party/` | Pinned vendored dependencies, with their upstream layout and licensing |
 | `.github/` | CI, publication and protected release workflows |
 | `docs/` | Current documentation, machine-read contracts and minimal marked history |
 
-The active application chain stays in `migrations/`; the three retained capacity
-chains are grouped under [database/](../../database/README.md). They remain
-independent histories with stable Python package names and unchanged published
-revisions. Source layout can change when loaders, packaging and reconstruction
-checks change together; revision identities and data compatibility must survive.
+All database schema histories live under [database/](../../database/README.md).
+The active application chain is `database/migrations/`; the capacity chains are
+retained for historical reconstruction and qualified restores. They remain
+independent histories. Published revisions and the capacity Python package names
+are unchanged. Source layout changes must update loaders, image inputs, CI and
+reconstruction checks together; revision identities and data compatibility must
+survive.
 Package boundaries and vendored layouts also follow their consumers. Use
 [architecture](../architecture/README.md) to trace runtime ownership.
 

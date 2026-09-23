@@ -95,7 +95,7 @@ class FaultLedger:
             if (
                 self.binding.case != "B"
                 or count >= 3
-                or receipt.agent_attempt_id == first.agent_attempt_id
+                or receipt.attempt_identity == first.attempt_identity
                 or receipt.step_jwt_id == first.step_jwt_id
                 or now < first.deadline
                 or not receipt.previous_attempt_stopped
@@ -104,7 +104,7 @@ class FaultLedger:
             if count == 2:
                 second = self.approvals[1]
                 if (
-                    receipt.agent_attempt_id != second.agent_attempt_id
+                    receipt.attempt_identity != second.attempt_identity
                     or receipt.deadline != second.deadline
                 ):
                     self.reject("retry attempt changed")

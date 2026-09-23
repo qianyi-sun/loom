@@ -151,6 +151,11 @@
       "title": "Supports Task Image Build",
       "type": "boolean"
     },
+    "supports_task_web_egress": {
+      "default": false,
+      "title": "Supports Task Web Egress",
+      "type": "boolean"
+    },
     "supports_tmpfs": {
       "title": "Supports Tmpfs",
       "type": "boolean"

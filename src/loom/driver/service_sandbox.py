@@ -34,7 +34,8 @@ from loom.models.networking import NetworkPolicy
 from loom.models.types import OS
 
 _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
-                   "/stop-processes": "stop_processes"}
+                   "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
+                   "/resume-processes": "resume_processes"}
 _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
     "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
@@ -53,7 +54,7 @@ class SandboxRPCError(DriverError):
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
-            if path != "/stop-processes" or reason not in _CLEANUP_REASONS:
+            if path not in {"/stop-processes", "/pause-processes", "/resume-processes"} or reason not in _CLEANUP_REASONS:
                 reason = "http_error"
             detail = f"HTTP {status}; {reason}"
             if reason == "process_owner_mismatch":
@@ -81,11 +82,13 @@ class ServiceSandboxDriver:
         capabilities: Capabilities,
         network_policy: NetworkPolicy,
         max_transfer_bytes: int = 256 * 1024 * 1024,
+        command_environment: Mapping[str, str] | None = None,
     ) -> None:
         if max_transfer_bytes <= 0:
             raise ValueError("positive max_transfer_bytes required")
         self.capabilities = capabilities
         self._network_policy = network_policy
+        self._command_environment = dict(command_environment or {})
         self._max_transfer = max_transfer_bytes
         self._socket_path = socket_path
         self._client: httpx.AsyncClient | None = None
@@ -165,7 +168,7 @@ class ServiceSandboxDriver:
                 "argv": ["/bin/sh", "-c", cmd],
                 "user": str(user) if user is not None else None,
                 "cwd": str(cwd) if cwd is not None else "",
-                "env": dict(env or {}),
+                "env": {**self._command_environment, **dict(env or {})},
                 "timeout_sec": timeout_sec or 0,
             },
             timeout=None,  # The server bounds execution and kills its process group.
@@ -247,6 +250,14 @@ class ServiceSandboxDriver:
         """Stop task descendants before exporting the separate verifier snapshot."""
         await self._request("POST", "/stop-processes")
 
+    async def pause_processes(self) -> None:
+        """Suspend task descendants while keeping the snapshot RPC available."""
+        await self._request("POST", "/pause-processes")
+
+    async def resume_processes(self) -> None:
+        """Resume only processes suspended by the preceding pause operation."""
+        await self._request("POST", "/resume-processes")
+
     async def export_workspace_archive(self, src: PurePosixPath, dst: Path) -> None:
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         source, archive = shlex.quote(str(src)), shlex.quote(str(remote))
@@ -271,7 +282,7 @@ class ServiceSandboxDriver:
         try:
             await self.upload(src, remote)
             result = await self.exec(
-                f"mkdir -p {destination} && tar -C {destination} -xpf {archive}"
+                f"mkdir -p {destination} && tar --numeric-owner -C {destination} -xpf {archive}"
             )
             if result.return_code or result.stderr:
                 raise DriverError("unable to restore workspace archive")

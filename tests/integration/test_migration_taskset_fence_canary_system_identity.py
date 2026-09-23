@@ -18,7 +18,7 @@ _SYSTEM_CANARY_TEAM_NAME = "loom-system-taskset-fence-canary"
 
 def _cfg(postgres_url: str) -> Config:
     repo_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(repo_root / "migrations" / "alembic.ini"))
+    cfg = Config(str(repo_root / "database" / "migrations" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     return cfg
 

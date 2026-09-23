@@ -91,7 +91,9 @@ def prepare_task_bundle_registration(
     if task_file.size_bytes > MAX_REGISTRATION_TEXT_BYTES:
         raise ValueError("registered task.toml exceeds text size limit")
     payload = read_verified_task_image_bundle_file(task_dir, task_file)
-    normalized = normalize_terminal_bench_task_toml(tomllib.loads(payload.decode("utf-8")))
+    normalized = normalize_terminal_bench_task_toml(
+        tomllib.loads(payload.decode("utf-8")), task_id=catalog_id,
+    )
     authored = normalize_steps(TaskConfig.model_validate(normalized))
     execution_cpu_arch(authored.environment.cpu_arch)
     bundle_id = _task_id(authored.task.id)

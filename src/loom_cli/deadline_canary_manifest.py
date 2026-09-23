@@ -13,6 +13,8 @@ def render_fixture_resources(
     binding: CanaryBinding,
     candidate_sha: str,
     gateway_image: str,
+    namespace: str = "loom-staging",
+    lifetime_seconds: int = 180,
 ) -> list[dict[str, Any]]:
     """Use the candidate Gateway digest, never copy its environment/DB secrets.
 
@@ -24,13 +26,15 @@ def render_fixture_resources(
     """
     if (
         re.fullmatch(r"[0-9a-f]{40}", candidate_sha) is None
+        or re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", namespace) is None
+        or not 30 <= lifetime_seconds <= 300
         or re.fullmatch(r"[a-zA-Z0-9./:_-]+/loom-llm-gateway@sha256:[0-9a-f]{64}", gateway_image)
         is None
     ):
         raise ValueError("fixture requires a fixed candidate and immutable Gateway image")
     name = "loom-deadline-canary-" + run_id.hex
     labels = {"app": "loom-deadline-canary", "loom-canary-run": run_id.hex}
-    metadata = {"name": name, "namespace": "loom-staging", "labels": labels}
+    metadata = {"name": name, "namespace": namespace, "labels": labels}
     volume = {
         "name": "capability",
         "secret": {
@@ -52,7 +56,7 @@ def render_fixture_resources(
         "metadata": metadata,
         "spec": {
             "backoffLimit": 0,
-            "activeDeadlineSeconds": 190,
+            "activeDeadlineSeconds": lifetime_seconds + 10,
             "template": {
                 "metadata": {
                     "labels": labels,
@@ -82,6 +86,8 @@ def render_fixture_resources(
                                 "file:/capability/operator-key",
                                 "--host",
                                 "0.0.0.0",
+                                "--lifetime-seconds",
+                                str(lifetime_seconds),
                             ],
                             "env": [{"name": "PYTHONDONTWRITEBYTECODE", "value": "1"}],
                             "ports": [{"name": "http", "containerPort": 9000}],

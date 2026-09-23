@@ -95,7 +95,7 @@ def postgres_url() -> Iterator[str]:
         )
         os.environ["LOOM_DB_URL"] = url
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=_REPO_ROOT,
             check=True,
         )

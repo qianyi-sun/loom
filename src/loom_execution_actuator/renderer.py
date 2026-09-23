@@ -23,6 +23,7 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.pipeline.keys import canonical_digest, canonical_document
+from loom.sandbox_identity import ROOT_INSTALL_CAPABILITIES
 from loom_execution_actuator.contracts import ActuatorContractError
 
 _DIGEST_IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -104,7 +105,7 @@ def _probe(value: ProbeV1) -> dict[str, Any]:
 def _sidecar(
     value: SidecarContainerV1, *, request: ContainerResourcesV1 | None = None,
 ) -> dict[str, Any]:
-    result = {
+    result: dict[str, Any] = {
         "name": value.role_name,
         "image": value.image_ref,
         "imagePullPolicy": "IfNotPresent",
@@ -124,6 +125,15 @@ def _sidecar(
     }
     if value.private_sandbox:
         result["securityContext"] = _security_context(read_only_root=False)
+        if value.identity is not None:
+            identity = value.identity
+            result["securityContext"].update(
+                runAsUser=identity.run_as_user, runAsGroup=identity.run_as_group,
+                runAsNonRoot=identity.run_as_user != 0,
+            )
+            if identity.run_as_user == 0:
+                result["securityContext"]["capabilities"]["add"] = list(ROOT_INSTALL_CAPABILITIES)
+            result["env"].append({"name": "HOME", "value": identity.home})
         result["volumeMounts"] = [
             {
                 "name": f"{value.role_name}-socket",

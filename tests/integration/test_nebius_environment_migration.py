@@ -71,7 +71,7 @@ def test_provisioning_downgrade_refuses_to_discard_platform_budget(environment_d
         connection.execute(insert(NebiusPlatformBudget).values(
             cluster_id="cluster", cpu_millis=1000, memory_mib=1000, storage_mib=1000, ephemeral_storage_mib=1000,
         ))
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", environment_database.url.render_as_string(hide_password=False).replace("%", "%%"))
     with pytest.raises(DBAPIError, match="cannot remove managed provisioning or platform budget history"):
         command.downgrade(cfg, "0154")
@@ -159,7 +159,7 @@ def test_registration_database_rejects_invalid_state(environment_database, chang
 def test_upgrade_preserves_legacy_dev_rows(environment_database):
     from loom.db.schema import DevInstance, Team, User
 
-    cfg = Config("migrations/alembic.ini")
+    cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", environment_database.url.render_as_string(hide_password=False).replace("%", "%%"))
     command.downgrade(cfg, "0153")
     owner, team = uuid4(), uuid4()

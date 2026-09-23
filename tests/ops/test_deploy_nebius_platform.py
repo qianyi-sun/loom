@@ -19,6 +19,59 @@ from tests.unit.test_nebius_platform_render import platform_inputs, regional_inp
 from loom.nebius_platform_render import build_platform, write_platform
 
 
+@pytest.mark.parametrize("enabled,selector", [
+    (True, None), (True, {"app": "loom-web"}), (False, {"app": "loom-shared-ingress"}),
+])
+def test_application_rollout_cannot_perform_or_revert_ingress_cutover(rendered, enabled, selector):
+    _, config, manifest, files = rendered
+    config["shared_ingress_enabled"] = enabled
+    kube = FakeKubectl(config, files)
+    if selector is not None:
+        kube.objects["service", "loom-web"] = {"spec": {"selector": selector}}
+    with pytest.raises(deploy.DeploymentError, match="ingress"):
+        deploy.preflight(kube, manifest, config, files, config["cluster_id"])
+    assert not any(command[0] in {"apply", "patch", "delete", "exec"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_shared_ingress_rollout_requires_ready_existing_controller(rendered, ready):
+    _, config, manifest, files = rendered
+    config["shared_ingress_enabled"] = True
+    kube = FakeKubectl(config, files)
+    kube.objects["service", "loom-web"] = {"spec": {"selector": {"app": "loom-shared-ingress"}}}
+    kube.objects["deployment", "loom-shared-ingress"] = {
+        "metadata": {"generation": 2}, "spec": {"replicas": 1},
+        "status": {"observedGeneration": 2 if ready else 1, "availableReplicas": 1, "updatedReplicas": 1},
+    }
+    if ready:
+        assert deploy.preflight(kube, manifest, config, files, config["cluster_id"])["database_exists"] is False
+    else:
+        with pytest.raises(deploy.DeploymentError, match="ingress"):
+            deploy.preflight(kube, manifest, config, files, config["cluster_id"])
+
+
+def test_ingress_cutover_between_preflight_and_lock_cannot_be_reverted(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+
+    class InterleavedCutover(FakeKubectl):
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if command[0] == "exec" and "acquire" in command:
+                # Another protected operation finished before this lock was acquired.
+                self.objects["service", "loom-web"] = {"spec": {"selector": {"app": "loom-shared-ingress"}}}
+            return result
+
+    kube = InterleavedCutover(config, files, database=True)
+    kube.objects["service", "loom-web"] = {"spec": {"selector": {"app": "loom-web"}}}
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="ingress"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "patch", "delete", "create"} for command in kube.commands)
+    assert kube.objects["service", "loom-web"]["spec"]["selector"] == {"app": "loom-shared-ingress"}
+    assert any(command[0] == "exec" and "release" in command for command in kube.commands)
+
+
 def test_standalone_deployer_rejects_managed_child(request, tmp_path):
     from tests.unit.test_nebius_environment_render import rendered
 
@@ -49,14 +102,18 @@ def test_on_demand_build_secret_preflight_and_namespace(
 
 
 @pytest.mark.parametrize("cache_enabled", [False, True])
+@pytest.mark.parametrize("egress_enabled", [False, True])
 def test_native_build_render_preflight_does_not_import_service_dependencies(
-    request: pytest.FixtureRequest, tmp_path: Path, cache_enabled: bool
+    request: pytest.FixtureRequest, tmp_path: Path, cache_enabled: bool, egress_enabled: bool
 ) -> None:
     config, release, profile = request.getfixturevalue("platform_inputs")
     config["task_image_builder"] = {
         "registry_repository": "cr.eu-north1.nebius.cloud/test/task-images",
         **({"cache_bucket": config["buckets"]["artifacts"]} if cache_enabled else {}),
     }
+    if egress_enabled:
+        config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
+        profile["supports_task_web_egress"] = True
     config["task_resource_requests"] = {"local/measured-task": {
         "task_revision_sha256": "sha256:" + "d" * 64,
         "requests": {"controller": {

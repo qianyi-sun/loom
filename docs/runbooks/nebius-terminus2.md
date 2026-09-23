@@ -272,17 +272,49 @@ loom datasets publish-local /path/to/benchmark \
   --minio-region eu-north1
 ```
 
-That profile forces `cpu_arch=x86_64`, `gateway-only` networking, fills missing
-`cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), sets
-`user=agent` + compatible `/app` workdir, strips custom verifier identity,
-points the verifier at relative `verifier/run.sh`, drops Harbor TB2.1
-artifact globs that admission rejects, and prepares a derived Dockerfile for the
-native non-root UID 65532. The original Dockerfile and `tests/test.sh` remain
+Before applying the profile to unfamiliar tasks, inspect all inputs through
+the ordinary validation command:
+
+```sh
+loom datasets validate-local /path/to/benchmark \
+  --execution-profile nebius-terminus --compatibility-report --json \
+  > compatibility-report.json
+```
+
+The complete report is emitted even when a task is blocked (exit code 1).
+Each task retains its source location and declared requirements. Package
+defects such as missing `COPY` sources, unsupported bootstrap conversions,
+and missing runtime capabilities have separate dispositions and suggested
+actions. Explicit users, network policies, workdirs, services and verifier
+entrypoints must not disappear behind successful profile-admission counters.
+The report lists generated image inputs and defaulted values separately from
+declared requirement changes. It performs no builds or model calls, does not
+establish registry availability, and makes no changes to the source tree.
+
+For custom trajectory-generation archives, publication belongs in a team-owned
+TaskSet with `intents=["trajectory_generation"]`; `publish-local` is the catalog
+benchmark path. Validation itself publishes nothing. Full acceptance of the
+60 inputs in [#2046](https://github.com/qianyi-sun/loom/issues/2046) requires a
+report against the original archives and real trajectory-generation delivery;
+fixture checks alone do not establish that evidence.
+
+That profile selects `cpu_arch=x86_64`, preserves an explicit `web-allowlist`
+policy, and otherwise selects `gateway-only` networking. It fills missing
+`cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), defaults missing
+`user` to `agent`, preserves explicit task and verifier identities, and uses
+`/app` when the declared workdir is neither `/app` nor `/workspace`.
+The compatibility report flags changes to declared network or workdir
+requirements for review. The profile points the verifier at relative
+`verifier/run.sh`, drops Harbor TB2.1 artifact globs that admission rejects,
+and prepares a derived Dockerfile for the selected numeric identity.
+Explicit identity and web egress require qualified deployment opt-ins;
+the default runtime remains non-root with gateway-only networking.
+The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
 Python version and pinned verifier dependencies declared by the supported Harbor
-bootstrap. Build-time installation may run as root; task execution remains
-non-root with gateway-only networking.
+bootstrap. Build-time dependency installation may run as root independently
+of the selected task execution identity.
 
 The generated `verifier/harbor-offline.sh` removes only recognized online
 bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
@@ -298,7 +330,9 @@ adapters or image shapes fail with an adaptation error; configuration admission
 alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
 before a model batch. This adapter supports Debian/Ubuntu final images and the
-Harbor uv 0.9.5/preinstalled `uvx -p ... -w package==version ... pytest`,
+Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
+and preinstalled `uvx -p ... -w package==version ... pytest` (including the
+equivalent `--python` and `--with` options),
 exact-pinned pip plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Official Debian-based Python full
@@ -311,6 +345,52 @@ for its own executions, without making an upstream reproducibility claim. The pu
 opt-in via `--create-bucket` ([#1993](https://github.com/qianyi-sun/loom/issues/1993) /
 [#1994](https://github.com/qianyi-sun/loom/pull/1994)); prefer an infra-managed
 bucket and pass `--minio-region` for signing.
+
+Dockerfile compatibility and image preparation share instruction-boundary
+parsing. Quoted, tab-stripped and multiple heredoc bodies remain opaque: a
+Python `from datetime` or literal `SHELL` inside a body cannot change the
+detected build stage. Continuations and an earlier stage alias are supported;
+unterminated heredocs and unresolved final base images fail before preparation
+writes derived outputs. Original stages and build-context files are retained.
+This does not repair unavailable base images, missing `COPY` sources, or task
+mocks, and it does not validate every Dockerfile instruction in place of
+BuildKit. Such package defects require an explicit, reviewable source repair.
+The build uses Loom's pinned uv provisioner and installs an explicitly declared
+verifier Python under `/opt/verifier-python`, preserving the task interpreter
+and PATH even when the task image uses an older Python. Incompatible dependency
+pins still fail the image build; they are never silently omitted or relaxed.
+
+Task users are container-local declarations. With a deployment profile that
+explicitly enables `supports_task_identity`, Terminus accepts `environment.user`
+as `root`, `0`, or a numeric `UID:GID`. Numeric nonroot identities also require
+`environment.environment.HOME`; HOME must be an absolute canonical directory
+outside the private runtime and verifier paths. The existing `agent` default
+retains the profile's nonroot UID/GID. Arbitrary usernames and a nonroot UID
+without its GID remain unsupported because admission cannot resolve the image's
+passwd/group metadata. A declared `verifier.user` is preserved and applied to
+the independent verifier; it must be able to restore the task's recorded file
+ownership. Per-step and agent-process identity overrides remain unsupported.
+
+The trusted controller keeps its nonroot identity. Explicitly root private task
+and verifier containers retain no-new-privileges and drop all capabilities,
+then receive only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, and `KILL`
+for package installation and cleanup of descendants that drop UID. This grants
+no host mounts, devices, kernel administration, nested-container service, or
+privileged mode. The active runtime binary and namespace security policy must
+support this configuration before the deployment-owned opt-in is enabled.
+
+Declare every relevant installed directory in `environment.mutable_paths`,
+including package-manager state when required; root access alone does not copy
+changes into a fresh verifier. For example, an installation into
+`/usr/local/share/my-tool` tracked by dpkg needs that directory and
+`/var/lib/dpkg` declared. Directory transfer retains its size, protected-path
+and filesystem-entry restrictions; it is not a whole-rootfs snapshot. The local
+Docker regression `tests/integration/test_task_identity_installation_docker.py`
+installs an initially absent `.deb`, executes its ownership/UID-changing
+maintainer script, cleans up its child process and verifies package files and
+dpkg state in a fresh private sandbox without model calls or network access.
+Real tasks requiring additional package paths, sockets, services, devices or
+external inputs still need their corresponding support and acceptance evidence.
 
 This is distinct from `scripts/ops/prepare_nebius_terminal_bench.py`, which
 builds a one-task TaskSet upload. Use the TaskSet helper for a single adapted
@@ -436,6 +516,56 @@ at image build time. Read-only tool checks use the sandbox default user; only
 actual installation requests root. Nebius images must have tools preinstalled,
 and unsupported root execution still fails normally. Remove the #1550 patch
 when the Harbor pin includes the corresponding upstream fix.
+
+## Declared mutable state and services
+
+Tasks that produce state outside the workdir declare exact directory roots:
+
+```toml
+[environment]
+mutable_paths = ["/data", "/home/agent/.local/share/jupyter"]
+```
+
+These roots must exist at handoff and cannot overlap the workdir, another root,
+or runtime/private verifier paths (including `/opt/verifier`,
+`/opt/verifier-python` and `/opt/verifier-assets`). The bundle retains per-root
+archives and `artifacts/mutable-paths/manifest.json`. Restore replaces directory
+contents to preserve deletions. Files, modes, ownership and internal links are
+preserved; cross-root hardlinks and special files fail explicitly. The aggregate
+limit is 256 MiB and 100,000 entries, across at most 16 roots. Declare all state
+needed by private verification, including installation metadata when relevant;
+undeclared system mutations do not appear in the fresh verifier.
+
+For a task whose agent must start an HTTP service:
+
+```toml
+[environment.service_lifecycle]
+readiness_timeout_sec = 30
+
+[environment.service_lifecycle.readiness]
+command = "curl --fail --silent http://127.0.0.1:8000/health"
+interval_sec = 1
+timeout_sec = 2
+retries = 10
+```
+
+If the original environment initializes a prerequisite service, also declare
+`startup_command = ["/entrypoint.sh", "/bin/true"]` and
+`startup_timeout_sec = 60` in `[environment.service_lifecycle]`, after reviewing
+the initializer. The command must return after leaving its background service
+running; do not insert an agent solution or pre-complete required task work.
+The native PID 1 remains in control, so image ENTRYPOINT/CMD is not automatically
+executed. This explicit declaration records the reviewed initialization.
+
+The controller captures bounded initializer stdout/stderr and exit status in
+`diagnostics/service-startup.json`. Initialization failure occurs before model
+calls. Readiness is checked before the agent for initialized services and again
+at handoff. Services pause during state capture, resume for private verification
+over Pod loopback, and stop after verification or failed/cancelled handoff.
+Background log files need ordinary artifact declarations. Deployment admission
+requires `service_lifecycle_ready=true` in the runtime profile, qualified with
+the matching sandbox pause/resume implementation. A declaration alone is not
+evidence of live support or original-task acceptance.
 
 ## Verification and acceptance
 

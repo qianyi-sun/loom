@@ -56,7 +56,7 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
         url = make_url(source.get_connection_url()).set(drivername="postgresql+psycopg")
         monkeypatch.setenv("LOOM_DB_URL", url.render_as_string(hide_password=False))
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=root,
             env=os.environ.copy(),
             check=True,

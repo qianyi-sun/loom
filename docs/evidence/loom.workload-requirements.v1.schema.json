@@ -1,5 +1,46 @@
 {
   "$defs": {
+    "ExecutionPrerequisiteV1": {
+      "additionalProperties": false,
+      "description": "An unresolved dependency, with an optional opaque inventory reference.",
+      "properties": {
+        "kind": {
+          "enum": [
+            "endpoint",
+            "managed_secret",
+            "device",
+            "fixture"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_-]{0,79}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "pattern": "^(?:loom|k8s-secret)://[A-Za-z0-9._/@:-]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reference"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "title": "ExecutionPrerequisiteV1",
+      "type": "object"
+    },
     "ImageMaterialization": {
       "enum": [
         "immutable_oci",
@@ -30,6 +71,40 @@
       "title": "NetworkAccess",
       "type": "string"
     },
+    "TaskExecutionRequirementsV1": {
+      "additionalProperties": false,
+      "description": "Bounded capability and prerequisite declarations retained at admission.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "enum": [
+              "nested_docker",
+              "singularity_mounts",
+              "isolated_kernel_settings",
+              "external_cluster",
+              "pkcs11_authentication",
+              "dpdk_networking"
+            ],
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Capabilities",
+          "type": "array"
+        },
+        "prerequisites": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExecutionPrerequisiteV1"
+          },
+          "maxItems": 32,
+          "title": "Prerequisites",
+          "type": "array"
+        }
+      },
+      "title": "TaskExecutionRequirementsV1",
+      "type": "object"
+    },
     "VerifierTopology": {
       "enum": [
         "in_attempt",
@@ -37,6 +112,57 @@
       ],
       "title": "VerifierTopology",
       "type": "string"
+    },
+    "WebAllowlist": {
+      "additionalProperties": false,
+      "properties": {
+        "destinations": {
+          "items": {
+            "$ref": "#/$defs/WebDestination"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Destinations",
+          "type": "array"
+        },
+        "kind": {
+          "const": "web-allowlist",
+          "default": "web-allowlist",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "destinations"
+      ],
+      "title": "WebAllowlist",
+      "type": "object"
+    },
+    "WebDestination": {
+      "additionalProperties": false,
+      "description": "Exact public DNS destination; HTTPS uses CONNECT, HTTP uses forwarding.",
+      "properties": {
+        "host": {
+          "maxLength": 253,
+          "minLength": 3,
+          "title": "Host",
+          "type": "string"
+        },
+        "protocol": {
+          "enum": [
+            "http",
+            "https"
+          ],
+          "title": "Protocol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "protocol"
+      ],
+      "title": "WebDestination",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -91,6 +217,17 @@
         }
       ],
       "title": "Ephemeral Storage Mib"
+    },
+    "execution_requirements": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskExecutionRequirementsV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "extra_hosts": {
       "title": "Extra Hosts",
@@ -183,6 +320,17 @@
       "minimum": 0,
       "title": "Sidecar Count",
       "type": "integer"
+    },
+    "task_egress": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WebAllowlist"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "tmpfs": {
       "title": "Tmpfs",

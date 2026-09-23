@@ -1510,7 +1510,7 @@ def main(argv: list[str] | None = None) -> int:
             for path in tracked_paths:
                 if (
                     path.endswith(".py")
-                    and path.startswith(("src/", "tests/", "packages/", "migrations/"))
+                    and path.startswith(("src/", "tests/", "packages/", "database/migrations/"))
                     and not manifest.ci_ignores_path(path)
                 ):
                     print(path)

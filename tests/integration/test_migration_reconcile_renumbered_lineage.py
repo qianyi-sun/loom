@@ -22,8 +22,8 @@ pytestmark = pytest.mark.integration
 
 def _cfg(url: str) -> Config:
     repo_root = Path(__file__).resolve().parents[2]
-    cfg = Config(str(repo_root / "migrations" / "alembic.ini"))
-    cfg.set_main_option("script_location", str(repo_root / "migrations"))
+    cfg = Config(str(repo_root / "database" / "migrations" / "alembic.ini"))
+    cfg.set_main_option("script_location", str(repo_root / "database" / "migrations"))
     cfg.set_main_option("sqlalchemy.url", url)
     return cfg
 

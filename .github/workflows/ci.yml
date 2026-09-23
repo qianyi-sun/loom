@@ -337,7 +337,7 @@ jobs:
           uv pip check --python .venv/bin/python
 
       - name: Ruff
-        run: uv run --no-sync ruff check src tests packages migrations database/capacity_guard_migrations database/capacity_migrations
+        run: uv run --no-sync ruff check src tests packages database/migrations database/capacity_guard_migrations database/capacity_migrations
 
       - name: Ruff format (normalized integration suites)
         run: |

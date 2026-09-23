@@ -79,6 +79,81 @@ DNS/TLS, provisioning IAM, management installation, live Nebius quota and pool
 limits, and installed concurrent-owner acceptance still require qualification.
 Keep this evidence outside the repository.
 
+### Shared HTTPS installation boundary
+
+The shared-controller renderer is `loom.nebius_shared_ingress.render_shared_ingress`.
+Its `SharedIngressInstallation` input uses schema
+`loom.nebius-shared-ingress.v1`, a non-nil `installation_id`, `foundation`,
+digest-pinned native-registry `image`, and a separate `tls_secret_name`. Foundation
+ingress namespace must equal the existing standalone namespace and its controller
+label must be `loom-shared-ingress`. Use a certificate covering both the configured
+child wildcard and the separate management hostname. Private keys stay in the
+platform namespace; do not reuse the standalone Caddy key or publish Secret data.
+
+Rendering does not install or switch traffic. Before enabling the standalone
+`shared_ingress_enabled` flag through the protected Nebius workflow, qualify the
+image and certificate, existing Service UID/allocation/ports, exact resource
+ownership, controller readiness, capacity and legacy-host HTTPS/TLS-ALPN routing.
+Preserve the original selector and protected configuration as rollback evidence.
+The selector change and persisted flag must share the rollout concurrency boundary;
+ordinary rollout rechecks the selected mode after acquiring its guard, before any
+backup or resource mutation. Never remove `loom-web-tls`
+or replace the LoadBalancer to perform this migration. No protected shared-ingress
+install operation is supplied yet; do not use an ad-hoc `kubectl` cutover.
+
+The renderer uses Traefik 3.7.13 features and receives trusted read-only Secret
+discovery across the cluster. Budget 200m CPU, 256 MiB memory and 128 MiB ephemeral
+storage including its rolling surge. Uploads and responses stream directly;
+there is no uniform request-byte or global request-concurrency limit. Existing
+application validation is not a pre-auth request-exhaustion defense. Qualify
+bounded application request reception before public management activation; do
+not treat the removed nginx body-size annotation as enforced. The controller has no certificate
+issuance credentials; renewal and the corresponding safe reload still require
+the protected installation workflow. Disposable routing evidence is not live
+DNS/TLS or installed multi-owner acceptance.
+
+### Render management manifests
+
+Prepare the protected `loom.nebius-management-deployment.v1` JSON described in
+[the management architecture](../architecture/nebius-primary-platform.md#management-deployment-manifests)
+outside the repository. Its nested `installation.provider_runtime` is mandatory
+for this deployment. Set its Kubernetes endpoint to the foundation's exact API
+origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
+`credentials_file` to `/var/run/loom-management-kubernetes/credentials.json`, and
+`cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
+These are explicit projected-file paths, not an ambient operator login.
+
+```bash
+uv run --no-sync python scripts/ops/render_nebius_management.py \
+  --deployment /secure/management-deployment.json \
+  --candidate /secure/publication/candidate.json \
+  --runtime-profile /secure/publication/runtime-profile.json \
+  --output /secure/management-render
+```
+
+The output directory must not already exist. It and its files are private; errors
+do not echo input values. `rendered-not-installed` reports the manifest list,
+candidate, revision and fixed platform-resource envelope. Rendering validates
+source identity, registry/digest binding and configuration, not successful remote
+CI/publication or installed readiness. Select a protected `dev` publication, never
+a personal snapshot or the retired integration branch.
+
+All referenced Secrets belong only to the management namespace:
+`loom-platform-db` (admin/service credentials and database CA),
+`loom-management-db-tls`, `loom-platform-auth` (secret-store master key),
+`loom-admin-secret`, `loom-management-publications` (`token`, read-only GitHub),
+`loom-management-kubernetes` (`ca.crt`, `credentials.json`),
+`loom-management-cloud` (`credentials.json`), and `loom-platform-storage`
+(`backup-access-key`, `backup-secret-key`). Identical names in another namespace
+do not authorize copying that namespace's values. Preserve generated keys and
+their recovery material; Kubernetes/cloud identities must be separately scoped.
+
+Do not pass this render to the standalone platform deployer or apply it manually.
+Management ownership/readback, initial Secret delivery, HTTPS ingress/TLS,
+off-node backup and the protected management rollout must be qualified before
+activation. No `nebius-rollout` management-install operation is introduced by the
+render-only command, and it purchases no capacity or storage.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

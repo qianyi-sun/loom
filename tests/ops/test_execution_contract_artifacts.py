@@ -22,10 +22,10 @@ def test_compatibility_report_is_complete_and_has_named_owners() -> None:
     assert report["schema_version"] == "loom.service-workload-compatibility-report.v2"
     assert report["accepted_pool_ids"] == ["nebius-cpu"]
     assert report["workload_policy_pool_id"] == "nebius-cpu"
-    assert report["summary"]["total_workloads"] == len(rows) == 69
+    assert report["summary"]["total_workloads"] == len(rows) == 75
     assert report["summary"]["pools"]["nebius-cpu"]["supported"] == 0
     assert report["summary"]["pools"]["nebius-cpu"]["conversion_required"] == 66
-    assert report["summary"]["pools"]["nebius-cpu"]["unsupported"] == 3
+    assert report["summary"]["pools"]["nebius-cpu"]["unsupported"] == 9
     assert len({row["workload_id"] for row in rows}) == len(rows)
     assert all(
         {decision["logical_pool_id"] for decision in row["pool_dispositions"]}
@@ -50,4 +50,10 @@ def test_compatibility_report_is_complete_and_has_named_owners() -> None:
         "osworld",
         "pipeline:behavior-sim-local-gateway@1",
         "pipeline:behavior-sim-local-none@1",
+        "capability:nested_docker",
+        "capability:singularity_mounts",
+        "capability:isolated_kernel_settings",
+        "capability:external_cluster",
+        "capability:pkcs11_authentication",
+        "capability:dpdk_networking",
     }

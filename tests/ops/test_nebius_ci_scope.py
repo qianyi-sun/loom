@@ -92,4 +92,4 @@ def test_python_lint_cli_preserves_combined_platform_scope() -> None:
     assert "tests/unit/test_worker_claim_loop.py" in paths
     assert "tests/ops/test_nebius_ci_scope.py" in paths
     # Historical migrations still form the shared application schema chain.
-    assert "migrations/versions/0043_gb10_worker_lifecycle.py" in paths
+    assert "database/migrations/versions/0043_gb10_worker_lifecycle.py" in paths

@@ -15,7 +15,7 @@ ORCHESTRATOR_TABLES = {
 
 
 def _config(url: str) -> Config:
-    config = Config("migrations/alembic.ini")
+    config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", url)
     return config
 

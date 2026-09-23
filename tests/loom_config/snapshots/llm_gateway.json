@@ -184,6 +184,11 @@
     "default": "'minio'",
     "required": false
   },
+  "task_egress_config_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "together_api_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",

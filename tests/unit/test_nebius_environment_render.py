@@ -124,6 +124,12 @@ def test_child_cannot_start_execution_or_duplicate_capacity_collection(platform_
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"] == "false"
 
 
+def test_child_rejects_task_identity_readiness_under_restricted_pss(platform_inputs):
+    platform_inputs[2]["supports_task_identity"] = True
+    with pytest.raises(ValueError, match=r"task identity.*restricted"):
+        rendered(platform_inputs)
+
+
 def test_platform_envelope_covers_surge_bootstrap_backup_and_retained_storage(platform_inputs):
     result = rendered(platform_inputs)
     # DB 100m/256Mi + two copies of (3 apps 100m/256Mi + web 25m/64Mi)

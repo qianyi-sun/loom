@@ -11,9 +11,9 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
-COPY migrations ./migrations
+COPY database/migrations ./database/migrations
 COPY database/capacity_guard_migrations ./database/capacity_guard_migrations
-RUN chmod -R a+rX ./src ./migrations ./database/capacity_guard_migrations ./packages/loom-bundle-checksum && \
+RUN chmod -R a+rX ./src ./database/migrations ./database/capacity_guard_migrations ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e .
 EXPOSE 8080

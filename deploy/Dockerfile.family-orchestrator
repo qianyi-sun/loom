@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY packages/loom-bundle-checksum ./packages/loom-bundle-checksum
-COPY migrations ./migrations
+COPY database/migrations ./database/migrations
 RUN pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
     pip install --no-cache-dir -e .
 CMD ["python", "-m", "loom_family_orchestrator"]

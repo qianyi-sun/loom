@@ -48,7 +48,7 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
             provider_calls += 1
             # No response bytes: an actual HTTP transport must be cancelled at
             # the native phase cutoff, rather than its much longer read timeout.
-            assert await asyncio.wait_for(reader.read(), 4) == b""
+            assert await asyncio.wait_for(reader.read(), 10) == b""
             disconnected.set()
         finally:
             writer.close()
@@ -90,11 +90,6 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
                 session, lease=lease, ttl_seconds=480, signing_key=key,
             )
             assert verify_step_jwt(fallback, signing_key=key).attempt_deadline_wall_clock == lease.deadline_at
-            end = datetime.now(UTC) + timedelta(seconds=0.8)
-            bounded, _, _ = await mint_service_execution_peer_token(
-                session, lease=lease, ttl_seconds=480, signing_key=key,
-                attempt_deadline_wall_clock=end,
-            )
             await session.commit()
 
         app = FastAPI()
@@ -115,12 +110,23 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
                             SimpleNamespace(base_url=f"http://127.0.0.1:{port}", provider_type="openai-compatible")))
         monkeypatch.setattr(facade_openai, "decrypt_facade_api_key", AsyncMock(return_value="fixture"))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
+            # Start the signed cutoff after fixture construction. Give real DB
+            # authorization/dispatch time to connect on a loaded runner, while
+            # remaining far below the 200-second upstream read timeout.
+            async with sessions() as session:
+                end = datetime.now(UTC) + timedelta(seconds=5)
+                bounded, _, _ = await mint_service_execution_peer_token(
+                    session, lease=lease, ttl_seconds=480, signing_key=key,
+                    attempt_deadline_wall_clock=end,
+                )
+                await session.commit()
             response = await client.post(
                 "/openai/v1/chat/completions", headers={"Authorization": f"Bearer {bounded}"},
                 json={"model": "fixture", "messages": [{"role": "user", "content": "fixture"}]},
             )
             assert response.status_code == 504, response.text
             assert response.json()["detail"]["reason"] == "attempt_deadline_reached"
+            assert provider_calls == 1, "deadline elapsed before the provider connection started"
             await asyncio.wait_for(disconnected.wait(), 2)
             response = await client.post(
                 "/openai/v1/chat/completions", headers={"Authorization": f"Bearer {bounded}"},

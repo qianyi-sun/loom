@@ -19,7 +19,7 @@ is documented in [Nebius execution security](nebius-execution-security.md).
 
 ## Container network policies
 
-Drivers expose three task-level policies:
+Local Docker drivers expose these task-level policies:
 
 | Policy | Behavior |
 | --- | --- |
@@ -35,6 +35,89 @@ allow rules.
 `Public` is deliberately a no-op for compatibility with minimal images. It
 does not block cloud metadata or host-reachable services and must not be used
 for untrusted workloads on cloud nodes.
+
+## Declared hosted task web egress
+
+The native hosted runtime supports `WebAllowlist` (`kind = "web-allowlist"`)
+when both the execution class and deployment runtime profile explicitly enable
+`supports_task_web_egress`. Existing profiles omit the field and remain disabled.
+The Gateway also requires `LOOM_GW_TASK_EGRESS_CONFIG_FILE`, pointing to a mounted
+JSON object with `protected_cidrs` containing the deployment's actual platform
+and control-plane addresses, including public addresses. Optional
+`maximum_connections` and `maximum_connections_per_lease` default to 64 and 8.
+No configured file means no task-egress listener authorization.
+The Nebius renderer takes this object from the protected environment's optional
+`task_egress` setting and mounts it into Gateway. It requires exact agreement
+between configuration presence and the published profile capability; an update
+cannot silently drop readiness or advertise an unconfigured proxy. It checks
+known literal platform addresses against the configured CIDRs without resolving
+DNS during rendering. The [platform runbook](../runbooks/nebius-platform.md)
+describes the remaining deployment-owned address inventory.
+
+Declare exact, lowercase DNS names, sorted by host and protocol:
+
+```toml
+[environment]
+network_policies_supported = ["web-allowlist"]
+
+[environment.baseline_network_policy]
+kind = "web-allowlist"
+destinations = [
+  { host = "registry.npmjs.org", protocol = "https" },
+]
+```
+
+`https` permits CONNECT to TCP/443; `http` permits ordinary forwarding to TCP/80.
+No wildcard, literal IP, alternate port, arbitrary CIDR or raw TCP policy is
+accepted. Existing `Allowlist` retains its local-driver semantics and is not
+silently converted. HTTP(S) support does not establish TCP/23, private-cluster,
+Docker-daemon or device access.
+
+Task processes receive standard proxy environment variables. The trusted runtime
+opens a loopback proxy, authenticates a WebSocket tunnel to Gateway, and supplies
+its immutable runtime digest. Gateway loads destinations from that lease, checks
+Pod identity and active generation/deadline, then resolves and pins a numeric
+public address. Every DNS answer must pass address checks; private, metadata,
+reserved, IPv6 translation and configured protected destinations are rejected.
+Redirects trigger a new checked connection, so GitHub release assets require the
+actual redirected host in the declaration. Tools that ignore proxy environment
+variables require their own proxy configuration; for example, GPG dirmngr may
+require `honor-http-proxy` or a task-side HTTPS key download.
+
+The task, controller and verifier share a Pod network namespace. Its existing
+DNS-and-Gateway NetworkPolicy stays intact: public access belongs to Gateway's
+separate network scope. Removing proxy settings cannot grant direct access.
+The model-call proxy and its attribution remain separate. Only the agent phase
+can use model authority; phase completion cancels pending token and model
+requests. Setup and verifier phases cannot reopen model access. Declared web
+egress remains available during verifier execution, and the call ledger remains
+available for final accounting. HTTPS stays encrypted end to end; CONNECT checks
+the destination, not encrypted HTTP headers/content.
+
+Tunnels have bounded frames, transfer sizes, concurrency, idle time and lifetime.
+They stop at phase cancellation, periodically recheck lease fences, and join
+Gateway draining. `task-egress.jsonl` is uploaded with runtime outputs and records
+bounded destination/outcome diagnostics without URLs, headers or contents.
+Policy denial, DNS/connect failure and deadline outcomes are distinct. Remote
+HTTP authentication errors remain visible to task tools; an HTTPS tunnel cannot
+inspect them. A closed tunnel alone does not prove task success.
+
+Focused local verification:
+
+```sh
+uv run pytest tests/unit/test_task_web_egress.py tests/unit/test_task_egress_gateway.py
+go test -race ./cmd/loom-execution-runtime
+uv run pytest tests/integration/test_task_egress_tunnel.py
+```
+
+These tests exercise real HTTP/TLS downloads through the runtime proxy and real
+TCP relay at Gateway, plus DNS/private-address, redirect, identity, cancellation
+and capacity rejection. A real WebSocket/PostgreSQL test checks Pod authorization
+and revocation of an active tunnel against durable lease state. These tests do
+not establish deployed CNI enforcement or the
+original-task/model-backed acceptance for #2048. Activation requires a compatible
+runtime/Gateway pair, current protected-address configuration, a direct-egress
+rejection check, and the original npm and GitHub/GPG tasks.
 
 ## Optional per-trial bridge isolation
 

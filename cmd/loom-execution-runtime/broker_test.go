@@ -516,12 +516,12 @@ func TestPhaseDeadlineBindsTokenRefreshAndCancelsHTTP(t *testing.T) {
 	root, _ := url.Parse(server.URL + "/internal/service-execution")
 	broker := &workloadBroker{root: root, client: server.Client()}
 	first := time.Now().Add(time.Minute)
-	broker.setPhaseDeadline(first)
+	broker.setPhase("agent", first)
 	if _, err := broker.currentToken(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	second := time.Now().Add(100 * time.Millisecond)
-	broker.setPhaseDeadline(second)
+	broker.setPhase("agent", second)
 	proxy, stop, err := broker.startProxy(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -545,7 +545,7 @@ func TestPhaseDeadlineBindsTokenRefreshAndCancelsHTTP(t *testing.T) {
 	if len(tokenDeadlines) != 2 || !tokenDeadlines[0].Equal(first) || !tokenDeadlines[1].Equal(second) {
 		t.Fatalf("phase change did not refresh signed deadline: %v", tokenDeadlines)
 	}
-	broker.setPhaseDeadline(time.Time{})
+	broker.setPhase("agent", time.Time{})
 	response, err = http.Post(proxy+"/openai/v1/chat/completions", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -589,7 +589,7 @@ func TestRunPhasePublishesAndClearsBrokerDeadline(t *testing.T) {
 		Role: "agent", Argv: []string{os.Args[0], "-test.run=^TestModelProxyPhaseHelper$"},
 		WorkingDirectory: workspace, TimeoutSeconds: 3,
 		Environment: map[string]string{"LOOM_TEST_PROXY_URL": proxy},
-	}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil, broker.setPhaseDeadline)
+	}, 1, workspace, t.TempDir(), 4096, 50*time.Millisecond, nil, broker.setPhase)
 	if err != nil || evidence.ExitCode != 0 {
 		t.Fatalf("phase failed: %v %+v", err, evidence)
 	}

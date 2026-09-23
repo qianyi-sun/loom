@@ -48,6 +48,7 @@ from loom_llm_gateway.routes import (
     messages,
     responses,
     service_execution,
+    task_egress,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,13 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             bucket=source_bucket,
         )
         app.state.artifact_store = artifact_store
+        from loom_llm_gateway.task_egress import TaskEgressConfig, TaskEgressRuntime
+
+        app.state.task_egress = (
+            TaskEgressRuntime(TaskEgressConfig.model_validate_json(
+                settings.task_egress_config_file.read_text()
+            )) if settings.task_egress_config_file is not None else None
+        )
         app.state.service_execution_output_service = ServiceExecutionOutputRouteService(
             service=ArtifactCommitService(
                 store=source_store,
@@ -227,6 +235,7 @@ def create_app(settings: GatewaySettings) -> FastAPI:
     app.include_router(facade_google.router)
     app.include_router(admin.router)
     app.include_router(service_execution.router)
+    app.include_router(task_egress.router)
     # /metrics: prometheus_client ASGI app. Gateway is internal-only
     # per #77 boundary — scrapers reach it via cluster DNS.
     app.mount("/metrics", make_asgi_app())

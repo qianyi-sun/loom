@@ -15,9 +15,11 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
+from loom.execution_requirements import TaskExecutionRequirementsV1
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
@@ -59,6 +61,27 @@ class TaskSidecarConfig(BaseModel):
     depends_on: list[str] = []
 
 
+class ServiceLifecycleConfig(BaseModel):
+    """Keep task-owned services alive until the independent verifier finishes.
+
+    Startup is an optional, returning environment initializer, not an agent
+    solution. Agent-owned services omit it and supply a readiness check only.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    startup_command: tuple[str, ...] = Field(default=(), max_length=64)
+    startup_timeout_sec: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
+    readiness: HealthcheckSpec
+    readiness_timeout_sec: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
+
+    @field_validator("startup_command")
+    @classmethod
+    def _startup_argv(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any("\x00" in item or len(item) > 4096 for item in value) or (value and not value[0]):
+            raise ValueError("service startup requires valid argv")
+        return value
+
+
 class EnvironmentConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     os: OS
@@ -80,6 +103,11 @@ class EnvironmentConfig(BaseModel):
     tmpfs: list[str] = []
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
+    mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
+    service_lifecycle: ServiceLifecycleConfig | None = None
+    execution_requirements: TaskExecutionRequirementsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     user: str | int = "agent"
     network_policies_supported: frozenset[NetworkPolicyKind] = frozenset({"public"})
     baseline_network_policy: NetworkPolicy = Public()
@@ -97,6 +125,22 @@ class EnvironmentConfig(BaseModel):
     storage_mb: int | None = Field(default=None, gt=0)
     gpus: int = Field(default=0, ge=0)
     sidecars: list[TaskSidecarConfig] = []
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_handoff_declarations(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if not self.mutable_paths:
+            payload.pop("mutable_paths", None)
+        if self.service_lifecycle is None:
+            payload.pop("service_lifecycle", None)
+        return payload
+
+    @model_validator(mode="after")
+    def _validate_mutable_paths(self) -> EnvironmentConfig:
+        from loom.mutable_paths import validate_mutable_paths
+
+        validate_mutable_paths(self.mutable_paths, workdir=self.workdir)
+        return self
 
     @model_validator(mode="after")
     def _docker_build_options_require_dockerfile(self) -> EnvironmentConfig:
@@ -208,6 +252,8 @@ class TaskServiceExecutionV1(BaseModel):
         )
         if plan.execution_role != "attempt":
             raise ValueError("task service execution requires an attempt runtime plan")
+        if plan.task_egress is not None or any(sidecar.identity is not None for sidecar in plan.sidecars):
+            raise ValueError("task identity and web egress require automatic native execution")
         payload = plan.canonical_payload()
         del payload["task_revision_sha256"]
         return payload
@@ -250,6 +296,11 @@ class TaskConfig(BaseModel):
     def _service_execution_matches_task(self) -> TaskConfig:
         if self.service_execution is None:
             return self
+        if (self.environment.user != "agent" or self.verifier.user is not None
+                or "HOME" in self.environment.environment or self.environment.mutable_paths
+                or self.environment.service_lifecycle is not None
+                or self.environment.baseline_network_policy.kind == "web-allowlist"):
+            raise ValueError("declared sandbox capabilities require automatic native execution")
 
         from loom.execution_contract import workload_requirements_from_task
         from loom.execution_runtime_contract import validate_runtime_plan_requirements

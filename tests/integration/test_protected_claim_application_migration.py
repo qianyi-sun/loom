@@ -15,8 +15,8 @@ from sqlalchemy.exc import IntegrityError
 
 def _config(database_url: str) -> AlembicConfig:
     root = Path(__file__).resolve().parents[2]
-    config = AlembicConfig(str(root / "migrations" / "alembic.ini"))
-    config.set_main_option("script_location", str(root / "migrations"))
+    config = AlembicConfig(str(root / "database" / "migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "database" / "migrations"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
 

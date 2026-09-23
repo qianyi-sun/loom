@@ -22,7 +22,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 def _config(url: str) -> Config:
-    config = Config(str(_ROOT / "migrations" / "alembic.ini"))
+    config = Config(str(_ROOT / "database" / "migrations" / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
     return config
 
@@ -45,12 +45,12 @@ def test_digest_approved_prepare_migrates_and_bootstraps_epoch_zero(
     engine = create_engine(postgres_at_0065)
     try:
         migration = inspect_migration_plan(
-            _ROOT / "migrations" / "alembic.ini",
+            _ROOT / "database" / "migrations" / "alembic.ini",
             policy_path=_ROOT / "config" / "staging-migration-policy.json",
         )
         preparer = SqlAlchemyLifecyclePreparer(
             engine,
-            alembic_config_path=_ROOT / "migrations" / "alembic.ini",
+            alembic_config_path=_ROOT / "database" / "migrations" / "alembic.ini",
             source=LifecycleSourceIdentity(
                 candidate_sha="1" * 40,
                 candidate_tree="2" * 40,

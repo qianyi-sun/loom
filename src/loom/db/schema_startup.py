@@ -25,10 +25,10 @@ class SchemaNotAtHeadError(RuntimeError):
 
 def _default_alembic_ini() -> Path:
     repo_root = Path(__file__).resolve().parents[3]
-    candidate = repo_root / "migrations" / "alembic.ini"
+    candidate = repo_root / "database" / "migrations" / "alembic.ini"
     if candidate.is_file():
         return candidate
-    return Path("migrations/alembic.ini")
+    return Path("database/migrations/alembic.ini")
 
 
 def _script_heads(alembic_ini: Path | None = None) -> set[str]:
@@ -101,5 +101,5 @@ async def assert_schema_at_head(
         f"head revision(s): {_format_revisions(expected_heads)}. "
         "Apply pending migrations before starting this service: "
         f'LOOM_DB_URL="${db_url_env_var}" '
-        "alembic -c migrations/alembic.ini upgrade head"
+        "alembic -c database/migrations/alembic.ini upgrade head"
     )

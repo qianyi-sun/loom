@@ -1360,3 +1360,8 @@ fields      = { multi_node = false, storage_backend = "host_path", postgres_repl
 used_by = ["llm-gateway"]
 python_type = "Path"
 description = "Mounted JSON mapping physical cluster scopes to explicit Kubernetes endpoint, CA file and native Nebius credential file for Pod TokenReview."
+
+[service_config.task_egress_config_file]
+used_by = ["llm-gateway"]
+python_type = "Path"
+description = "Explicit task web egress opt-in: mounted JSON containing protected_cidrs for all platform/control-plane addresses and bounded connection limits. Missing configuration disables task egress."

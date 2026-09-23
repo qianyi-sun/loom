@@ -30,7 +30,7 @@ def freshly_migrated_db() -> Iterator[str]:
         )
         subprocess.run(
             [sys.executable, "-m", "alembic",
-             "-c", "migrations/alembic.ini", "upgrade", "head"],
+             "-c", "database/migrations/alembic.ini", "upgrade", "head"],
             cwd=_REPO_ROOT, check=True,
             env={**os.environ, "LOOM_DB_URL": url},
         )

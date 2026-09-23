@@ -19,8 +19,8 @@ _ADDED_INDEX = "slurm_worker_jobs_sandbox_candidate_state_idx"
 
 def _config(database_url: str) -> AlembicConfig:
     repo_root = Path(__file__).resolve().parents[2]
-    config = AlembicConfig(str(repo_root / "migrations" / "alembic.ini"))
-    config.set_main_option("script_location", str(repo_root / "migrations"))
+    config = AlembicConfig(str(repo_root / "database" / "migrations" / "alembic.ini"))
+    config.set_main_option("script_location", str(repo_root / "database" / "migrations"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
 

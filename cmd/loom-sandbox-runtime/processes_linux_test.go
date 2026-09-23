@@ -101,3 +101,14 @@ func TestProcessStatusUsesEffectiveUIDAndRejectsInvalidInspection(t *testing.T) 
 		t.Fatalf("ignored read failure: %v", err)
 	}
 }
+
+func TestRootSandboxCanCleanUpTaskDescendantsThatDropUID(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "status"), []byte("State:\tS\nPPid:\t1\nUid:\t1001\t1001\t1001\t1001\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := sandboxProcessState(directory, 0)
+	if err != nil || state != "S" {
+		t.Fatalf("root sandbox cannot clean its dropped-UID descendant: %v", err)
+	}
+}

@@ -9,13 +9,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import GatewayDispatchReceipt, TrialEvent
+from loom.db.schema import (
+    AdminAuditEvent,
+    GatewayDispatchReceipt,
+    ServiceExecutionLease,
+    TrialEvent,
+)
 from loom.deadline_canary import ReceiptApproval
 
 
@@ -45,12 +50,60 @@ async def resolve_receipt(
     )
     if (
         row is None
-        or row.agent_attempt_id is None
         or row.step_jwt_id is None
         or row.attempt_deadline_wall_clock is None
         or row.attempt_deadline_wall_clock <= datetime.now(UTC)
     ):
         raise ValueError("receipt is not eligible")
+    native_lease_id = None
+    native_generation = None
+    if row.agent_attempt_id is None:
+        # Native credentials rotate; the durable mint audit binds each grant
+        # to its observed Pod lease/generation. Never infer this from time or
+        # manufacture a legacy worker attempt UUID for a native request.
+        grants = list(
+            (
+                await session.scalars(
+                    select(AdminAuditEvent)
+                    .where(
+                        AdminAuditEvent.action == "service_execution.step_token.minted",
+                        AdminAuditEvent.target_type == "execution_lease",
+                        AdminAuditEvent.event_metadata["step_jwt_id"].astext
+                        == str(row.step_jwt_id),
+                        AdminAuditEvent.event_metadata["trial_id"].astext == str(trial_id),
+                        AdminAuditEvent.event_metadata["team_id"].astext == str(team_id),
+                    )
+                    .limit(2)
+                )
+            ).all()
+        )
+        if len(grants) != 1 or previous_attempt_id is not None:
+            raise ValueError("native receipt grant is not eligible")
+        grant = grants[0]
+        metadata = grant.event_metadata
+        lease = await session.get(ServiceExecutionLease, UUID(grant.target_id))
+        if (
+            lease is None
+            or lease.trial_id != trial_id
+            or lease.team_id != team_id
+            or lease.execution_role != "attempt"
+            or row.step_id != "agent"
+            or lease.observed_state != "running"
+            or lease.revoked_at is not None
+            or lease.desired_state not in {"create", "start"}
+            or metadata.get("generation") != lease.generation
+            or metadata.get("execution_role") != "attempt"
+            or metadata.get("provider_connection_id") != str(provider_connection_id)
+            or metadata.get("runtime_contract_sha256") != lease.runtime_contract_sha256
+            or metadata.get("attempt_deadline_wall_clock")
+            != row.attempt_deadline_wall_clock.isoformat()
+            or lease.deadline_at < row.attempt_deadline_wall_clock
+            or not isinstance(metadata.get("expires_in_seconds"), int)
+            or grant.created_at + timedelta(seconds=metadata["expires_in_seconds"])
+            <= datetime.now(UTC)
+        ):
+            raise ValueError("native receipt lease is not eligible")
+        native_lease_id, native_generation = lease.id, lease.generation
     stopped = False
     if previous_attempt_id is not None:
         observations = list(
@@ -82,6 +135,8 @@ async def resolve_receipt(
         provider_connection_id=provider_connection_id,
         step_id=step_id,
         agent_attempt_id=row.agent_attempt_id,
+        service_execution_lease_id=native_lease_id,
+        service_execution_generation=native_generation,
         step_jwt_id=row.step_jwt_id,
         deadline=row.attempt_deadline_wall_clock,
         previous_attempt_stopped=stopped,

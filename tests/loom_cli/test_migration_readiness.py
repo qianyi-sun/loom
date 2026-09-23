@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from loom.db.schema_startup import service_schema_head
 from loom_cli.migration_readiness import inspect_migration_plan
@@ -13,7 +15,7 @@ EXPECTED_HEAD = service_schema_head()
 
 
 def test_repository_migration_plan_is_single_head_and_policy_bound() -> None:
-    result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
+    result = inspect_migration_plan(REPO_ROOT / "database/migrations/alembic.ini")
 
     assert result.head == service_schema_head()
     assert result.base == "0001"
@@ -31,16 +33,21 @@ def test_repository_migration_plan_is_independent_of_process_cwd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    # Exercise Alembic's own config lookup without the readiness override.
+    directory = ScriptDirectory.from_config(
+        Config(str(REPO_ROOT / "database/migrations/alembic.ini")),
+    )
+    assert directory.get_heads() == [service_schema_head()]
 
-    result = inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini")
+    result = inspect_migration_plan(REPO_ROOT / "database/migrations/alembic.ini")
 
     assert result.head == service_schema_head()
     assert result.revision_count == len(result.revision_sha256)
 
 
 def test_migration_plan_rejects_noncanonical_script_location(tmp_path: Path) -> None:
-    migrations = tmp_path / "migrations"
-    migrations.mkdir()
+    migrations = tmp_path / "database" / "migrations"
+    migrations.mkdir(parents=True)
     ini = migrations / "alembic.ini"
     ini.write_text("[alembic]\nscript_location = ../outside\n", encoding="utf-8")
 
@@ -55,7 +62,7 @@ def test_policy_head_drift_fails_closed(tmp_path: Path) -> None:
     path.write_text(json.dumps(policy), encoding="utf-8")
 
     with pytest.raises(ValueError, match="does not match"):
-        inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini", policy_path=path)
+        inspect_migration_plan(REPO_ROOT / "database/migrations/alembic.ini", policy_path=path)
 
 
 def test_policy_requires_rehearsal_before_protected_apply(tmp_path: Path) -> None:
@@ -65,14 +72,14 @@ def test_policy_requires_rehearsal_before_protected_apply(tmp_path: Path) -> Non
     path.write_text(json.dumps(policy), encoding="utf-8")
 
     with pytest.raises(ValueError, match="policy is invalid"):
-        inspect_migration_plan(REPO_ROOT / "migrations/alembic.ini", policy_path=path)
+        inspect_migration_plan(REPO_ROOT / "database/migrations/alembic.ini", policy_path=path)
 
 
 def test_next_migration_is_automatic_but_forked_graph_still_fails(tmp_path):
     import shutil
 
-    migration_dir = tmp_path / "migrations"
-    shutil.copytree(REPO_ROOT / "migrations", migration_dir, ignore=shutil.ignore_patterns("__pycache__"))
+    migration_dir = tmp_path / "database" / "migrations"
+    shutil.copytree(REPO_ROOT / "database" / "migrations", migration_dir, ignore=shutil.ignore_patterns("__pycache__"))
     before = inspect_migration_plan(migration_dir / "alembic.ini")
     source = f'revision = "9998"\ndown_revision = "{before.head}"\n'
     (migration_dir / "versions/9998_next_release.py").write_text(source)

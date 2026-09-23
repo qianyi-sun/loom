@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 @pytest.mark.integration
 def test_probe_passes_on_direct_connection(pgbouncer_stack: dict[str, str]) -> None:
     """The probe must not raise when connecting directly to Postgres."""
-    from migrations.env import _assert_direct_postgres_connection
+    from database.migrations.env import _assert_direct_postgres_connection
 
     engine = create_engine(pgbouncer_stack["direct_url"])
     _assert_direct_postgres_connection(engine)  # no raise

@@ -192,8 +192,8 @@ async def test_actual_baseline_upgrade_preserves_separated_runtime_authority(tra
         arm_application_migrator(peer, **authority, identity=identity, password=password,
             expires_at=datetime.now(UTC) + timedelta(minutes=45))
         root = Path(__file__).resolve().parents[2]
-        config = Config(str(root / "migrations/alembic.ini"))
-        config.set_main_option("script_location", str(root / "migrations"))
+        config = Config(str(root / "database/migrations/alembic.ini"))
+        config.set_main_option("script_location", str(root / "database" / "migrations"))
         url = make_url(transfer_database[0]).set(drivername="postgresql+psycopg", username=identity.role_name, password=password)
         config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
         monkeypatch.setenv("LOOM_DB_OWNER_ROLE", target.successor_role)

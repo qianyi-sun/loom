@@ -26,6 +26,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT / "src"))
 
 from loom.nebius_platform_render import canonical, validate_environment  # noqa: E402
+from loom.nebius_task_identity_policy import identity_policy_documents  # noqa: E402
 
 PHASE_FILES = (
     "00-namespaces.yaml",
@@ -42,6 +43,12 @@ PHASE_FILES = (
 
 class DeploymentError(ValueError):
     """A deployment boundary failed; its message contains no secret values."""
+
+
+class TaskIdentityPolicyDeniedError(DeploymentError):
+    def __init__(self, policy_name: str):
+        self.policy_name = policy_name
+        super().__init__("task identity policy rejected the admission probe")
 
 
 def load_render(
@@ -61,6 +68,23 @@ def load_render(
         raise DeploymentError("platform configuration identity is ambiguous")
     config = json.loads(configs[0]["data"]["environment.json"])
     validate_environment(config)
+    policy_file = render_dir / "00-task-identity-policy.yaml"
+    if config.get("task_identity_policy") is not None:
+        try:
+            policy_docs = list(yaml.safe_load_all(policy_file.read_text()))
+        except OSError as exc:
+            raise DeploymentError("task identity policy artifact is missing") from exc
+        if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"]):
+            raise DeploymentError("task identity policy differs from the target-bound contract")
+        files[policy_file.name] = policy_docs
+    elif policy_file.exists():
+        raise DeploymentError("task identity policy requires an explicit target configuration")
+    execution_namespaces = [row for row in files["00-namespaces.yaml"]
+                            if row["kind"] == "Namespace" and row["metadata"]["name"] == config["execution_namespace"]]
+    expected_pss = "baseline" if config.get("task_identity_policy") is not None else "restricted"
+    if (len(execution_namespaces) != 1 or execution_namespaces[0]["metadata"].get("labels", {}).get(
+            "pod-security.kubernetes.io/enforce") != expected_pss):
+        raise DeploymentError("execution namespace policy differs from the explicit configuration")
     if config["schema_version"] == "loom.nebius-managed-environment.v1":
         raise DeploymentError("managed children require the environment-management lifecycle")
     namespaces = {config["namespace"], config["execution_namespace"]}
@@ -80,6 +104,11 @@ def load_render(
                     raise DeploymentError(
                         "cluster resource does not belong to the integration target"
                     )
+                continue
+            if row["kind"] in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}:
+                if (filename != "00-task-identity-policy.yaml"
+                        or metadata["name"] != config["execution_namespace"] + "-private-root-v1"):
+                    raise DeploymentError("admission policy does not belong to the integration target")
                 continue
             if namespace not in namespaces:
                 raise DeploymentError(
@@ -158,7 +187,7 @@ class Kubectl:
                 raise DeploymentError("invalid deployment SSH target")
             if args[0] == "apply" and args[1] == "-f":
                 stdin = Path(args[2]).read_text()
-                command[-1] = "-"
+                command[command.index("-f") + 1] = "-"
             command = [
                 "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
@@ -175,6 +204,12 @@ class Kubectl:
             check=False,
         )
         if result.returncode:
+            denied = re.search(
+                r"ValidatingAdmissionPolicy '([a-z0-9-]+-private-root-v1)' with binding '[a-z0-9-]+' denied request",
+                result.stderr,
+            )
+            if denied:
+                raise TaskIdentityPolicyDeniedError(denied[1])
             # Preserve API reason codes without serializing message bodies,
             # URLs, Secret data, or arbitrary application logs.
             match = re.search(r"Error from server \(([A-Za-z]{1,64})\)", result.stderr)
@@ -193,6 +228,69 @@ class Kubectl:
     def get(self, kind: str, name: str, namespace: str) -> dict[str, Any]:
         result = self.run("get", kind, name, "-n", namespace, "--ignore-not-found", "-o", "json")
         return json.loads(result) if result else {}
+
+
+def install_task_identity_policy(
+    kube: Kubectl, config: dict[str, Any], snapshot_root: Path,
+) -> None:
+    """Prove policy enforcement before the caller may relax namespace PSS.
+
+    The deployment guard has already drained active work. Every failure leaves
+    restricted PSS enforced. Neither probe creates a workload or pulls an image.
+    """
+    namespace = config["execution_namespace"]
+    name = namespace + "-private-root-v1"
+    bootstrap = snapshot_root / "identity-policy-bootstrap.yaml"
+    bootstrap.write_text(yaml.safe_dump_all([
+        {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+            "name": namespace, "labels": {"pod-security.kubernetes.io/enforce": "restricted"},
+        }},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+            "name": "loom-execution-policy-probe", "namespace": namespace,
+        }, "automountServiceAccountToken": False},
+    ]))
+    kube.run("apply", "-f", str(bootstrap))
+    kube.run("apply", "-f", str(snapshot_root / "00-task-identity-policy.yaml"))
+    deadline = time.monotonic() + 30
+    while True:
+        policy = kube.get("validatingadmissionpolicy", name, namespace)
+        status = policy.get("status", {})
+        if (status.get("observedGeneration") == policy.get("metadata", {}).get("generation")
+                and status.get("observedGeneration", 0) > 0 and "typeChecking" in status):
+            if status["typeChecking"].get("expressionWarnings"):
+                raise DeploymentError("task identity admission policy has type-checking warnings")
+            break
+        if time.monotonic() >= deadline:
+            raise DeploymentError("task identity admission policy was not observed by the API server")
+        time.sleep(0.2)
+    pod: dict[str, Any] = {"apiVersion": "v1", "kind": "Pod", "metadata": {
+        "name": "loom-execution-policy-probe", "namespace": namespace,
+    }, "spec": {
+        "automountServiceAccountToken": False, "serviceAccountName": "loom-execution-policy-probe",
+        "restartPolicy": "Never", "securityContext": {
+            "runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        }, "containers": [{"name": "execution", "image": "invalid.local/admission-only:unused",
+                           "resources": {}, "securityContext": {
+                               "runAsNonRoot": True, "allowPrivilegeEscalation": False,
+                               "capabilities": {"drop": ["ALL"]},
+                           }}],
+    }}
+    probe = snapshot_root / "identity-policy-probe.yaml"
+    probe.write_text(yaml.safe_dump(pod))
+    kube.run("apply", "-f", str(probe), "--dry-run=server")
+    pod["spec"]["containers"][0]["securityContext"]["capabilities"]["add"] = ["NET_BIND_SERVICE"]
+    probe.write_text(yaml.safe_dump(pod))
+    while True:
+        try:
+            kube.run("apply", "-f", str(probe), "--dry-run=server")
+        except TaskIdentityPolicyDeniedError as exc:
+            if exc.policy_name != name:
+                raise DeploymentError("another policy rejected the identity probe") from exc
+            return
+        if time.monotonic() >= deadline:
+            raise DeploymentError("task identity admission policy did not reject the negative probe")
+        time.sleep(0.2)
 
 
 def job_complete(job: dict[str, Any]) -> bool:
@@ -264,6 +362,25 @@ def verify_cluster_identity(
             raise DeploymentError("integration node provider identity is not Nebius")
 
 
+def verify_ingress_mode(kube: Kubectl, config: dict[str, Any]) -> None:
+    """Ordinary application deployment preserves a previously installed route."""
+    shared = config.get("shared_ingress_enabled", False)
+    public = kube.get("service", "loom-web", config["namespace"])
+    expected_selector = {"app": "loom-shared-ingress" if shared else "loom-web"}
+    if ((shared and not public)
+            or public and public.get("spec", {}).get("selector") != expected_selector):
+        raise DeploymentError("ingress cutover requires its protected installation procedure")
+    if shared:
+        controller = kube.get("deployment", "loom-shared-ingress", config["namespace"])
+        status = controller.get("status", {})
+        replicas = controller.get("spec", {}).get("replicas", 0)
+        if (not replicas
+                or status.get("observedGeneration", 0) != controller.get("metadata", {}).get("generation")
+                or status.get("availableReplicas", 0) < replicas
+                or status.get("updatedReplicas", 0) < replicas):
+            raise DeploymentError("shared ingress controller is not ready")
+
+
 def preflight(
     kube: Kubectl,
     manifest: dict[str, Any],
@@ -272,6 +389,7 @@ def preflight(
     expected_cluster_id: str,
 ) -> dict[str, Any]:
     verify_cluster_identity(kube, config, expected_cluster_id)
+    verify_ingress_mode(kube, config)
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -344,8 +462,8 @@ def public_smoke(origin: str, environment: str) -> None:
             time.sleep(5)
 
 
-def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candidate: str) -> dict:
-    result = json.loads(kube.run(
+def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candidate: str) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(kube.run(
         "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-m",
         "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
     ))
@@ -436,6 +554,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             guard_acquired = True
             evidence["guard_owner"] = guard_owner
             phase("idle-reserved")
+            # A same-candidate ingress cutover may have finished after preflight
+            # but before we acquired the shared rollout guard.
+            verify_ingress_mode(kube, config)
             expected_current = getattr(args, "expected_current_candidate", None)
             if expected_current is not None:
                 current = kube.get("configmap", "loom-platform-config", ns)
@@ -479,6 +600,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             evidence["backup_job"] = backup_name
             kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
             wait_job(backup_name, 1860)
+        if config.get("task_identity_policy") is not None:
+            mutation_started = True
+            phase("install-and-verify-task-identity-policy")
+            install_task_identity_policy(kube, config, snapshot_root)
         for filename in ("00-namespaces.yaml", "10-config-network.yaml", "20-database.yaml"):
             apply_file(filename)
         phase("database-ready")
@@ -536,7 +661,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
     except Exception as exc:
         # Before apply, a failed backup must not leave a healthy platform paused.
         # After apply (or runner loss), retain the durable pause for recovery.
-        if guard_acquired and not mutation_started:
+        if guard_acquired and not mutation_started and kube is not None:
             try:
                 rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
                 guard_acquired = False

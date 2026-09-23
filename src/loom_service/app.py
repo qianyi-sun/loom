@@ -71,6 +71,7 @@ from loom_service.routes import (
     monitor,
     overview,
     pipeline,
+    platform_admins,
     provider_connections,
     rate_cards,
     run_library,
@@ -421,6 +422,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     app.include_router(invites.router, prefix="/api/v1")
     app.include_router(tokens.router, prefix="/api/v1")
     app.include_router(admin_audit.router, prefix="/api/v1")
+    app.include_router(platform_admins.router, prefix="/api/v1")
     app.include_router(team_registrations.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     if management:

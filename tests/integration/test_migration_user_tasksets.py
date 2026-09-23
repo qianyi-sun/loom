@@ -47,7 +47,7 @@ def _alembic(url: str, *args: str) -> None:
     env = os.environ.copy()
     env["LOOM_DB_URL"] = url
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "migrations/alembic.ini", *args],
+        [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", *args],
         cwd=REPO_ROOT,
         env=env,
         check=True,

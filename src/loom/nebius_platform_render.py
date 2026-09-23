@@ -11,7 +11,7 @@ import json
 import re
 from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -22,6 +22,11 @@ from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
 from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     TaskExecutionResourceRequestsV1,
+)
+from loom.nebius_task_identity_policy import (
+    identity_namespace_labels,
+    identity_policy_documents,
+    validate_identity_policy,
 )
 
 # Scheduling baseline for future automatic Nebius Terminus tasks, not task limits.
@@ -90,6 +95,7 @@ def validate_environment(config: dict[str, Any]) -> None:
         set(config)
         - {
             "public_tls_bootstrap",
+            "shared_ingress_enabled",
             "execution_resource_quota",
             "regional_execution_targets",
             "public_gateway_ipv4",
@@ -97,12 +103,44 @@ def validate_environment(config: dict[str, Any]) -> None:
             "service_execution_scheduler_max_deadline_sec",
             "task_resource_requests",
             "default_task_resource_requests",
+            "task_egress",
+            "task_identity_policy",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
+    try:
+        validate_identity_policy(config)
+    except ValueError as exc:
+        raise NebiusPlatformError(str(exc)) from exc
     if type(config.get("public_tls_bootstrap", False)) is not bool:
         raise NebiusPlatformError("public_tls_bootstrap must be a boolean")
+    if "task_egress" in config:
+        from loom_llm_gateway.task_egress import TaskEgressConfig
+
+        egress = TaskEgressConfig.model_validate(config["task_egress"])
+        protected = [ip_network(cidr) for cidr in egress.protected_cidrs]
+        # Check literal addresses already known to this offline renderer. DNS
+        # hosts and other platform addresses still require an operator inventory.
+        hosts = [config.get("public_gateway_ipv4"),
+                 urlsplit(str(config.get("kubernetes_api_server", ""))).hostname]
+        for target in config.get("regional_execution_targets", []):
+            hosts.append(urlsplit(str(target.get("kubernetes_api_server", ""))).hostname)
+        for host in hosts:
+            if host is None:
+                continue
+            try:
+                address = ip_address(host)
+            except ValueError:
+                continue
+            if not any(address.version == block.version and address in block for block in protected):
+                raise NebiusPlatformError(
+                    "task egress protected_cidrs must cover configured platform addresses"
+                )
+    if type(config.get("shared_ingress_enabled", False)) is not bool:
+        raise NebiusPlatformError("shared_ingress_enabled must be a boolean")
+    if managed and "shared_ingress_enabled" in config:
+        raise NebiusPlatformError("shared_ingress_enabled belongs only to the standalone platform")
     ExecutionResourceRequestsV1.model_validate(
         config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
     )
@@ -1317,6 +1355,17 @@ def _build_platform(
 ) -> dict[str, list[dict[str, Any]]]:
     """Shared stack templates; managed output is finalized by its owning renderer."""
     validate_environment(config)
+    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
+        if type(profile.get(capability, False)) is not bool:
+            raise NebiusPlatformError(f"runtime profile {capability} must be a boolean")
+    if profile.get("supports_task_web_egress", False) != ("task_egress" in config):
+        raise NebiusPlatformError(
+            "task egress configuration and runtime profile readiness must agree"
+        )
+    if profile.get("supports_task_identity", False) and not validate_identity_policy(config):
+        raise NebiusPlatformError(
+            "task identity readiness requires a qualified policy; execution namespaces remain restricted"
+        )
     # Resolve the environment-owned baseline once and persist it with the
     # environment and each release profile. Task limits remain source-owned.
     default_requests = ExecutionResourceRequestsV1.model_validate(
@@ -1350,6 +1399,9 @@ def _build_platform(
     short = revision.removeprefix("sha256:")[:12]
     files: dict[str, list[dict[str, Any]]] = {}
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
+    if validate_identity_policy(config):
+        files["00-namespaces.yaml"][1]["metadata"]["labels"].update(identity_namespace_labels())
+        files["00-task-identity-policy.yaml"] = identity_policy_documents(ex, config["target_id"])
     db_host = f"loom-postgres.{ns}.svc"
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     target = {
@@ -1401,6 +1453,8 @@ def _build_platform(
         "catalog.json": canonical(catalog).decode(),
         "public-tls.json": canonical(public_tls_config(config)).decode(),
     }
+    if "task_egress" in config:
+        cm["data"]["task-egress.json"] = canonical(config["task_egress"]).decode()
     private_ingress = [
         {"from": [_peer(ns), _peer(ex)], "ports": [{"protocol": "TCP", "port": port}]}
         for port in (8080, 8090, 9100)
@@ -1674,6 +1728,20 @@ def _build_platform(
         _mount_secret(pod, "admin", "loom-admin-secret", "/var/run/loom/admin")
         if component == "gateway":
             pod["terminationGracePeriodSeconds"] = 300
+            if "task_egress" in config:
+                pod.setdefault("volumes", []).append({
+                    "name": "task-egress-config",
+                    "configMap": {"name": "loom-platform-config", "items": [
+                        {"key": "task-egress.json", "path": "task-egress.json"},
+                    ]},
+                })
+                pod["containers"][0].setdefault("volumeMounts", []).append({
+                    "name": "task-egress-config", "mountPath": "/var/run/loom-task-egress",
+                    "readOnly": True,
+                })
+                pod["containers"][0]["env"].extend(_env({
+                    "LOOM_GW_TASK_EGRESS_CONFIG_FILE": "/var/run/loom-task-egress/task-egress.json",
+                }))
             connections = {}
             for regional in config.get("regional_execution_targets", []):
                 tid = regional["target_id"]
@@ -1794,6 +1862,10 @@ def _build_platform(
         )
     )
     app_docs.append(web)
+    if config.get("shared_ingress_enabled", False):
+        origin = _service("loom-web-origin", ns, 443, 8443)
+        origin["spec"]["selector"] = {"app": "loom-web"}
+        app_docs.append(origin)
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
     execution_docs = (
@@ -1829,6 +1901,8 @@ def _build_platform(
     files["60-execution.yaml"] = [doc for doc in execution_docs if doc["kind"] != "Namespace"]
     public = _service("loom-web", ns, 443, 8443)
     public["spec"]["type"] = "LoadBalancer"
+    if config.get("shared_ingress_enabled", False):
+        public["spec"]["selector"] = {"app": "loom-shared-ingress"}
     public["metadata"]["annotations"] = {
         "nebius.com/load-balancer-allocation-id": config["public_allocation_id"]
     }

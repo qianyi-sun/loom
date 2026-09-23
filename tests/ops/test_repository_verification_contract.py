@@ -17,7 +17,7 @@ def test_repository_checks_ruff_scope_matches_repo_wide_local_lint() -> None:
     ruff_step = next(step for step in steps if step.get("name") == "Ruff")
 
     assert ruff_step["run"] == (
-        "uv run --no-sync ruff check src tests packages migrations "
+        "uv run --no-sync ruff check src tests packages database/migrations "
         "database/capacity_guard_migrations database/capacity_migrations"
     )
 

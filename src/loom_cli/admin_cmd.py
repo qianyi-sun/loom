@@ -1410,8 +1410,10 @@ def dispatch(argv: list[str]) -> int:
     sub = parser.add_subparsers(dest="admin_cmd", required=True)
 
     from loom_cli.pipeline_admin_cmd import add_pipeline_admin_subparser
+    from loom_cli.platform_admin_cmd import add_platform_admin_subparser
 
     add_pipeline_admin_subparser(sub)
+    add_platform_admin_subparser(sub)
 
     p_agents = sub.add_parser("agent-runtime", help="Register a trusted published native runtime.")
     agent_commands = p_agents.add_subparsers(dest="agent_runtime_command", required=True)

@@ -65,6 +65,25 @@ def generate_material(*, namespace: str, tls_secret_name: str) -> dict[str, dict
     }
 
 
+def generate_management_material(*, namespace: str) -> dict[str, dict[str, str]]:
+    """Fresh initial material for the protected manager, never copied from a child.
+
+    The installer persists this once and must reuse it on retry; generation is
+    not rotation. Cloud/Kubernetes/publication/backup identities arrive separately
+    through the protected operator route and are never derived from these keys.
+    """
+    material = generate_material(namespace=namespace, tls_secret_name="loom-management-db-tls")
+    database = material["loom-platform-db"]
+    return {
+        "loom-platform-db": {key: database[key] for key in (
+            "ca.crt", "postgres-password", "admin-url", "service-password", "service-url",
+        )},
+        "loom-management-db-tls": material["loom-management-db-tls"],
+        "loom-platform-auth": {"secret-store-master-key": material["loom-platform-auth"]["secret-store-master-key"]},
+        "loom-admin-secret": material["loom-admin-secret"],
+    }
+
+
 class EnvironmentCredentialProvider:
     def __init__(self, registry: EnvironmentRegistry, cloud: NebiusSdkEnvironmentApi, kubernetes: KubernetesEnvironmentProvider):
         self.registry, self.cloud, self.kubernetes = registry, cloud, kubernetes

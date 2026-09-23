@@ -175,7 +175,7 @@ async def publish_local_benchmark(
                     # original files (plus the flattened compat copies
                     # from #369); the DB row's `config` JSONB carries
                     # the Loom-schema form so the worker validates.
-                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg)
+                    raw_cfg = normalize_terminal_bench_task_toml(raw_cfg, task_id=task_id)
                     if profile == NEBIUS_TERMINUS_PROFILE:
                         # #1996: adapt staged verifier + Loom config after
                         # normalize so TB absolute verifier paths are corrected

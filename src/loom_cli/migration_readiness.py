@@ -78,7 +78,8 @@ def inspect_migration_plan(
         ):
             raise ValueError
         config = Config(str(alembic_ini))
-        if config.get_main_option("script_location") != "migrations":
+        script_location = config.get_main_option("script_location")
+        if not script_location or Path(script_location).resolve() != alembic_ini.parent.resolve():
             raise ValueError
         config.set_main_option("path_separator", "os")
         config.set_main_option("script_location", str(alembic_ini.parent))

@@ -989,3 +989,101 @@ def test_regional_cli_requires_separate_cluster_output(
     assert result["regional_files"] == [target["target_id"] + ".yaml"]
     assert not (tmp_path / "primary" / result["regional_files"][0]).exists()
     assert (tmp_path / "remote" / result["regional_files"][0]).is_file()
+
+
+def test_task_egress_defaults_remain_disabled(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    assert 'task-egress.json' not in json.dumps(files)
+    assert 'LOOM_GW_TASK_EGRESS_CONFIG_FILE' not in json.dumps(files)
+    published = json.loads(files['10-config-network.yaml'][0]['data']['profile.json'])
+    assert 'supports_task_web_egress' not in published
+
+
+def test_task_egress_mounts_explicit_bounded_gateway_policy(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config['task_egress'] = {
+        'protected_cidrs': ['198.51.100.0/24', '2001:db8::/32'],
+        'maximum_connections': 12,
+        'maximum_connections_per_lease': 3,
+    }
+    profile['supports_task_web_egress'] = True
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    cm = files['10-config-network.yaml'][0]
+    assert json.loads(cm['data']['task-egress.json']) == config['task_egress']
+    assert json.loads(cm['data']['environment.json'])['task_egress'] == config['task_egress']
+    assert json.loads(cm['data']['profile.json'])['supports_task_web_egress'] is True
+    gateway = next(row for row in files['40-services.yaml']
+                   if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-llm-gateway')
+    pod = gateway['spec']['template']['spec']
+    container = pod['containers'][0]
+    env = {row['name']: row.get('value') for row in container['env']}
+    path = env['LOOM_GW_TASK_EGRESS_CONFIG_FILE']
+    mount = next(row for row in container['volumeMounts'] if path.startswith(row['mountPath'] + '/'))
+    assert mount['readOnly'] is True
+    volume = next(row for row in pod['volumes'] if row['name'] == mount['name'])
+    assert volume['configMap'] == {
+        'name': 'loom-platform-config',
+        'items': [{'key': 'task-egress.json', 'path': Path(path).name}],
+    }
+    service = next(row for row in files['40-services.yaml']
+                   if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-service')
+    service_env = {row['name']: row.get('value')
+                   for row in service['spec']['template']['spec']['containers'][0]['env']}
+    assert json.loads(service_env['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON'])['supports_task_web_egress'] is True
+    assert 'LOOM_GW_TASK_EGRESS_CONFIG_FILE' not in service_env
+    for namespace in files['00-namespaces.yaml']:
+        assert namespace['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'restricted'
+
+
+@pytest.mark.parametrize('configured,ready', [(True, False), (False, True), (False, 'true')])
+def test_task_egress_requires_matching_profile_readiness(
+    platform_inputs: tuple, configured: bool, ready: object,
+) -> None:
+    config, candidate, profile = platform_inputs
+    if configured:
+        config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
+    profile['supports_task_web_egress'] = ready
+    with pytest.raises(NebiusPlatformError, match=r'task.*egress'):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize('policy', [None, {}, {'protected_cidrs': []},
+    {'protected_cidrs': ['8.8.8.8/24']}, {'protected_cidrs': ['invalid']},
+    {'protected_cidrs': ['198.51.100.0/24'], 'maximum_connections': 0},
+    {'protected_cidrs': ['198.51.100.0/24'], 'maximum_connections_per_lease': 33},
+    {'protected_cidrs': ['198.51.100.0/24'], 'allow_private': True}])
+def test_task_egress_rejects_invalid_deployment_policy(platform_inputs: tuple, policy: object) -> None:
+    config, candidate, profile = platform_inputs
+    config['task_egress'] = policy
+    profile['supports_task_web_egress'] = True
+    with pytest.raises(ValueError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_regional_task_egress_uses_existing_authenticated_broker_route(regional_inputs: tuple) -> None:
+    config, candidate, profile = regional_inputs
+    config['task_egress'] = {'protected_cidrs': [config['public_gateway_ipv4'] + '/32']}
+    profile['supports_task_web_egress'] = True
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    caddy = json.loads(files['10-config-network.yaml'][0]['data']['public-tls.json'])
+    routes = caddy['apps']['http']['servers']['public']['routes'][0]['handle'][-1]['routes']
+    broker = routes[0]
+    assert broker['match'] == [{'path': ['/internal/service-execution/*']}]
+    assert broker['handle'][0]['upstreams'] == [{'dial': f"loom-llm-gateway.{config['namespace']}.svc:9100"}]
+    assert broker['handle'][0]['flush_interval'] == -1
+
+
+def test_task_egress_requires_known_public_platform_addresses_protected(regional_inputs: tuple) -> None:
+    config, candidate, profile = regional_inputs
+    config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
+    profile['supports_task_web_egress'] = True
+    with pytest.raises(NebiusPlatformError, match='protected_cidrs'):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_task_identity_readiness_cannot_relax_restricted_execution_policy(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    profile['supports_task_identity'] = True
+    with pytest.raises(NebiusPlatformError, match=r'task identity.*restricted'):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

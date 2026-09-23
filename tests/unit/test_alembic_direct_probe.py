@@ -67,14 +67,14 @@ class _FakeCtx:
 
 
 def test_probe_passes_on_direct_connection() -> None:
-    from migrations.env import _assert_direct_postgres_connection
+    from database.migrations.env import _assert_direct_postgres_connection
 
     conn = _FakeConn(app_name_persists=True)
     _assert_direct_postgres_connection(_FakeConnectable(conn))  # no raise
 
 
 def test_probe_raises_on_pgbouncer_transaction_mode() -> None:
-    from migrations.env import _assert_direct_postgres_connection
+    from database.migrations.env import _assert_direct_postgres_connection
 
     conn = _FakeConn(app_name_persists=False)
     with pytest.raises(RuntimeError, match="not direct-to-Postgres"):
@@ -84,7 +84,7 @@ def test_probe_raises_on_pgbouncer_transaction_mode() -> None:
 def test_probe_error_message_mentions_fix() -> None:
     """The error message should tell the operator how to fix — point
     LOOM_DB_URL at loom-postgres:5432 direct, not loom-pgbouncer:6432."""
-    from migrations.env import _assert_direct_postgres_connection
+    from database.migrations.env import _assert_direct_postgres_connection
 
     conn = _FakeConn(app_name_persists=False)
     with pytest.raises(RuntimeError) as excinfo:
@@ -137,4 +137,4 @@ def test_tls_database_url_reaches_engine_without_interpolation(
 
     monkeypatch.setattr(sqlalchemy, "engine_from_config", engine_from_config)
     with pytest.raises(ReachedEngineError):
-        runpy.run_path(str(Path(__file__).resolve().parents[2] / "migrations/env.py"))
+        runpy.run_path(str(Path(__file__).resolve().parents[2] / "database/migrations/env.py"))

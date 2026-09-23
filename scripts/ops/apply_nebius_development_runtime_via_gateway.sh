@@ -286,7 +286,7 @@ spec:
         - name: migrate
           image: $service_image
           imagePullPolicy: IfNotPresent
-          command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
+          command: ["alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"]
           env:
             - name: LOOM_DB_URL
               valueFrom:

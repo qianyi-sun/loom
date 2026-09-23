@@ -14,8 +14,8 @@ ci_ignored_paths = [
   "deploy/catalog/nebius-terminal-bench/file-archive-manifest/original/tests/test_outputs.py",
   "deploy/Dockerfile.behavior-stage1-sim",
   "deploy/behavior-stage1-sim/**",
-  "migrations/versions/0094_pipeline_stage1_smoke_authority.py",
-  "migrations/versions/0095_pipeline_stage1_smoke_two_phase.py",
+  "database/migrations/versions/0094_pipeline_stage1_smoke_authority.py",
+  "database/migrations/versions/0095_pipeline_stage1_smoke_two_phase.py",
   "scripts/behavior/**",
   "src/loom/integrations/behavior/**",
   "src/loom/pipeline/behavior_*.py",
@@ -239,7 +239,7 @@ source_paths = [
   "README.md",
   "database/capacity_guard_migrations/**",
   "deploy/Dockerfile.control-plane",
-  "migrations/**",
+  "database/migrations/**",
   "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
@@ -266,7 +266,7 @@ source_paths = [
   ".dockerignore",
   "deploy/Dockerfile.execution-actuator",
   "deploy/execution-actuator-requirements.txt",
-  "migrations/**",
+  "database/migrations/**",
   "src/loom/__init__.py",
   "src/loom/agent_runtime.py",
   "src/loom/db/**",
@@ -275,6 +275,7 @@ source_paths = [
   "src/loom/execution_architecture.py",
   "src/loom/execution_contract.py",
   "src/loom/execution_image_admission.py",
+  "src/loom/execution_requirements.py",
   "src/loom/execution_runtime_contract.py",
   "src/loom/family_run/__init__.py",
   "src/loom/family_run/spec.py",
@@ -287,12 +288,14 @@ source_paths = [
   "src/loom/models/task.py",
   "src/loom/models/trial.py",
   "src/loom/models/types.py",
+  "src/loom/mutable_paths.py",
   "src/loom/nebius_kubernetes.py",
   "src/loom/nebius_rollout_guard.py",
   "src/loom/pipeline/__init__.py",
   "src/loom/pipeline/keys.py",
   "src/loom/request_params.py",
   "src/loom/resource_usage_store.py",
+  "src/loom/sandbox_identity.py",
   "src/loom/security/**",
   "src/loom/service_execution_materialization.py",
   "src/loom/startup_retry.py",
@@ -374,7 +377,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "deploy/Dockerfile.family-orchestrator",
-  "migrations/**",
+  "database/migrations/**",
   "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
@@ -396,7 +399,7 @@ source_paths = [
   "README.md",
   "config/**",
   "deploy/Dockerfile.pipeline-orchestrator",
-  "migrations/**",
+  "database/migrations/**",
   "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
@@ -461,7 +464,7 @@ source_paths = [
   ".dockerignore",
   "README.md",
   "deploy/Dockerfile.gateway",
-  "migrations/**",
+  "database/migrations/**",
   "packages/loom-bundle-checksum/**",
   "pyproject.toml",
   "src/**",
@@ -503,7 +506,7 @@ source_paths = [
   "database/capacity_guard_migrations/**",
   "database/capacity_build_guard_migrations/**",
   "deploy/Dockerfile.service",
-  "migrations/**",
+  "database/migrations/**",
   "packages/**",
   "pyproject.toml",
   "src/**",
@@ -832,7 +835,7 @@ include_paths = [
 exclude_paths = [
   "tests/integration/test_application_schema_reference.py",
   "tests/integration/test_execution_actuator_k3s.py",
-  "tests/integration/test_nebius_platform_k3s.py",
+  "tests/integration/test_nebius_platform_k3s.py", "tests/integration/test_task_identity_policy_k3s.py",
   "tests/integration/test_behavior_pipeline_inputs.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
@@ -855,6 +858,9 @@ exclude_paths = [
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
+  "tests/integration/test_mutable_paths_docker.py",
+  "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integrations/behavior/**/*.py",
 ]
 
@@ -905,13 +911,16 @@ include_paths = [
   "tests/integration/test_trial_inprocess_e2e.py",
   "tests/integration/test_verify_cmd_humaneval.py",
   "tests/integration/test_workspace_snapshot_docker.py",
+  "tests/integration/test_mutable_paths_docker.py",
+  "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_service_lifecycle_docker.py",
 ]
 
 [[test_suites]]
 id = "python-cluster-smoke"
 language = "python"
 lane = "cluster-smoke"
-include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
+include_paths = ["tests/cluster/**/*.py", "tests/integration/test_execution_actuator_k3s.py", "tests/integration/test_nebius_platform_k3s.py", "tests/integration/test_task_identity_policy_k3s.py", "tests/unit/test_nebius_runtime_render.py"]
 
 [[test_suites]]
 id = "python-system-smoke"

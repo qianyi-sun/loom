@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -128,11 +129,42 @@ func (s runtimeServer) handler() http.Handler {
 	mux.HandleFunc("POST /exec", s.execute)
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
+	var pauseMu sync.Mutex
+	var paused pausedProcesses
+	mux.HandleFunc("POST /pause-processes", func(w http.ResponseWriter, r *http.Request) {
+		pauseMu.Lock()
+		defer pauseMu.Unlock()
+		if paused != nil {
+			http.Error(w, "sandbox already paused", http.StatusConflict)
+			return
+		}
+		var err error
+		paused, err = pauseProcesses(r.Context())
+		if err != nil {
+			paused = nil
+			writeCleanupFailure(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /resume-processes", func(w http.ResponseWriter, r *http.Request) {
+		pauseMu.Lock()
+		defer pauseMu.Unlock()
+		if err := resumeProcesses(paused); err != nil {
+			writeCleanupFailure(w, err)
+			return
+		}
+		paused = nil
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("POST /stop-processes", func(w http.ResponseWriter, r *http.Request) {
+		pauseMu.Lock()
+		defer pauseMu.Unlock()
 		if err := stopProcesses(r.Context()); err != nil {
 			writeCleanupFailure(w, err)
 			return
 		}
+		paused = nil
 		w.WriteHeader(http.StatusNoContent)
 	})
 	return mux

@@ -115,11 +115,12 @@ class GatewayAttemptDeadline:
     async def run(self, operation: Callable[[], Awaitable[T]]) -> T:
         """Bound one complete await and prefer the attempt timeout at races."""
         remaining = self.require_remaining()
+        timeout = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining):
+            async with timeout:
                 result = await operation()
         except TimeoutError:
-            if self.reached:
+            if timeout.expired() or self.reached:
                 self._record_reached()
                 raise AttemptDeadlineReachedError("signed attempt deadline reached") from None
             raise

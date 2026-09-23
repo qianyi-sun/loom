@@ -75,9 +75,9 @@ def test_preserves_other_shell_continuations() -> None:
     "old,new",
     [
         ("pytest==8.4.1", "pytest>=8"),
-        ("-p 3.13", "--python 3.13"),
-        ("-w pandas==2.3.3", "--with pandas==2.3.3"),
-        ("uv/0.9.5", "uv/0.10.0"),
+        ("-p 3.13", "--python latest"),
+        ("-w pandas==2.3.3", "--with pandas"),
+        ("uv/0.9.5", "uv/latest"),
         ("apt-get install -y curl primer3", "apt-get install -y curl && echo danger"),
         ("rm *.csv", "python3 -m pip install pandas"),
         ("-rA", '-rA "$EXTRA"'),
@@ -245,3 +245,102 @@ uvx --index https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-ma
 def test_unknown_dependency_sources_or_shell_remain_rejected(command: str) -> None:
     with pytest.raises(ValueError, match="nebius-terminus"):
         adapt_harbor_test_script(command + "\npytest /tests/test.py\n")
+
+
+@pytest.mark.parametrize("version", ["0.7.13", "0.8.22", "0.10.0"])
+def test_pinned_uv_bootstraps_preserve_requirements_and_pytest_arguments(version: str) -> None:
+    source = SCRIPT.replace("uv/0.9.5", "uv/" + version).replace(
+        "-p 3.13", "--python 3.13"
+    ).replace("-w ", "--with ")
+    assert adapt_harbor_test_script(source) == adapt_harbor_test_script(SCRIPT)
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    [
+        "FROM python:3.9-slim\nWORKDIR /app\nRUN python3 <<'PY'\nfrom datetime import datetime\nPY\n",
+        'FROM python:3.9-slim\nCOPY <<-"FIRST" <<SECOND /tmp/\n\tFROM alpine:3.20\n\tFIRST\nSHELL []\nSECOND\n',
+        "FROM --platform=linux/amd64 \\\n python:3.9-slim AS base\nFROM base AS task\n",
+    ],
+)
+def test_preparation_identifies_final_stage_without_changing_task_python(
+    tmp_path: Path, dockerfile: str,
+) -> None:
+    environment = bundle(tmp_path)
+    (tmp_path / "environment/Dockerfile").write_text(dockerfile)
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert derived.startswith(dockerfile)
+    assert "loom-nebius-uv python install 3.13" in derived
+    assert "ENV PATH=" not in derived
+    assert (tmp_path / "environment/Dockerfile").read_text() == dockerfile
+
+
+@pytest.mark.parametrize(
+    "dockerfile,match",
+    [
+        ("FROM python:3.13-slim\nRUN cat <<EOF\nFROM ubuntu:24.04\n", "unterminated heredoc"),
+        ("FROM ubuntu:24.04 AS base\nFROM alpine:3.20\n", "Debian/Ubuntu"),
+        ("FROM python:3.13-slim\nSHELL [\"bash\", \"-c\"]\n", "SHELL"),
+        ("ARG BASE=ubuntu:24.04\nFROM ${BASE}\n", "Debian/Ubuntu"),
+    ],
+)
+def test_ambiguous_or_unsupported_image_preparation_does_not_write_outputs(
+    tmp_path: Path, dockerfile: str, match: str,
+) -> None:
+    environment = bundle(tmp_path)
+    (tmp_path / "environment/Dockerfile").write_text(dockerfile)
+    with pytest.raises(ValueError, match=match):
+        prepare_nebius_terminus_image(tmp_path, environment)
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
+    assert not (tmp_path / "environment/Dockerfile.loom-nebius").exists()
+
+
+@pytest.mark.parametrize("user,home,expected", [
+    ("root", "/root", "0:0"), ("1001:1002", "/home/miles", "1001:1002"),
+])
+def test_preparation_preserves_declared_user_home_and_missing_task_dependencies(tmp_path, user, home, expected):
+    environment = bundle(tmp_path)
+    environment.update(user=user, environment={"HOME": home})
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert f"ENV HOME={home}\n" in derived
+    assert f"USER {expected}\n" in derived
+    assert "php" not in derived and "composer" not in derived and "wget" not in derived
+    assert "chown -R 65532:65532 /app" not in derived
+    assert "ENV PATH=" not in derived
+
+
+def test_preparation_rejects_unresolved_named_user_before_writing(tmp_path):
+    environment = bundle(tmp_path)
+    environment["user"] = "miles"
+    with pytest.raises(ValueError, match="unsupported task identity"):
+        prepare_nebius_terminus_image(tmp_path, environment)
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
+
+
+def test_apt_metadata_cleanup_is_relocated_with_explicit_packages():
+    source = SCRIPT.replace("apt-get update\napt-get install -y curl primer3", 
+                            "apt-get update && apt-get install -y curl primer3 && rm -rf /var/lib/apt/lists/*")
+    assert adapt_harbor_test_script(source) == adapt_harbor_test_script(SCRIPT)
+
+
+@pytest.mark.parametrize("suffix", [" && rm -rf /app/*", " && touch /app/setup", " || true"])
+def test_apt_cleanup_does_not_hide_arbitrary_task_commands(suffix):
+    with pytest.raises(ValueError, match="unsupported apt bootstrap"):
+        adapt_harbor_test_script(SCRIPT.replace("apt-get install -y curl primer3", 
+                                               "apt-get install -y curl primer3" + suffix))
+
+
+def test_uvx_without_python_pin_uses_base_interpreter_in_isolated_venv(tmp_path):
+    environment = bundle(tmp_path)
+    script = SCRIPT.replace('  -p 3.13 \\\n', '')
+    (tmp_path / "tests/test.sh").write_text(script)
+    result = adapt_harbor_test_script(script)
+    assert result.python_version is None
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert '--python "$(command -v python3)" /opt/verifier' in derived
+    assert "--system-site-packages" not in derived
+    assert "/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA" in result.script
+    assert result.script.endswith(script[script.index("if [ $? -eq 0 ]"):])

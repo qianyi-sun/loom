@@ -74,7 +74,10 @@ func stopProcesses(ctx context.Context) error {
 // probe, which briefly runs as root before OCI applies the container UID).
 // Return an empty state for these external processes: neither kill them nor
 // apply the task-child UID guard. Orphan task descendants are adopted by PID 1
-// and must still pass that guard. A missing/reaped proc entry is handled above.
+// and must still pass that guard for nonroot sandboxes. Explicit root task
+// containers may launch children that drop UID (package maintainer scripts,
+// for example); the PID-1/private-namespace guard still confines cleanup.
+// A missing/reaped proc entry is handled above.
 func sandboxProcessState(directory string, expectedUID int) (string, error) {
 	status, err := os.ReadFile(filepath.Join(directory, "status"))
 	if err != nil {
@@ -126,7 +129,7 @@ func sandboxProcessState(directory string, expectedUID int) (string, error) {
 	if parentPID == 0 {
 		return "", nil
 	}
-	if effectiveUID != uint64(expectedUID) {
+	if expectedUID != 0 && effectiveUID != uint64(expectedUID) {
 		return "", &processOwnerError{State: state, ParentPID: parentPID, ExpectedUID: expectedUID, ObservedUID: effectiveUID}
 	}
 	return state, nil

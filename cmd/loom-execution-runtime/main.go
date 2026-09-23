@@ -63,21 +63,50 @@ func main() {
 	}
 	executionContext, stopMonitor := monitorPrivateSandboxes(ctx, p)
 	defer stopMonitor()
-	broker.setPhaseDeadline(time.Time{})
+	broker.setPhase("", time.Time{})
 	proxyURL, stopProxy, err := broker.startProxy(ctx, executionContext)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "start workload proxy:", err)
 		os.Exit(2)
 	}
 	defer func() { _ = stopProxy() }()
+	trustedEnvironment := trustedGatewayEnvironment(proxyURL)
+	stopTaskEgress := func() {}
+	if p.TaskEgress != nil {
+		diagnosticDirectory := filepath.Join(filepath.Clean(*workspace), filepath.Dir(taskEgressOutput.SourcePath))
+		if err := secureInputDirectory(filepath.Clean(*workspace), diagnosticDirectory); err != nil {
+			fmt.Fprintln(os.Stderr, "prepare task egress evidence:", err)
+			os.Exit(2)
+		}
+		evidence, err := os.OpenFile(filepath.Join(diagnosticDirectory, filepath.Base(taskEgressOutput.SourcePath)), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "prepare task egress evidence:", err)
+			os.Exit(2)
+		}
+		defer evidence.Close()
+		proxy, stop, err := broker.startTaskEgress(executionContext, p.TaskEgress, p.RuntimeContractSHA256, evidence, p.MaxArtifactBytes, p.MaxLogBytesPerStream)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "start task egress:", err)
+			os.Exit(2)
+		}
+		defer stop()
+		stopTaskEgress = func() { _ = stop(); _ = evidence.Close() }
+		trustedEnvironment["LOOM_TASK_EGRESS_PROXY"] = proxy
+		for _, name := range []string{"http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"} {
+			trustedEnvironment[name] = proxy
+		}
+		trustedEnvironment["no_proxy"] = "localhost,127.0.0.1,::1"
+		trustedEnvironment["NO_PROXY"] = "localhost,127.0.0.1,::1"
+	}
 	result, runErr := runPlan(
 		executionContext,
 		p,
 		filepath.Clean(*workspace),
 		cleanOutput,
-		trustedGatewayEnvironment(proxyURL),
-		broker.setPhaseDeadline,
+		trustedEnvironment,
+		broker.setPhase,
 	)
+	stopTaskEgress()
 	stopMonitor()
 	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
 	if captureErr != nil {
