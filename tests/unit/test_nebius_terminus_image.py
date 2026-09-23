@@ -71,6 +71,50 @@ def test_preserves_other_shell_continuations() -> None:
     assert statement in result.script
 
 
+def test_quiet_apt_bootstrap_preserves_packages_and_reward() -> None:
+    script = SCRIPT.replace(
+        "apt-get update\napt-get install -y curl primer3",
+        "apt-get update -qq && apt-get install -y -qq curl primer3 "
+        "&& rm -rf /var/lib/apt/lists/*",
+    )
+    result = adapt_harbor_test_script(script)
+    assert result.apt_packages == ("curl", "primer3")
+    assert result.script.endswith(SCRIPT[SCRIPT.index("if [ $? -eq 0 ]") :])
+
+
+def test_pip_no_cache_flag_is_not_a_requirement() -> None:
+    result = adapt_harbor_test_script(
+        "pip3 install --no-cache-dir pytest==8.3.5 pytest-json-ctrf==0.5.0\n"
+        "pytest /tests/test_state.py -rA\n"
+        "exit $?\n"
+    )
+    assert result.requirements == ("pytest==8.3.5", "pytest-json-ctrf==0.5.0")
+    assert result.system_site_packages
+    assert result.script == "/opt/verifier/bin/pytest /tests/test_state.py -rA\nexit $?\n"
+
+
+def test_uv_path_activation_relocates_only_installer_path() -> None:
+    script = SCRIPT.replace(
+        'source "$HOME/.local/bin/env"', 'export PATH="$HOME/.local/bin:$PATH"',
+    )
+    result = adapt_harbor_test_script(script)
+    assert 'export PATH=' not in result.script
+    assert "python3 /tests/gen_large_csv.py input\n" in result.script
+    assert result.python_version == "3.13"
+
+
+@pytest.mark.parametrize("flag", ["--allow-unauthenticated", "--force-yes", "--purge"])
+def test_apt_behavior_changing_flags_remain_rejected(flag: str) -> None:
+    with pytest.raises(ValueError, match="unsupported apt bootstrap"):
+        adapt_harbor_test_script(SCRIPT.replace("install -y", f"install -y {flag}"))
+
+
+def test_custom_path_activation_is_not_silently_removed() -> None:
+    script = SCRIPT.replace('source "$HOME/.local/bin/env"', 'export PATH="/task/bin:$PATH"')
+    with pytest.raises(ValueError, match="recognized Harbor"):
+        adapt_harbor_test_script(script)
+
+
 @pytest.mark.parametrize(
     "old,new",
     [
