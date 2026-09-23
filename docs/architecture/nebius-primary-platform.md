@@ -135,6 +135,26 @@ route is verified. See the [deployment runbook](../runbooks/nebius-deployment.md
 
 ## Independent management service runtime
 
+Management mode bounds request reception before routing, JSON parsing or
+authentication. The pure-ASGI guard defaults to 1 MiB per request, eight in-flight
+HTTP requests per process and a 30-second total body-read deadline. It counts
+actual bytes even without Content-Length, rejects invalid/contradictory framing
+and encoded bodies, and returns 413 (size), 400 (framing), 415 (encoding), 408
+(body timeout) or 503 (full admission) without an internal queue or disk spool.
+Admission is released on handler completion, error, cancellation or a disconnect
+during body reception; responses stream normally. Once a complete request reaches
+the application, a client disconnect does not cancel its mutation or free its
+slot before the work finishes. Invalid HTTP/1 requests close their connection.
+
+The positive, finite `LOOM_SVC_MANAGEMENT_HTTP_MAX_BODY_BYTES`,
+`LOOM_SVC_MANAGEMENT_HTTP_MAX_INFLIGHT` and
+`LOOM_SVC_MANAGEMENT_HTTP_BODY_TIMEOUT_SEC` settings configure this boundary.
+Budget the raw body size times concurrency **per process**, plus body copies,
+JSON parsing and application memory. This is not a cluster-wide rate limit or
+general denial-of-service defense. Application-mode task/bundle uploads are
+unchanged; their receive/temporary-storage qualification remains a separate
+prerequisite for publicly activating personal environments.
+
 `LOOM_SVC_SERVICE_MODE=management` selects the identity and environment-management runtime in
 the existing Service image. It must use a **separate management database** via
 `LOOM_SVC_DB_URL` (and its optional pool URL), not a child application's database.

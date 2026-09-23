@@ -50,6 +50,9 @@ class LoomServiceSettings(BaseSettings):
     local_servers_json: str = "{}"
     log_level: LogLevel = "info"
     managed_environment_config_file: Path | None = None
+    management_http_body_timeout_sec: float = 30.0
+    management_http_max_body_bytes: int = 1048576
+    management_http_max_inflight: int = 8
     minio_access_key: SecretStr | None = None
     minio_endpoint: str = "http://loom-minio:9000"
     minio_public_endpoint: str | None = None

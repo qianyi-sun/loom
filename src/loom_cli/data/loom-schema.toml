@@ -164,6 +164,24 @@ used_by     = ["loom-service"]
 python_type = "Path"
 description = "Protected management-installation JSON: foundation, pinned publications, public image trust and child platform allowance. Management mode only; absent leaves provisioning unconfigured. Never mount in personal applications."
 
+[service_config.management_http_max_body_bytes]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 1048576
+description = "Management mode only: maximum raw request bytes before parsing/authentication. Bodies are bounded in memory; reserve this limit times management_http_max_inflight plus parsing overhead per process. Does not change application uploads."
+
+[service_config.management_http_max_inflight]
+used_by     = ["loom-service"]
+python_type = "int"
+default     = 8
+description = "Management mode only: per-process in-flight HTTP requests including response completion. Excess requests receive 503 without queuing or reading the body."
+
+[service_config.management_http_body_timeout_sec]
+used_by     = ["loom-service"]
+python_type = "float"
+default     = 30.0
+description = "Management mode only: positive finite total body-reception deadline before parsing, not a response-streaming timeout. Expired reception returns 408."
+
 [service_config.environment_management_github_token]
 used_by     = ["loom-service"]
 python_type = "SecretStr"

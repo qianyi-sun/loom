@@ -149,6 +149,21 @@
     "default": "None",
     "required": false
   },
+  "management_http_body_timeout_sec": {
+    "annotation": "<class 'float'>",
+    "default": "30.0",
+    "required": false
+  },
+  "management_http_max_body_bytes": {
+    "annotation": "<class 'int'>",
+    "default": "1048576",
+    "required": false
+  },
+  "management_http_max_inflight": {
+    "annotation": "<class 'int'>",
+    "default": "8",
+    "required": false
+  },
   "minio_access_key": {
     "annotation": "pydantic.types.SecretStr | None",
     "default": "None",
