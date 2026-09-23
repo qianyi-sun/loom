@@ -8,7 +8,6 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-
 from tests.ops.test_nebius_certificates import NOW, installation, material, publish
 
 
@@ -67,7 +66,7 @@ def deliver(inputs, **kwargs):
 
 def test_tls_secret_is_immutable_private_and_exactly_replayable(inputs):
     result = deliver(inputs)
-    config, binding, api, roots, selected, root = inputs
+    _config, binding, api, _roots, selected, root = inputs
     assert result["certificate_generation"] == selected["generation"]
     assert result["fingerprint_sha256"] == selected["fingerprint_sha256"]
     secret = api.secrets[result["secret_name"]]
@@ -121,7 +120,7 @@ def test_unknown_create_reply_is_read_back_without_write_retry(inputs, failure):
 
 @pytest.mark.parametrize("change", ["expired", "selection", "missing", "identity", "config", "symlink"])
 def test_invalid_certificate_or_binding_blocks_before_kubernetes_write(inputs, change):
-    config, binding, api, roots, selected, root = inputs
+    config, _binding, api, _roots, selected, root = inputs
     kwargs = {}
     if change == "expired":
         kwargs["now"] = NOW + timedelta(days=65)
@@ -145,7 +144,7 @@ def test_invalid_certificate_or_binding_blocks_before_kubernetes_write(inputs, c
 
 def test_rotation_retains_previous_secret_and_never_changes_selected_certificate(inputs):
     first = deliver(inputs)
-    config, binding, api, roots, selected, root = inputs
+    config, binding, api, _roots, selected, root = inputs
     before = copy.deepcopy(api.secrets[first["secret_name"]])
     chain, key, new_roots = material()
     publish(root, chain, key, new_roots)
@@ -153,3 +152,16 @@ def test_rotation_retains_previous_secret_and_never_changes_selected_certificate
     assert first["secret_name"] != second["secret_name"]
     assert api.secrets[first["secret_name"]] == before and api.creates == 2
     assert json.loads((root / "selected.json").read_text())["previous_generation"] == selected["generation"]
+
+
+@pytest.mark.parametrize("missing", ["receipt", "secret"])
+def test_lost_tracking_never_adopts_or_recreates_tls_secret(inputs, missing):
+    result = deliver(inputs)
+    api, root = inputs[2], inputs[5]
+    if missing == "receipt":
+        next((root / "deliveries").glob("*.json")).unlink()
+    else:
+        del api.secrets[result["secret_name"]]
+    with pytest.raises(module().IngressError):
+        deliver(inputs)
+    assert api.creates == 1
