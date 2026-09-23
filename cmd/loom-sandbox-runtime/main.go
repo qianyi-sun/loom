@@ -175,14 +175,17 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil || len(req.Argv) == 0 {
+		w.Header().Set("X-Loom-Sandbox-Error", "exec_request_invalid")
 		http.Error(w, "invalid exec request", http.StatusBadRequest)
 		return
 	}
 	if req.User != nil && *req.User != strconv.Itoa(os.Geteuid()) && !(*req.User == "root" && os.Geteuid() == 0) {
+		w.Header().Set("X-Loom-Sandbox-Error", "exec_user_mismatch")
 		http.Error(w, "exec user must match sandbox UID", http.StatusBadRequest)
 		return
 	}
 	if math.IsNaN(req.Timeout) || math.IsInf(req.Timeout, 0) || req.Timeout < 0 || req.Timeout > s.maxTimeout.Seconds() {
+		w.Header().Set("X-Loom-Sandbox-Error", "exec_timeout_invalid")
 		http.Error(w, "exec timeout outside configured limit", http.StatusBadRequest)
 		return
 	}
@@ -197,6 +200,7 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 	cmd.Env = os.Environ()
 	for key, value := range req.Env {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			w.Header().Set("X-Loom-Sandbox-Error", "exec_environment_invalid")
 			http.Error(w, "invalid exec environment", http.StatusBadRequest)
 			return
 		}

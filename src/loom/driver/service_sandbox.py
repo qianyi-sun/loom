@@ -40,6 +40,10 @@ _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
     "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
 })
+_EXEC_REASONS = frozenset({
+    "exec_request_invalid", "exec_user_mismatch", "exec_timeout_invalid",
+    "exec_environment_invalid",
+})
 _PROCESS_DIAGNOSTIC = re.compile(
     r"pid=([1-9][0-9]{0,9});ppid=([0-9]{1,10});state=([RSDTtXZPIUW]);"
     r"uid=([0-9]{1,10});expected_uid=([0-9]{1,10})"
@@ -54,7 +58,12 @@ class SandboxRPCError(DriverError):
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
-            if path not in {"/stop-processes", "/pause-processes", "/resume-processes"} or reason not in _CLEANUP_REASONS:
+            allowed_reasons = (
+                _EXEC_REASONS if path == "/exec" else
+                _CLEANUP_REASONS if path in {"/stop-processes", "/pause-processes", "/resume-processes"}
+                else frozenset()
+            )
+            if reason not in allowed_reasons:
                 reason = "http_error"
             detail = f"HTTP {status}; {reason}"
             if reason == "process_owner_mismatch":

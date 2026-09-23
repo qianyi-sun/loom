@@ -138,6 +138,8 @@ async def _verify_harbor_tool_identity() -> None:
                 raise PermissionError("installation requires root")
             if command in {"tmux -V", "asciinema --version"}:
                 code, stdout = (0 if self.installed else 1), "version"
+            elif command == "locale -a":
+                code, stdout = 0, "C\nPOSIX\n"
             elif command == "uname -s":
                 code, stdout = 0, "Linux"
             elif "os-release" in command:

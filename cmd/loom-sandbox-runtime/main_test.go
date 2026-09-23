@@ -228,3 +228,33 @@ func TestStopProcessesPreservesRPCAndRejectsHostProcess(t *testing.T) {
 		t.Fatal("cleanup stopped RPC server")
 	}
 }
+
+func TestExecRejectionReasonCodes(t *testing.T) {
+	other := strconv.Itoa(os.Geteuid() + 1)
+	cases := []struct{ name, body, reason string }{
+		{"request", `{"argv":[],"unknown":"private-request"}`, "exec_request_invalid"},
+		{"user", `{"argv":["true"],"user":"` + other + `"}`, "exec_user_mismatch"},
+		{"timeout", `{"argv":["true"],"timeout_sec":4}`, "exec_timeout_invalid"},
+		{"environment", `{"argv":["true"],"env":{"BAD=KEY":"private-value"}}`, "exec_environment_invalid"},
+	}
+	client := testClient(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := client.Post("http://sandbox/exec", "application/json", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusBadRequest || response.Header.Get("X-Loom-Sandbox-Error") != tc.reason {
+				t.Fatalf("missing rejection reason: status=%d reason=%q", response.StatusCode, response.Header.Get("X-Loom-Sandbox-Error"))
+			}
+			if strings.Contains(string(body), "private-") {
+				t.Fatal("request data leaked")
+			}
+		})
+	}
+}

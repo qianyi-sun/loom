@@ -178,3 +178,35 @@ async def test_snapshot_hooks_preserve_public_files_without_root(tmp_path: Path)
     await driver.import_workspace_archive(archive, PurePosixPath(str(destination)))
     assert (destination / "answer.txt").read_text() == "result"
     assert not (destination / "tests" / "forged.py").exists()
+
+
+@pytest.mark.parametrize("reason", [
+    "exec_request_invalid", "exec_user_mismatch", "exec_timeout_invalid",
+    "exec_environment_invalid",
+])
+@pytest.mark.parametrize("path", ["/exec", "/file", "/stop-processes"])
+def test_exec_reason_codes_are_operation_scoped_and_redacted(reason: str, path: str) -> None:
+    import httpx
+
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    request = httpx.Request("POST", "http://sandbox" + path, content=b"private-command")
+    response = httpx.Response(
+        400, request=request, headers={"X-Loom-Sandbox-Error": reason},
+        text="private-environment",
+    )
+    error = SandboxRPCError(path, httpx.HTTPStatusError("private-error", request=request, response=response))
+    expected = reason if path == "/exec" else "http_error"
+    assert f"HTTP 400; {expected}" in str(error)
+    assert "private-" not in str(error)
+
+
+def test_unrecognized_exec_reason_is_not_published() -> None:
+    import httpx
+
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    request = httpx.Request("POST", "http://sandbox/exec")
+    response = httpx.Response(400, request=request, headers={"X-Loom-Sandbox-Error": "private-value"})
+    error = SandboxRPCError("/exec", httpx.HTTPStatusError("private-error", request=request, response=response))
+    assert str(error) == "sandbox exec failed (HTTP 400; http_error)"
