@@ -604,9 +604,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           {trialBundles.length > 0 ? (
             <section className="space-y-2">
               <div>
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                   Complete Trial bundles
-                </h2>
+                </h3>
                 <p className="mt-1 text-xs text-slate-600">
                   Canonical packages include the full trajectory, ATIF, outputs, source evidence, manifest, and checksums.
                 </p>
@@ -660,7 +660,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             </p>
           ) : null}
           {firstSharedArtifact ? (
-            <DocsCallout title="Library CLI downloads" tone="info">
+            <DocsCallout title="Library CLI downloads" tone="info" headingLevel="h3">
               <CommandSnippet
                 label="Shared artifact CLI"
                 command={
@@ -677,9 +677,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             if (artifacts.length === 0) return null;
             return (
               <section key={group} className="space-y-2">
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                   {GROUP_LABELS[group]}
-                </h2>
+                </h3>
                 {artifacts.map((artifact) => (
                   <ArtifactRow
                     key={`${artifact.trial_id}-${artifact.key}`}

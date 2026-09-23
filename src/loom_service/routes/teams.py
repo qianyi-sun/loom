@@ -145,6 +145,7 @@ async def _serialize_team(session: AsyncSession, team: Team) -> dict[str, Any]:
         "user_members": [
             {
                 "user_id": str(user.id),
+                "username": user.username,
                 "email": user.email,
                 "display_name": user.display_name,
                 "role": membership.role,

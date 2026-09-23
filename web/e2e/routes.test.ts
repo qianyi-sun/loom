@@ -109,7 +109,8 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
 
       const results = await new AxeBuilder({ page }).analyze();
       const serious = results.violations.filter(
-        (violation) => violation.impact === "serious" || violation.impact === "critical",
+        (violation) => violation.impact === "serious" || violation.impact === "critical"
+          || violation.id === "heading-order" || violation.id === "target-size",
       );
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
 

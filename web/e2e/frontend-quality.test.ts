@@ -166,7 +166,8 @@ for (const scenario of ["runs", "run-detail", "provider-detail", "pipeline-artif
       .poll(() => page.locator(".animate-fade-in").evaluate((el) => Number(getComputedStyle(el).opacity)))
       .toBe(1);
     const result = await new AxeBuilder({ page }).analyze();
-    expect(result.violations.filter((v) => v.impact === "serious" || v.impact === "critical")).toEqual([]);
+    expect(result.violations.filter((v) => v.impact === "serious" || v.impact === "critical"
+      || v.id === "heading-order" || v.id === "target-size")).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath(`${scenario}.png`), fullPage: true });
   });
 }

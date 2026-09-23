@@ -6717,13 +6717,15 @@ export interface components {
             /** Display Name */
             display_name: string | null;
             /** Email */
-            email: string;
+            email: string | null;
             /** Joined At */
             joined_at: string;
             /** Role */
             role: string;
             /** User Id */
             user_id: string;
+            /** Username */
+            username: string;
         } & {
             [key: string]: unknown;
         };

@@ -130,3 +130,15 @@ indigo-600 on white is 6.29:1 and on slate-50 is 6.01:1. The field-boundary and
 text assertions read computed browser colors; axe covers rendered foreground
 pairs and textual status labels. These measurements are not a blanket claim
 about every state or third-party artifact viewer.
+
+### Section and member identity conventions
+
+Page-section `Card.Header` defaults to h2 beneath the page h1. Nested sections
+choose h3/h4 explicitly; artifact groups and their CLI callout are children of
+the Artifacts heading. This preserves the visual style while making navigation
+order understandable.
+
+Team members may have a username without an email or display name. The team API
+returns username and nullable email, and Settings uses the username when no
+display name is present. Missing optional contact data must not make a valid
+team response fail or leave a member unnamed.

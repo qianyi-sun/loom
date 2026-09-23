@@ -5,8 +5,8 @@
  * card needs structure; otherwise just nest children directly.
  *
  * Heading discipline: `Card.Header`'s `headingLevel` chooses the
- * semantic tag. Pages with a page-level `<h1>` should use h2/h3 here
- * so the heading hierarchy stays sane for screen readers.
+ * semantic tag. Cards are page sections (h2) by default; nested
+ * cards must explicitly choose h3/h4 to preserve the heading hierarchy.
  */
 import { forwardRef, type HTMLAttributes } from "react";
 
@@ -39,9 +39,8 @@ interface CardHeaderProps {
   actions?: React.ReactNode;
   className?: string;
   /**
-   * Semantic heading tag for the title. Defaults to `h3` (Card sits
-   * under a page-level `h1` and section `h2`). Set to `h2` when a
-   * Card is the dominant heading on a screen.
+   * Semantic heading tag for the title. Defaults to `h2` under the
+   * page's h1. Set h3/h4 explicitly for nested sections.
    */
   headingLevel?: HeadingTag;
 }
@@ -51,7 +50,7 @@ function CardHeader({
   description,
   actions,
   className,
-  headingLevel = "h3",
+  headingLevel = "h2",
 }: CardHeaderProps): JSX.Element {
   const Heading = headingLevel;
   return (
