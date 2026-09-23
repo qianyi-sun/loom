@@ -22,7 +22,10 @@ _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+
 _UV_INSTALL = re.compile(
     r"curl -LsSf https://astral\.sh/uv/\d+\.\d+\.\d+/install\.sh\s*\|\s*sh\s*\Z",
 )
-_UV_SOURCE = re.compile(r'source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bin/env)\s*\Z')
+_UV_SOURCE = re.compile(
+    r'(?:source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bin/env)'
+    r'|export PATH="\$HOME/\.local/bin:\$PATH")\s*\Z'
+)
 
 
 @dataclass(frozen=True)
@@ -103,7 +106,9 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             # arbitrary chained commands still fail the package recognizer.
             package_args = re.sub(r"\s*&&\s*rm -rf /var/lib/apt/lists/\*\s*$", "", apt[1])
             words = shlex.split(package_args)
-            names = [word for word in words if word not in {"-y", "--no-install-recommends"}]
+            names = [
+                word for word in words if word not in {"-y", "-qq", "--no-install-recommends"}
+            ]
             if (
                 "-y" not in words
                 or not names
@@ -152,7 +157,8 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             if pip_prefix[0] == "uv" and not venv_activated:
                 raise ValueError("nebius-terminus: uv pip requires the declared verifier venv")
             values = [
-                word for word in words[len(pip_prefix) :] if word != "--break-system-packages"
+                word for word in words[len(pip_prefix) :]
+                if word not in {"--break-system-packages", "--no-cache-dir"}
             ]
             if not values:
                 raise ValueError("nebius-terminus: empty verifier requirements")
