@@ -203,3 +203,82 @@ def test_kubectl_transport_checks_identity_before_secret_create(inputs, tmp_path
         with pytest.raises(module().IngressError) as error:
             api.create_secret(document)
         assert not writes and "private-api-error" not in str(error.value)
+
+
+@pytest.fixture
+def controller(inputs):
+    receipt = deliver(inputs)
+    binding, api = inputs[1], inputs[2]
+    image = "cr.eu-north1.nebius.cloud/test/traefik@sha256:" + "d" * 64
+    deployment_uid, rs_uid, pod_uid = (str(uuid4()) for _ in range(3))
+    spec = {"containers": [{"name": "main", "image": image}],
+            "volumes": [{"name": "tls", "secret": {"secretName": receipt["secret_name"]}}]}
+    deployment = {"metadata": {"name": "loom-shared-ingress", "namespace": binding.namespace,
+                                "uid": deployment_uid, "generation": 3},
+                  "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "loom-shared-ingress"}},
+                           "template": {"spec": copy.deepcopy(spec)}},
+                  "status": {"observedGeneration": 3, "replicas": 1, "updatedReplicas": 1,
+                             "readyReplicas": 1, "availableReplicas": 1}}
+    replicas = [{"metadata": {"uid": rs_uid, "ownerReferences": [
+        {"kind": "Deployment", "uid": deployment_uid, "controller": True}]}}]
+    pods = [{"metadata": {"name": "ingress-current", "namespace": binding.namespace, "uid": pod_uid,
+                         "labels": {"app": "loom-shared-ingress"}, "ownerReferences": [
+                             {"kind": "ReplicaSet", "uid": rs_uid, "controller": True}]},
+             "spec": copy.deepcopy(spec), "status": {"phase": "Running", "conditions": [
+                 {"type": "Ready", "status": "True"}]}}]
+    probes = []
+    api.get_deployment = lambda namespace, name: copy.deepcopy(deployment)
+    api.list_controller_pods = lambda namespace: copy.deepcopy(pods)
+    api.list_controller_replicasets = lambda namespace: copy.deepcopy(replicas)
+    api.get_pod = lambda namespace, name: copy.deepcopy(pods[0])
+
+    def probe(namespace, name, uid, server_name):
+        assert (namespace, name, uid, server_name) == (
+            binding.namespace, "ingress-current", pod_uid, binding.management_host)
+        probes.append(uid)
+        return receipt["fingerprint_sha256"]
+
+    api.probe_tls = probe
+    arguments = {"binding": binding, "api": api, "deployment_uid": deployment_uid,
+                 "image": image, "tls_receipt": receipt}
+    return arguments, deployment, replicas, pods, probes
+
+
+def test_controller_qualification_proves_the_current_pod_certificate(controller):
+    arguments, deployment, replicas, pods, probes = controller
+    result = module().qualify_controller(**arguments)
+    assert result["status"] == "controller_qualified"
+    assert result["deployment_uid"] == deployment["metadata"]["uid"]
+    assert result["pod_uids"] == probes == [pods[0]["metadata"]["uid"]]
+    assert result["fingerprint_sha256"] == arguments["tls_receipt"]["fingerprint_sha256"]
+
+
+@pytest.mark.parametrize("case", ["stale-controller", "stale-status", "old-pod", "wrong-owner",
+                                  "wrong-image", "wrong-secret", "not-ready", "tls-mismatch", "pod-recreated"])
+def test_controller_qualification_rejects_stale_mixed_or_unverified_pods(controller, case):
+    arguments, deployment, replicas, pods, probes = controller
+    api = arguments["api"]
+    if case == "stale-controller":
+        deployment["metadata"]["uid"] = str(uuid4())
+    elif case == "stale-status":
+        deployment["status"]["observedGeneration"] = 2
+    elif case == "old-pod":
+        pods.append(copy.deepcopy(pods[0]))
+        pods[-1]["metadata"]["uid"] = str(uuid4())
+        pods[-1]["metadata"]["deletionTimestamp"] = NOW.isoformat()
+    elif case == "wrong-owner":
+        replicas[0]["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    elif case == "wrong-image":
+        pods[0]["spec"]["containers"][0]["image"] = "foreign:latest"
+    elif case == "wrong-secret":
+        pods[0]["spec"]["volumes"][0]["secret"]["secretName"] = "previous-generation"
+    elif case == "not-ready":
+        pods[0]["status"]["conditions"][0]["status"] = "False"
+    elif case == "tls-mismatch":
+        api.probe_tls = lambda *args: "0" * 64
+    else:
+        api.get_pod = lambda *args: {"metadata": {"uid": str(uuid4())}}
+    with pytest.raises(module().IngressError):
+        module().qualify_controller(**arguments)
+    if case not in {"tls-mismatch", "pod-recreated"}:
+        assert not probes
