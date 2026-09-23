@@ -5,7 +5,6 @@ import hashlib
 import importlib
 import json
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -44,7 +43,12 @@ def mirror(tmp_path, monkeypatch):
         image = data["source"] if "docker.io/library/traefik@" in command[-1] else data["destination"]
         if image is None:
             return subprocess.CompletedProcess(command, 1, b"", b"private-registry-token")
-        return subprocess.CompletedProcess(command, 0, image[0 if "--raw" in command else 1], b"")
+        if "--config" in command and "--raw" not in command:
+            # skopeo's default --config output is reserialized, not blob bytes.
+            output = json.dumps(json.loads(image[1]), indent=4).encode() + b"\n"
+        else:
+            output = image[1 if "--config" in command else 0]
+        return subprocess.CompletedProcess(command, 0, output, b"")
 
     monkeypatch.setattr(module.subprocess, "run", run)
     options = dict(registry_prefix=prefix, region="eu-north1", auth_file=auth, state_dir=state)
@@ -82,6 +86,26 @@ def test_corrupt_source_content_is_rejected_before_registry_write(mirror, part):
     image = list(data["source"])
     image[part] += b" "
     data["source"] = tuple(image)
+    with pytest.raises(module.ImageError):
+        module.mirror_ingress_image(**options)
+    assert not any(command[1] == "copy" for command in data["commands"])
+
+
+@pytest.mark.parametrize("change", ["index", "architecture", "os", "version"])
+def test_a_future_pin_still_requires_the_qualified_platform_and_version(mirror, change, monkeypatch):
+    module, data, options, _ = mirror
+    manifest, config = (json.loads(value) for value in data["source"])
+    if change == "index":
+        manifest["mediaType"] = "application/vnd.oci.image.index.v1+json"
+    elif change == "version":
+        config["config"]["Labels"]["org.opencontainers.image.version"] = "v2.0.0"
+    else:
+        config[change] = "arm64" if change == "architecture" else "windows"
+    config_bytes = json.dumps(config).encode()
+    manifest["config"] = {"digest": "sha256:" + hashlib.sha256(config_bytes).hexdigest(), "size": len(config_bytes)}
+    manifest_bytes = json.dumps(manifest).encode()
+    monkeypatch.setattr(module, "DIGEST", "sha256:" + hashlib.sha256(manifest_bytes).hexdigest())
+    data["source"] = manifest_bytes, config_bytes
     with pytest.raises(module.ImageError):
         module.mirror_ingress_image(**options)
     assert not any(command[1] == "copy" for command in data["commands"])

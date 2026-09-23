@@ -17,7 +17,7 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | --- | --- | --- |
 | Required CI | `ci.yml` | Repository checks on PRs, merge groups, and `main` pushes; full daily regression at 08:23 UTC; manual validation and compatibility checks. |
 | Required CI | `images.yml` | Read-only Nebius AMD64 image builds and scans on PRs, merge groups, and manual dispatch. |
-| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes contract checks on PRs, merge groups, manual dispatch, and selected cluster-path pushes to `dev`. |
+| Required CI | `cluster-smoke.yml` | Credential-free Kubernetes and pinned-Skopeo disposable TLS-registry contract checks on PRs, merge groups, manual dispatch, and selected cluster-path pushes to `dev`. |
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded retry of a failed/cancelled required-source run, with root-cause classification and evidence. |
