@@ -352,6 +352,20 @@ the window, absent output is explicitly unavailable, the current Trial fails,
 and the existing UID-scoped cleanup releases its reservations. This path never
 fabricates a runtime result, verifier reward or successful artifact bundle.
 
+Cancellation after durable output commit revokes provider authority and requests
+cleanup while preserving the committed runtime outcome. The fenced deletion
+observation also finalizes the Trial, using the original resource generation's
+result rather than the newer cancellation generation. A timeout remains a
+timeout; cancellation does not replace its reward, trace or usage.
+
+For executions already deleted by an older controller before Trial finalization,
+the materializer can recover the same attempt from its committed output after
+cleanup is complete. It leaves the immutable execution record, including the
+missing historical `finalized_at`, unchanged. The normal claim, integrity checks,
+canonical publication and retention rules apply; no model retry or new execution
+is created. A still-present execution or a superseded attempt cannot use this
+recovery path. Rollout guards remain in force until archival actually converges.
+
 Native task/verifier sidecar restarts invalidate the attempt even while the Pod
 still reports Running. The actuator records current and previous termination
 reason, exit code, signal, timestamps and restart count in the existing

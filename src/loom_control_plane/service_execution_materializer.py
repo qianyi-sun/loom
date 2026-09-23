@@ -19,7 +19,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import Text, func, or_, select
+from sqlalchemy import Text, and_, func, or_, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -85,6 +85,7 @@ from loom_control_plane.metrics import (
     SERVICE_EXECUTION_SOURCE_SPOOL_BYTES,
     SERVICE_EXECUTION_SOURCE_SPOOL_RETAINED,
 )
+from loom_control_plane.service_execution import recover_deleted_committed_trial
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -523,7 +524,9 @@ class ServiceExecutionMaterializer:
         self._source_retention = timedelta(seconds=max(0, source_retention_seconds))
         self._accounting_retry_after: dict[UUID, datetime] = {}
 
-    async def claim_one(self, *, now: datetime | None = None) -> MaterializationClaim | None:
+    async def claim_one(
+        self, *, now: datetime | None = None, lease_id: UUID | None = None,
+    ) -> MaterializationClaim | None:
         current = now or datetime.now(UTC)
         async with self._session_factory() as session:
             lease = (
@@ -532,8 +535,27 @@ class ServiceExecutionMaterializer:
                     .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
                     .where(
                         ServiceExecutionLease.output_commit_state == "committed",
-                        ServiceExecutionLease.finalized_at.is_not(None),
-                        Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
+                        *([ServiceExecutionLease.id == lease_id] if lease_id is not None else []),
+                        or_(
+                            and_(
+                                ServiceExecutionLease.finalized_at.is_not(None),
+                                Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
+                            ),
+                            and_(
+                                ServiceExecutionLease.finalized_at.is_(None),
+                                ServiceExecutionLease.desired_state == "deleted",
+                                ServiceExecutionLease.observed_state == "deleted",
+                                ServiceExecutionLease.deleted_at.is_not(None),
+                                ServiceExecutionLease.cleanup_state == "complete",
+                                ServiceExecutionLease.execution_role == "attempt",
+                                ServiceExecutionLease.output_generation
+                                == ServiceExecutionLease.resource_generation,
+                                Trial.attempt_count == ServiceExecutionLease.attempt,
+                                Trial.state.in_(
+                                    ("claimed", "running", "materializing", "succeeded", "failed", "cancelled")
+                                ),
+                            ),
+                        ),
                         or_(
                             (
                                 (ServiceExecutionLease.materialization_state == "pending")
@@ -562,6 +584,8 @@ class ServiceExecutionMaterializer:
             ).scalar_one_or_none()
             if lease is None:
                 return None
+            if lease.finalized_at is None:
+                await recover_deleted_committed_trial(session, lease=lease, observed_at=current)
             claim_id = uuid4()
             lease.materialization_state = "running"
             lease.materialization_attempts += 1
@@ -1480,8 +1504,12 @@ class ServiceExecutionMaterializer:
             return False
         return True
 
-    async def run_once(self) -> bool:
-        claim = await self.claim_one()
+    async def run_once(self, *, lease_id: UUID | None = None) -> bool:
+        """Materialize one eligible commit, optionally restricted to one execution."""
+        claim = (
+            await self.claim_one(lease_id=lease_id)
+            if lease_id is not None else await self.claim_one()
+        )
         if claim is None:
             return False
         try:

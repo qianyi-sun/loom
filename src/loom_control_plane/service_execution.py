@@ -1021,8 +1021,8 @@ async def request_trial_execution_cancellation(
     if lease.desired_state in {"create", "start"}:
         desired_state = "cancel"
     elif lease.desired_state == "finalize":
-        # Finalize is entered only after output is durably committed, so a
-        # late cancellation can safely advance straight to provider cleanup.
+        # The committed result remains authoritative. The deletion observation
+        # must finalize it before the execution record becomes immutable.
         desired_state = "delete_pending"
     else:
         # Revocation/deletion is already durable. Repeated cancellation is
@@ -1436,6 +1436,30 @@ async def record_execution_event(
         ):
             raise ServiceExecutionConflict("successful compute finalization requires a result")
         finalized_projection = (finalized_trial, trial_state)
+    closes_committed_cleanup = (
+        advances_projection
+        and lease.desired_state == "delete_pending"
+        and lease.finalized_at is None
+        and lease.execution_role == "attempt"
+        and lease.output_commit_state == "committed"
+        and (
+            event_kind == "deleted"
+            or (
+                event_kind == "kubernetes_observed" and payload.get("normalized_state") == "deleted"
+            )
+        )
+    )
+    committed_cleanup_payload = None
+    if closes_committed_cleanup:
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True, populate_existing=True)
+        if (
+            trial is None
+            or trial.attempt_count != lease.attempt
+            or trial.state not in {"claimed", "running"}
+        ):
+            raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
+        committed_cleanup_payload = await _committed_result_finalization_payload(session, lease=lease)
+        finalized_projection = (trial, committed_cleanup_payload["trial_state"])
     event = ServiceExecutionEvent(
         id=uuid4(),
         lease_id=lease_id,
@@ -1661,20 +1685,23 @@ async def record_execution_event(
     if finalized_projection is not None:
         lease.finalized_at = observed_at
         trial, trial_state = finalized_projection
+        final_payload = committed_cleanup_payload or payload
         trial.state = trial_state
-        trial.result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+        trial.result = (
+            final_payload.get("result") if isinstance(final_payload.get("result"), dict) else None
+        )
         trial.failure_reason = (
-            payload.get("failure_reason")
-            if isinstance(payload.get("failure_reason"), str)
+            final_payload.get("failure_reason")
+            if isinstance(final_payload.get("failure_reason"), str)
             else None
         )
         trial.failure_message = (
-            payload.get("failure_message")
-            if isinstance(payload.get("failure_message"), str)
+            final_payload.get("failure_message")
+            if isinstance(final_payload.get("failure_message"), str)
             else None
         )
         trial.finished_at = None if trial_state == "materializing" else observed_at
-    elif event_kind == "deleted" and advances_projection:
+    if event_kind == "deleted" and advances_projection:
         lease.desired_state = "deleted"
         lease.deleted_at = observed_at
         lease.cleanup_state = "complete"
@@ -1877,29 +1904,19 @@ async def record_committed_runtime_result(
     return event
 
 
-async def finalize_committed_service_execution(
-    session: AsyncSession,
-    *,
-    lease_id: UUID,
-    observed_at: datetime,
-) -> bool:
-    """Finalize and enqueue cleanup after Kubernetes confirms termination."""
+async def _committed_result_finalization_payload(
+    session: AsyncSession, *, lease: ServiceExecutionLease,
+) -> dict[str, Any]:
+    """Derive the outcome from the immutable resource generation's committed result."""
 
-    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
-    if lease is None:
-        raise ServiceExecutionConflict("execution lease not found")
-    if (
-        lease.desired_state != "finalize"
-        or lease.observed_state not in {"finalizing", "failed"}
-        or lease.output_commit_state != "committed"
-    ):
-        return False
+    if lease.output_generation != lease.resource_generation:
+        raise ServiceExecutionConflict("committed output generation does not match execution")
     result_event = (
         await session.execute(
             select(ServiceExecutionEvent)
             .where(
                 ServiceExecutionEvent.lease_id == lease.id,
-                ServiceExecutionEvent.generation == lease.generation,
+                ServiceExecutionEvent.generation == lease.resource_generation,
                 ServiceExecutionEvent.event_kind == "result_reported",
             )
             .order_by(ServiceExecutionEvent.ordinal.desc())
@@ -1925,18 +1942,71 @@ async def finalize_committed_service_execution(
         trial_state = "cancelled" if runtime_result.status == "cancelled" else "failed"
         failure_reason = runtime_result.status
         failure_message = f"service execution runtime reported {runtime_result.status}"
+    return {
+        "trial_state": trial_state,
+        "result": result,
+        "failure_reason": failure_reason,
+        "failure_message": failure_message,
+    }
+
+
+async def recover_deleted_committed_trial(
+    session: AsyncSession, *, lease: ServiceExecutionLease, observed_at: datetime,
+) -> None:
+    """Recover archival eligibility without mutating a deleted execution record.
+
+    The materializer holds the lease and Trial locks. Only the original attempt's
+    committed result may close a Trial left running by an older controller.
+    """
+
+    if (
+        lease.desired_state != "deleted"
+        or lease.observed_state != "deleted"
+        or lease.deleted_at is None
+        or lease.cleanup_state != "complete"
+        or lease.execution_role != "attempt"
+        or lease.output_commit_state != "committed"
+        or lease.finalized_at is not None
+    ):
+        raise ServiceExecutionConflict("execution is not eligible for archival recovery")
+    trial = await session.get(Trial, lease.trial_id, with_for_update=True, populate_existing=True)
+    if trial is None or trial.attempt_count != lease.attempt:
+        raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
+    if trial.state not in {"claimed", "running"}:
+        return
+    payload = await _committed_result_finalization_payload(session, lease=lease)
+    trial.state = payload["trial_state"]
+    trial.result = payload["result"]
+    trial.failure_reason = payload["failure_reason"]
+    trial.failure_message = payload["failure_message"]
+    trial.finished_at = None if trial.state == "materializing" else observed_at
+
+
+async def finalize_committed_service_execution(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    observed_at: datetime,
+) -> bool:
+    """Finalize and enqueue cleanup after Kubernetes confirms termination."""
+
+    lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    if (
+        lease.desired_state != "finalize"
+        or lease.observed_state not in {"finalizing", "failed"}
+        or lease.output_commit_state != "committed"
+    ):
+        return False
+    payload = await _committed_result_finalization_payload(session, lease=lease)
     await record_execution_event(
         session,
         lease_id=lease.id,
         generation=lease.generation,
         ordinal=lease.last_event_ordinal + 1,
         event_kind="finalized",
-        payload={
-            "trial_state": trial_state,
-            "result": result,
-            "failure_reason": failure_reason,
-            "failure_message": failure_message,
-        },
+        payload=payload,
         observed_at=observed_at,
     )
     await enqueue_execution_transition(
@@ -2241,6 +2311,7 @@ __all__ = [
     "record_committed_runtime_result",
     "record_execution_event",
     "record_kubernetes_observation",
+    "recover_deleted_committed_trial",
     "refresh_service_execution_metrics",
     "request_trial_execution_cancellation",
     "reserve_trial_execution",
