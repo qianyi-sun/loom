@@ -46,6 +46,39 @@ mutation requires explicit `--apply`. This is the supported hosted deployment en
 limited to disposable development targets; the shared-cluster rollout broker
 and its CLI command are retired.
 
+### Protected read-only installation inventory
+
+Before qualifying a managed multi-person installation, dispatch the existing
+protected Nebius workflow from `dev` with the explicit inspection operation:
+
+```bash
+gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=inspect
+```
+
+This uses the same protected `nebius-integration` environment, pinned SSH host and
+cluster identity checks as rollout, but cannot select the rollout job. It does
+not require automatic rollout to be enabled and performs no Kubernetes, database,
+DNS or cloud mutation. It shares rollout concurrency so the two workflow modes
+do not race each other.
+
+Download `nebius-inspect-RUN_ID-ATTEMPT` for the sanitized
+`management-preflight.json` artifact. It contains the configured candidate,
+namespace identities, node allocatable resources, declared Pod requests including
+init containers and overhead, services/ingress, PVC sizes and storage classes.
+It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
+configuration payloads. Failed or incomplete inventory fails the command rather
+than being treated as an empty cluster.
+
+`observed` means inventory succeeded, not that personal environments are ready.
+The configured candidate is read from the platform ConfigMap, which rollout can
+update before migrations and workload replacement complete. It is not proof of
+the running workload versions; use successful candidate-bound rollout evidence
+and workload readback to qualify that separately.
+No child capacity allowance is inferred from a naive request sum. Wildcard
+DNS/TLS, provisioning IAM, management installation, live Nebius quota and pool
+limits, and installed concurrent-owner acceptance still require qualification.
+Keep this evidence outside the repository.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

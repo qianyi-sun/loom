@@ -456,6 +456,7 @@ async def delivery_setup(
             "supplemental_batch_id": supplemental_batch_id,
             "targeted_batch_id": targeted_batch_id,
             "selected_trials": selected_trials,
+            "failed_trial_id": failed_trial,
             "task_ids": task_ids,
             "settings": settings,
             "fake_s3": app.state.minio_client,
@@ -1443,6 +1444,63 @@ async def test_delivery_export_rejects_unresolved_platform_failures(
     body = response.json()
     assert body["detail"]["code"] == "delivery_export_unresolved_trials"
     assert body["detail"]["unresolved_trials"][0]["task_id"].startswith("source-useful-5003/")
+
+
+async def test_delivery_export_explicit_trial_ids_skips_unresolved_siblings(
+    delivery_setup: dict[str, object],
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    selected_trials: dict[str, UUID] = delivery_setup["selected_trials"]  # type: ignore[assignment]
+    task_ids: list[str] = delivery_setup["task_ids"]  # type: ignore[assignment]
+    # Main-batch succeeded attempts only — unresolved siblings remain on the family.
+    trial_ids = [selected_trials[task_ids[0]], selected_trials[task_ids[3]]]
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"selection": {"trial_ids": [str(tid) for tid in trial_ids]}},
+        )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    manifest = body["manifest"]
+    assert manifest["selection_rule"] == "explicit_trial_ids"
+    assert manifest["trial_count"] == 2
+    assert set(manifest["selection"]["selected_trial_ids"]) == {str(tid) for tid in trial_ids}
+    assert manifest["selection"]["skipped_coordinates_count"] == 2
+    assert len(manifest["selection"]["skipped_coordinates"]) == 2
+
+
+async def test_delivery_export_explicit_trial_ids_rejects_unknown_and_ineligible(
+    delivery_setup: dict[str, object],
+) -> None:
+    app = delivery_setup["app"]
+    raw = str(delivery_setup["raw"])
+    main_batch_id = delivery_setup["main_batch_id"]
+    failed_trial_id = delivery_setup["failed_trial_id"]
+
+    transport = httpx.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        unknown = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"selection": {"trial_ids": [str(uuid4())]}},
+        )
+        ineligible = await ac.post(
+            f"/api/v1/batches/{main_batch_id}/delivery-export",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={"selection": {"trial_ids": [str(failed_trial_id)]}},
+        )
+    assert unknown.status_code == 400
+    assert unknown.json()["detail"]["code"] == "delivery_export_invalid_batch_family"
+    assert ineligible.status_code == 409
+    assert ineligible.json()["detail"]["code"] == "delivery_export_unresolved_trials"
+    assert ineligible.json()["detail"]["ineligible_trials"][0]["trial_id"] == str(
+        failed_trial_id
+    )
 
 
 def _seed_scored_timeout(

@@ -2766,6 +2766,89 @@ def test_batch_delivery_bundle_forwards_raw_harbor_tb2_v2_mode(
     assert calls[0] == ("POST", f"/api/v1/batches/{_BATCH_ID}/delivery-export")
 
 
+def test_batch_delivery_bundle_forwards_explicit_trial_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "subset.tar.gz"
+    digest = hashlib.sha256(b"subset-archive").hexdigest()
+    artifact_id = "00000000-0000-0000-0000-00000000d315"
+    trial_a = "11111111-1111-1111-1111-111111111111"
+    trial_b = "22222222-2222-2222-2222-222222222222"
+    posted: dict[str, Any] = {}
+
+    class _StreamResponse:
+        def __init__(self) -> None:
+            self.status_code = 200
+            self.headers: dict[str, str] = {}
+            self.text = ""
+
+        def iter_bytes(self) -> Any:
+            yield b"subset-archive"
+
+    class _StreamContext:
+        def __enter__(self) -> _StreamResponse:
+            return _StreamResponse()
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    class _FakeClient:
+        def __enter__(self) -> _FakeClient:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def post(self, path: str, *, json: dict[str, Any]) -> httpx.Response:
+            posted.update(json)
+            return httpx.Response(
+                201,
+                json={
+                    "id": artifact_id,
+                    "status": "ready",
+                    "archive_filename": "subset.tar.gz",
+                    "sha256": digest,
+                    "download_url": (
+                        f"/api/v1/batches/{_BATCH_ID}/delivery-export/"
+                        f"{artifact_id}/download"
+                    ),
+                    "manifest": {
+                        "mode": "lightweight",
+                        "selection_rule": "explicit_trial_ids",
+                        "trial_count": 2,
+                    },
+                },
+            )
+
+        def stream(self, method: str, path: str) -> _StreamContext:
+            return _StreamContext()
+
+    monkeypatch.setattr(
+        "loom_cli.eval_cmd.authed_client",
+        lambda _cfg, *, timeout=30.0: _FakeClient(),
+    )
+
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "delivery-bundle",
+            _BATCH_ID,
+            "--trial-id",
+            trial_a,
+            "--trial-id",
+            trial_b,
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert rc == 0
+    assert posted == {"selection": {"trial_ids": [trial_a, trial_b]}}
+    assert output.read_bytes() == b"subset-archive"
+
+
 # ──────────────────────────────────────────────────────────────────────
 # eval trial list / show
 # ──────────────────────────────────────────────────────────────────────

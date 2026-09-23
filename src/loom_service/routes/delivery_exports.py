@@ -29,6 +29,18 @@ from loom_service.routes.object_downloads import stream_object_response
 router = APIRouter()
 
 
+class _DeliveryExportSelection(BaseModel):
+    trial_ids: list[UUID] | None = Field(
+        default=None,
+        description=(
+            "Optional explicit trial UUID list within the authorized batch family. "
+            "When set, only these trials are packed and unresolved sibling "
+            "coordinates are skipped. Selected trials must still be delivery-"
+            "eligible and pass object/TB2 validation."
+        ),
+    )
+
+
 class _DeliveryExportRequest(BaseModel):
     mode: Literal[
         "lightweight",
@@ -55,6 +67,13 @@ class _DeliveryExportRequest(BaseModel):
         description=(
             "Optional explicit supplemental rerun priority order. "
             "When omitted, linked rerun descendants are used by created_at/id order."
+        ),
+    )
+    selection: _DeliveryExportSelection | None = Field(
+        default=None,
+        description=(
+            "Optional subset selection. Omit for the default full-family "
+            "coordinate resolution that fails closed on unresolved attempts."
         ),
     )
 
@@ -111,6 +130,15 @@ async def create_batch_delivery_export(
                 payload.supplemental_batch_ids if payload is not None else None
             ),
             mode=mode,
+            trial_ids=(
+                list(payload.selection.trial_ids)
+                if (
+                    payload is not None
+                    and payload.selection is not None
+                    and payload.selection.trial_ids is not None
+                )
+                else None
+            ),
             public_base_url=public_base_url(request),
         )
     except (DeliveryExportError, Tb2V2ExportError, OpenHandsExportError) as exc:
