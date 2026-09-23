@@ -49,6 +49,9 @@ its private key in developer namespaces. This contract does not provision it.
     ingress_namespace: str = Field(pattern="^" + _LABEL + "$")
     ingress_controller_label: str = Field(pattern="^" + _LABEL + "$")
     min_nodes: int = Field(default=0, ge=0, le=100, strict=True)
+    # A creation default, not a resize command. Imported bindings retain their
+    # existing volume size; durable creation plans freeze the selected value.
+    generated_postgres_storage_gi: int | None = Field(default=None, ge=10, le=1024, strict=True)
 
     _dns_zone = field_validator("public_dns_zone")(_hostname)
 

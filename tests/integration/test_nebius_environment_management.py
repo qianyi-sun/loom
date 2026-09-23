@@ -96,9 +96,15 @@ async def test_concurrent_retry_has_one_identity_and_different_payload_conflicts
 async def test_generated_storage_reservation_and_plan_remain_frozen_on_replay(
     environment_registry, platform_inputs,
 ):
-    from loom.db.nebius_environment_schema import NebiusEnvironmentOperation, NebiusPlatformReservation
+    from loom.db.nebius_environment_schema import (
+        NebiusEnvironmentOperation,
+        NebiusPlatformReservation,
+    )
     from loom.nebius_environment_contract import EnvironmentCreateRequestV1, FoundationBinding
-    from loom_service.environment_management.manager import EnvironmentManager, EnvironmentPlanFactory
+    from loom_service.environment_management.manager import (
+        EnvironmentManager,
+        EnvironmentPlanFactory,
+    )
 
     registry, factory, (alice, _), prepare = environment_registry
     config, candidate, profile = platform_inputs

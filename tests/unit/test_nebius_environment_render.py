@@ -159,6 +159,8 @@ def test_generated_database_size_controls_volume_backup_and_admission(platform_i
     assert db["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] == f"{expected}Gi"
     assert result.config["postgres_storage_gi"] == expected
     assert result.platform_envelope.storage_mib == expected * 1024
+    # Eleven non-backup Pod slots (including surge/bootstrap) request 256Mi.
+    assert result.platform_envelope.ephemeral_storage_mib == expected * 1024 + 2816
     backup = named(result, "CronJob", "loom-platform-backup")["spec"]["jobTemplate"]["spec"]["template"]["spec"]
     dump = next(volume for volume in backup["volumes"] if volume["name"] == "dump")
     assert dump["emptyDir"]["sizeLimit"] == f"{expected}Gi"
@@ -267,6 +269,7 @@ def test_import_preserves_exact_existing_names_and_buckets(platform_inputs, cert
     from loom.nebius_environment_render import render_environment
 
     config, candidate, profile = platform_inputs
+    config["postgres_storage_gi"] = 50
     foundation = foundation_from(config)
     row = registration_for(foundation, "alice")
     row = EnvironmentRegistrationV1.model_validate({

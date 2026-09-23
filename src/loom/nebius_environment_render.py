@@ -64,6 +64,8 @@ def _configuration(
     else:
         if row.public_host != row.slug + "." + foundation.public_dns_zone:
             raise NebiusPlatformError("host differs from protected environment route")
+        if foundation.generated_postgres_storage_gi is not None:
+            config["postgres_storage_gi"] = foundation.generated_postgres_storage_gi
         config["buckets"] = {
             purpose: f"loom-{row.incarnation.hex}-{purpose}"
             for purpose in ("artifacts", "trajectories", "source", "backup")
