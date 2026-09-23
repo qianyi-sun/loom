@@ -4,4 +4,10 @@ from pathlib import Path
 
 def process_exited(pid: int) -> bool:
     status = Path(f"/proc/{pid}/stat")
-    return not status.exists() or status.read_text().split()[2] in {"Z", "X"}
+    try:
+        value = status.read_text()
+    except (FileNotFoundError, ProcessLookupError):
+        # Linux may remove the proc entry before open, or return ESRCH from
+        # read after the process has been reaped. Both establish disappearance.
+        return True
+    return value.split()[2] in {"Z", "X"}

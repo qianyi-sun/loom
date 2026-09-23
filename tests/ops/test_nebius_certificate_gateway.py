@@ -14,7 +14,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-
 from tests.support.process_observation import process_exited
 
 

@@ -15,7 +15,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-
 from tests.support.process_observation import process_exited
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=UTC)
