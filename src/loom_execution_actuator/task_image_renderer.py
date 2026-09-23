@@ -208,9 +208,12 @@ def _build_script(
                 "  result=$?",
                 "  solve_ended=$(date +%s)",
                 (
-                    '  echo \'{"loom_task_image_stage":"solve","event":"end",'
-                    f'"component_index":{index},"failed":true,"exit":\'"$result"'
-                    ',"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
+                    "  printf "
+                    + shlex.quote(
+                        '{"loom_task_image_stage":"solve","event":"end",'
+                        f'"component_index":{index},"failed":true,"exit":%s,"duration_ms":%s}}\\n'
+                    )
+                    + ' "$result" "$(( (solve_ended - solve_started) * 1000 ))"'
                 ),
                 "  case $result in 124) exit 124 ;; *) exit 1 ;; esac",
                 "fi",
