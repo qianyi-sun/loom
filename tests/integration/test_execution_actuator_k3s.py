@@ -9,6 +9,7 @@ import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -473,6 +474,50 @@ async def test_allowed_peer_failure_is_bounded_and_retains_cause(
     monkeypatch.setattr(__name__ + "._pod_probe", lambda *args: "exit:1 reason:timeout")
     with pytest.raises(AssertionError, match="reason:timeout"):
         await _wait_for_allowed_peer(None, "test", "client", "http://gateway", timeout=0.01)
+
+
+_PROGRAMMED_POLICY = '''-A FORWARD -j KUBE-ROUTER-FORWARD
+-A KUBE-ROUTER-FORWARD -s 10.42.0.8/32 -j KUBE-POD-FW-CLIENT
+-A KUBE-ROUTER-FORWARD -d 10.42.0.8/32 -j KUBE-POD-FW-CLIENT
+-A KUBE-POD-FW-CLIENT -m comment --comment "run through nw policy deny" -j KUBE-NWPLCY-DENY
+-A KUBE-POD-FW-CLIENT -m comment --comment "run through nw policy egress" -j KUBE-NWPLCY-EGRESS
+-A KUBE-POD-FW-CLIENT -m mark ! --mark 0x10000/0x10000 -j REJECT
+'''
+_EXPECTED_POLICY = {"client": ("10.42.0.8", ("deny", "egress"))}
+
+
+@pytest.mark.parametrize("missing", ["FORWARD", "-s 10.42", "-d 10.42", 'policy deny"', 'policy egress"', "-j REJECT"])
+def test_policy_readiness_rejects_partial_installation(missing: str) -> None:
+    incomplete = "\n".join(line for line in _PROGRAMMED_POLICY.splitlines() if missing not in line)
+    assert _policy_programming_gaps(incomplete, _EXPECTED_POLICY)
+    assert not _policy_programming_gaps(_PROGRAMMED_POLICY, _EXPECTED_POLICY)
+
+
+def test_policy_readiness_does_not_accept_another_pods_rules() -> None:
+    assert _policy_programming_gaps(_PROGRAMMED_POLICY.replace("10.42.0.8", "10.42.0.9"), _EXPECTED_POLICY)
+    assert _policy_programming_gaps(_PROGRAMMED_POLICY, {**_EXPECTED_POLICY, "other": ("10.42.0.9", ("deny",))})
+
+
+async def test_policy_readiness_waits_for_installation_without_traffic_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshots = iter((b"*filter\nCOMMIT", _PROGRAMMED_POLICY.encode()))
+
+    def inspect(command):
+        assert command == ["iptables-save", "-t", "filter"]
+        return SimpleNamespace(exit_code=0, output=next(snapshots))
+
+    def no_probe(*args):
+        pytest.fail("readiness must not learn by retrying forbidden traffic")
+
+    monkeypatch.setattr(__name__ + "._pod_probe", no_probe)
+    await _wait_for_policy_programming(SimpleNamespace(exec=inspect), _EXPECTED_POLICY, timeout=1)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_policy_readiness_failure_preserves_bounded_rules(exit_code: int) -> None:
+    container = SimpleNamespace(exec=lambda command: SimpleNamespace(exit_code=exit_code, output=b"#" * 70000 + b"tail-evidence"))
+    with pytest.raises(AssertionError, match="tail-evidence") as error:
+        await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
+    assert len(str(error.value)) < 67000
 
 
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
