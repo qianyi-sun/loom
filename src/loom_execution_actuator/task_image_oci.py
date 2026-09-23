@@ -10,8 +10,9 @@ import json
 import re
 import stat
 import tarfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 _MAX_BYTES = 3 * 1024**3
 _MAX_MEMBERS = 10000
