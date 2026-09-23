@@ -14,6 +14,7 @@ from loom.trial.workspace import (
 from loom.trial.workspace_snapshot import (
     WorkspaceSnapshotError,
     _export_workspace_archive,
+    _import_workspace_archive,
     _validate_workspace_archive,
 )
 
@@ -151,4 +152,50 @@ async def test_snapshot_export_rejects_socket_before_tar(tmp_path: Path) -> None
             _SocketDriver(),  # type: ignore[arg-type]
             PurePosixPath("/workspace"),
             tmp_path / "snapshot.tar",
+        )
+
+
+@pytest.mark.parametrize("inventory", [
+    ExecResult(return_code=0, stdout=b".\0./private\0", stderr=b"", truncated=True, duration_sec=0),
+    ExecResult(return_code=1, stdout=b".\0", stderr=b"find failed", duration_sec=0),
+    ExecResult(return_code=0, stdout=b".\0./partial", stderr=b"", duration_sec=0),
+    ExecResult(return_code=0, stdout=b".\0../outside\0", stderr=b"", duration_sec=0),
+])
+async def test_incomplete_destination_inventory_fails_before_deletion_or_upload(
+    tmp_path: Path, policy: WorkspaceStagingPolicy, inventory: ExecResult,
+) -> None:
+    archive = tmp_path / "valid.tar"
+    _write_archive(archive, [_member(".", tarfile.DIRTYPE)])
+
+    class InventoryDriver:
+        async def exec(self, cmd: str, **_kwargs: object) -> ExecResult:
+            if "find . -print0" in cmd:
+                return inventory
+            # Only destination validation is allowed before the failed inventory.
+            assert cmd.startswith("test ! -L "), "invalid inventory must prevent deletion"
+            return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+        async def upload(self, _src: Path, _dst: PurePosixPath) -> None:
+            raise AssertionError("invalid inventory must prevent archive upload")
+
+    with pytest.raises(WorkspaceSnapshotError):
+        await _import_workspace_archive(
+            InventoryDriver(), archive, PurePosixPath("/workspace"), policy=policy,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("destination", ["/", "//", "//workspace", "relative", "/workspace/../other"])
+async def test_unsafe_destination_fails_before_any_remote_command(
+    tmp_path: Path, policy: WorkspaceStagingPolicy, destination: str,
+) -> None:
+    archive = tmp_path / "valid.tar"
+    _write_archive(archive, [_member(".", tarfile.DIRTYPE)])
+
+    class UntouchedDriver:
+        async def exec(self, *_args: object, **_kwargs: object) -> ExecResult:
+            raise AssertionError("invalid destination must not execute commands")
+
+    with pytest.raises(WorkspaceSnapshotError, match="destination"):
+        await _import_workspace_archive(
+            UntouchedDriver(), archive, PurePosixPath(destination), policy=policy,  # type: ignore[arg-type]
         )
