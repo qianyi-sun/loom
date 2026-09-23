@@ -299,7 +299,7 @@ def test_delegated_or_aliased_challenge_is_rejected(monkeypatch, kwargs):
     mod = module()
     monkeypatch.setattr(mod, "_authorities", lambda *_args: ["8.8.8.8"])
     monkeypatch.setattr(mod.dns.query, "udp", lambda message, *_a, **_kw: dns_reply(message.question[0].name, "v" * 43, **kwargs))
-    with pytest.raises(mod.DNSChallengeError, match="authoritative|alias"):
+    with pytest.raises(mod.DNSChallengeError, match=r"authoritative|alias"):
         mod.wait_for_txt("yylx.world", "_acme-challenge.dev.nebius.yylx.world", "v" * 43)
 
 
@@ -336,5 +336,83 @@ def test_cli_runs_exact_hook_and_never_prints_validation_or_credential(tmp_path,
     monkeypatch.setenv("CERTBOT_DOMAIN", "private-malformed-domain")
     assert mod.main(["auth", *args]) == 1
     output = capsys.readouterr()
-    assert "private" not in output.err + output.out
+    assert "private-pat" not in output.err + output.out
+    assert "private-malformed-domain" not in output.err + output.out
     assert "v" * 43 not in output.err + output.out
+
+
+def test_encoded_inventory_is_rejected_before_processing(monkeypatch):
+    import gzip
+
+    response = httpx.Response(200, content=gzip.compress(b'{"items":[]}'), headers={"content-encoding": "gzip"})
+    with provider(lambda _request: response) as dns:
+        with pytest.raises(module().DNSChallengeError):
+            dns.records()
+
+
+def test_real_http_transport_does_not_follow_credential_redirect(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    calls = []
+
+    class Server(BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append((self.path, self.headers.get("Authorization")))
+            self.send_response(302)
+            self.send_header("Location", "/credential-sink")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Server)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(module(), "_API", f"http://127.0.0.1:{server.server_port}/v3/domains/zones/")
+        with module().GoDaddyDNS("yylx.world", "dev.nebius.yylx.world", "private-pat") as dns:
+            with pytest.raises(module().DNSChallengeError):
+                dns.records()
+        assert len(calls) == 1
+        assert calls[0][0].startswith("/v3/domains/zones/yylx.world/dns-records?")
+        assert calls[0][1] == "Bearer private-pat"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_same_challenge_lock_refuses_second_process_attempt(tmp_path):
+    state = ProviderState()
+    root = tmp_path / "journal"
+
+    def contender(*_args):
+        with provider(state.handle) as other:
+            with pytest.raises(module().DNSChallengeError, match="already in use"):
+                hook(other, root, "auth")
+
+    with provider(state.handle) as dns:
+        assert hook(dns, root, "auth", contender) == "present"
+    assert state.calls.count("POST") == 1
+
+
+def test_authority_discovery_rejects_private_addresses(monkeypatch):
+    import dns.name
+    import dns.rdata
+    from types import SimpleNamespace
+
+    mod = module()
+
+    class Answer(list):
+        canonical_name = dns.name.from_text("yylx.world")
+
+    def resolve(name, kind, **kwargs):
+        if kind == "NS":
+            return Answer([dns.rdata.from_text("IN", "NS", "ns1.example.")])
+        return Answer([dns.rdata.from_text("IN", "A", "127.0.0.1")])
+
+    monkeypatch.setattr(mod.dns.resolver, "Resolver", lambda: SimpleNamespace(resolve=resolve))
+    with pytest.raises(mod.DNSChallengeError, match="not public"):
+        mod._authorities("yylx.world", mod.time.monotonic() + 5)
