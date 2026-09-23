@@ -119,6 +119,9 @@ def test_runtime_mounts_only_explicit_separate_authorities(management_inputs):
             assert "loom-management-cloud" not in text
             assert "loom-management-kubernetes" not in text
             assert "loom-management-publications" not in text
+            for volume in pod(doc).get("volumes", []):
+                if volume.get("configMap", {}).get("name") == "loom-platform-config":
+                    assert volume["configMap"]["items"] == [{"key": "environment.json", "path": "environment.json"}]
 
 
 def test_migration_and_backup_never_start_task_authorities_or_share_child_data(management_inputs):

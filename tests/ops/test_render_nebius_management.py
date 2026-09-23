@@ -61,3 +61,13 @@ def test_renderer_will_not_overwrite_existing_operator_evidence(tmp_path, manage
     result = invoke(tmp_path, management_inputs)
     assert result.returncode == 1
     assert sentinel.read_text() == "do-not-overwrite"
+
+
+@pytest.mark.parametrize("images", [[], None, {"service": []}, {"service": None}])
+def test_malformed_candidate_nested_types_keep_sanitized_error_contract(tmp_path, management_inputs, images):
+    management_inputs[1]["images"] = images
+    result = invoke(tmp_path, management_inputs)
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert json.loads(result.stderr)["status"] == "invalid-input"
+    assert not (tmp_path / "rendered").exists()
