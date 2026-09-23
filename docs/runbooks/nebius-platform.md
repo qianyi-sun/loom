@@ -1207,6 +1207,21 @@ follows. Queued tasks do not block deployment. A later successful publication
 tries again; manual dispatch of the same workflow selects the latest successful
 push publication. Harness-only publications do not roll out the platform.
 
+Open the workflow's **Summary** to see the reason for a skipped rollout in plain
+language. For **skipped_busy**, the summary lists the active work and counts
+(such as running trials, execution reservations, image builds, or pending image
+build cleanup). These counts are separate activity indicators, not a count of
+distinct tasks. A historical failed task-image build alone does not block rollout;
+its cleanup can still block while pending. Busy skips do not wait or retry.
+
+If the upstream `nebius-candidate` publication failed, was cancelled, or otherwise
+did not succeed, a read-only **Explain why automatic rollout did not start** job
+reports that conclusion and links to the upstream run. It also explains when
+`NEBIUS_AUTO_ROLLOUT_ENABLED` is unset or disabled. These decisions occur before
+the deployment job and do not contact the cluster. A publication failure is
+different from **skipped_busy**, which follows a successful publication and a
+live idle check. A green skip report records a decision, not a deployment.
+
 CI and publication remain on GitHub-hosted runners, with independent concurrency
 from rollout. The runner invokes `kubectl` over the existing Nebius SSH gateway;
 no Nebius runner, new gateway, public Kubernetes API exposure, or old environment
