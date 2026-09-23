@@ -6,19 +6,32 @@ This is not an ACME client or a generic DNS administration tool.
 """
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
+import math
 import os
 import re
 import stat
+import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Self
 
+import dns.exception
+import dns.flags
+import dns.message
+import dns.name
+import dns.query
+import dns.rcode
+import dns.rdatatype
+import dns.resolver
 import httpx
 
 _API = "https://api.godaddy.com/v3/domains/zones/"
@@ -82,7 +95,8 @@ class GoDaddyDNS:
             raise DNSChallengeError("challenge name exceeds DNS bound")
         self._url = _API + zone + "/dns-records"
         self._client = httpx.Client(
-            headers={"Authorization": "Bearer " + _validate_token(token), "Accept": "application/json"},
+            headers={"Authorization": "Bearer " + _validate_token(token), "Accept": "application/json",
+                     "Accept-Encoding": "identity"},
             timeout=25, follow_redirects=False, trust_env=False,
             transport=transport or httpx.HTTPTransport(retries=0),
         )
@@ -100,7 +114,8 @@ class GoDaddyDNS:
         diagnostic = "DNS inventory unavailable" if method == "GET" else "DNS write outcome ambiguous; preserve journal and reconcile"
         try:
             with self._client.stream(method, url, params=params, json=body) as response:
-                if response.status_code != {"GET": 200, "POST": 201, "DELETE": 204}[method]:
+                if (response.status_code != {"GET": 200, "POST": 201, "DELETE": 204}[method]
+                        or response.headers.get("content-encoding", "identity").lower() != "identity"):
                     raise DNSChallengeError(diagnostic)
                 content = bytearray()
                 for chunk in response.iter_bytes(chunk_size=16_384):
@@ -248,3 +263,92 @@ def run_hook(dns: GoDaddyDNS, *, state_dir: Path, action: str, certbot_domain: s
             raise DNSChallengeError("owned DNS challenge is absent or changed")
         wait(dns.zone, dns.name + "." + dns.zone, validation)
         return "present"
+
+
+def _authorities(zone: str, deadline: float) -> list[str]:
+    """Resolve the selected zone's authority, not a recursive TXT cache."""
+    resolver = dns.resolver.Resolver()
+
+    def resolve(name: str, kind: str) -> dns.resolver.Answer:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise DNSChallengeError("DNS propagation deadline")
+        return resolver.resolve(name, kind, lifetime=min(5, remaining))
+
+    try:
+        answer = resolve(zone, "NS")
+        if answer.canonical_name != dns.name.from_text(zone) or not 1 <= len(answer) <= 8:
+            raise DNSChallengeError("invalid authoritative DNS inventory")
+        servers = []
+        for authority in answer:
+            addresses = resolve(str(authority.target), "A")
+            if not 1 <= len(addresses) <= 8:
+                raise DNSChallengeError("invalid authoritative DNS addresses")
+            for address in addresses:
+                value = str(address.address)
+                if not ipaddress.ip_address(value).is_global:
+                    raise DNSChallengeError("authoritative DNS address is not public")
+                servers.append(value)
+        return list(dict.fromkeys(servers))
+    except (dns.exception.DNSException, ValueError):
+        raise DNSChallengeError("authoritative DNS discovery unavailable") from None
+
+
+def wait_for_txt(zone: str, name: str, validation: str, *, timeout: float = 600) -> None:
+    if not math.isfinite(timeout) or not 0 < timeout <= 600:
+        raise DNSChallengeError("invalid DNS propagation deadline")
+    deadline = time.monotonic() + timeout
+    servers = _authorities(zone, deadline)
+    wanted = dns.name.from_text(name)
+    while time.monotonic() < deadline:
+        complete = True
+        for server in servers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DNSChallengeError("DNS propagation deadline")
+            query = dns.message.make_query(wanted, "TXT")
+            query.flags &= ~dns.flags.RD
+            try:
+                reply = dns.query.udp(query, server, timeout=min(3, remaining))
+                if reply.flags & dns.flags.TC:
+                    reply = dns.query.tcp(query, server, timeout=min(3, max(0.01, deadline - time.monotonic())))
+            except dns.exception.DNSException:
+                complete = False
+                continue
+            if not reply.flags & dns.flags.AA:
+                raise DNSChallengeError("challenge is outside the selected authoritative DNS zone")
+            if any(row.rdtype == dns.rdatatype.CNAME for row in reply.answer):
+                raise DNSChallengeError("aliased DNS challenge requires separate qualification")
+            values = [b"".join(item.strings) for row in reply.answer
+                      if row.name == wanted and row.rdtype == dns.rdatatype.TXT for item in row]
+            if reply.rcode() != dns.rcode.NOERROR or validation.encode() not in values:
+                complete = False
+        if complete:
+            return
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+    raise DNSChallengeError("DNS propagation deadline")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("auth", "cleanup"))
+    parser.add_argument("--zone", required=True)
+    parser.add_argument("--certificate-domain", required=True)
+    parser.add_argument("--credential-file", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        with GoDaddyDNS(args.zone, args.certificate_domain, load_token(args.credential_file)) as provider:
+            status = run_hook(provider, state_dir=args.state_dir, action=args.action,
+                              certbot_domain=os.environ.get("CERTBOT_DOMAIN", ""),
+                              validation=os.environ.get("CERTBOT_VALIDATION", ""), wait=wait_for_txt)
+        print(json.dumps({"status": status}))
+        return 0
+    except Exception:
+        # Neither remote diagnostics nor filesystem/credential values belong in logs.
+        print("DNS challenge failed; preserve private journal for scoped reconciliation", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

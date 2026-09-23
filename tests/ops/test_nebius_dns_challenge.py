@@ -399,9 +399,10 @@ def test_same_challenge_lock_refuses_second_process_attempt(tmp_path):
 
 
 def test_authority_discovery_rejects_private_addresses(monkeypatch):
+    from types import SimpleNamespace
+
     import dns.name
     import dns.rdata
-    from types import SimpleNamespace
 
     mod = module()
 
