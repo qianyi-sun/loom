@@ -6,20 +6,22 @@ from pathlib import Path
 import pytest
 import yaml
 
+from loom.nebius_platform_render import build_platform
 from loom.nebius_task_identity_policy import identity_namespace_labels, identity_policy_documents
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, _sidecar, render_execution_job
 from tests.integration.test_execution_actuator_k3s import _lease, _load_client, _start_k3s
+from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
 from tests.unit.test_service_execution_materialization import _provenance
 from tests.unit.test_task_sandbox_identity import _identity_task
 
 
-def _pod(namespace: str) -> dict:
+def _pod(namespace: str, *, user: str = "root", home: str | None = None) -> dict:
     from loom.service_execution_materialization import compile_service_execution_plan
 
     lease = _lease(namespace)
     job = render_execution_job(lease, target=ExecutionTargetRuntime(target_id=lease.target_id, namespace=namespace))
     template = job["spec"]["template"]
-    task, trial, profile = _identity_task("root")
+    task, trial, profile = _identity_task(user, home)
     plan = compile_service_execution_plan(
         task=task, trial=trial, profile=profile.model_copy(update={"supports_task_identity": True}),
         source_provenance=_provenance(), task_revision_sha256="sha256:" + "c" * 64,
@@ -34,7 +36,7 @@ def _pod(namespace: str) -> dict:
 
 
 @pytest.mark.timeout(240)
-def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path):
+def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Path, platform_inputs):  # noqa: F811
     import json
     import os
     import subprocess
@@ -95,6 +97,50 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             sandbox["securityContext"].pop("runAsGroup")
             sandbox["securityContext"]["capabilities"].pop("add")
         assert apply([nonroot], dry_run=True).exit_code == 0
+
+        # Admission must accept the real platform controller/collector Pod
+        # templates, including security inherited from their Pod defaults.
+        config, candidate, profile = platform_inputs
+        config["task_identity_policy"] = {
+            "mode": "private-root-v1", "target_id": config["target_id"],
+            "execution_namespace": config["execution_namespace"],
+        }
+        files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+        platform_pods = []
+        for document in files["60-execution.yaml"]:
+            if document["kind"] == "ServiceAccount":
+                account = deepcopy(document)
+                account["metadata"]["namespace"] = namespace
+                result = apply([account])
+                assert result.exit_code == 0, result.output.decode()
+            if document["kind"] == "Deployment":
+                template = document["spec"]["template"]
+            elif document["kind"] == "CronJob":
+                template = document["spec"]["jobTemplate"]["spec"]["template"]
+            else:
+                continue
+            platform_pods.append({"apiVersion": "v1", "kind": "Pod", "metadata": {
+                **deepcopy(template.get("metadata", {})), "namespace": namespace,
+                "name": document["metadata"]["name"] + "-policy-check",
+            }, "spec": deepcopy(template["spec"])})
+        assert len(platform_pods) == 2
+        admitted_shapes = [*platform_pods, _pod(namespace, user="0:1001", home="/root")]
+        failures = []
+        for admitted in admitted_shapes:
+            result = apply([admitted], dry_run=True)
+            if result.exit_code != 0:
+                failures.append(result.output.decode())
+        assert not failures, "\n".join(failures)
+
+        for platform_pod in platform_pods:
+            for section in ("containers", "initContainers"):
+                for index in range(len(platform_pod["spec"].get(section, []))):
+                    for override in ({"runAsNonRoot": False}, {"runAsUser": 0}):
+                        bad = deepcopy(platform_pod)
+                        bad["spec"][section][index]["securityContext"].update(override)
+                        result = apply([bad], dry_run=True)
+                        assert result.exit_code != 0, "unsafe inherited-security override was admitted"
+                        assert "private-root-v1" in result.output.decode()
         mutations = [
             lambda p: p["spec"]["containers"][0]["securityContext"].update(runAsUser=0, runAsNonRoot=False),
             lambda p: p["spec"]["initContainers"][1]["securityContext"]["capabilities"]["add"].append("SYS_ADMIN"),

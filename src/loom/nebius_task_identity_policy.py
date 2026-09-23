@@ -43,8 +43,8 @@ def identity_namespace_labels() -> dict[str, str]:
 
 def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, Any]]:
     name = namespace + "-private-root-v1"
-    # Keep all fields explicit: missing security fields must never inherit an
-    # image default that turns a trusted controller into a root process.
+    # Pod defaults below explicitly constrain the inherited identity. A
+    # container may inherit runAsNonRoot, but cannot override it to false.
     common = (
         "has(c.securityContext) && "
         "has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && "
@@ -61,7 +61,7 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         "(!has(c.resources.limits) || c.resources.limits.all(k, k in ['cpu','memory','ephemeral-storage']))"
     )
     nonroot = (
-        "has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && "
+        "(!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot) && "
         "(!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) && "
         "(!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)"
     )
@@ -80,7 +80,8 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         "has(m.subPath) && m.subPath == 'loom-sandbox-runtime' && has(m.readOnly) && m.readOnly))) && "
         "has(c.securityContext.runAsNonRoot) && "
         "((has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0) ? "
-        "(!c.securityContext.runAsNonRoot && has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0 && "
+        "(!c.securityContext.runAsNonRoot && has(c.securityContext.runAsGroup) && "
+        "c.securityContext.runAsGroup >= 0 && c.securityContext.runAsGroup <= 2147483647 && "
         "has(c.securityContext.capabilities.add) && "
         f"size(c.securityContext.capabilities.add) == {len(ROOT_INSTALL_CAPABILITIES)} && "
         f"{json.dumps(list(ROOT_INSTALL_CAPABILITIES))}.all(k, k in c.securityContext.capabilities.add)) : "
