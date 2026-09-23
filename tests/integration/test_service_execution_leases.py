@@ -347,15 +347,11 @@ class _FakeKubernetesJobApi:
         return events
 
 
-def _target(
-    suffix: str,
-    *,
-    execution_class_id: str = NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
-) -> ExecutionTargetV1:
+def _target(suffix: str) -> ExecutionTargetV1:
     return ExecutionTargetV1(
         target_id=f"nebius-staging-{suffix}",
         logical_pool_id="nebius-cpu",
-        execution_class_id=execution_class_id,
+        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
         cluster_scope_id="nebius-eu-north1-shared",
         environment="staging",
         provider="nebius",
@@ -549,7 +545,9 @@ async def _seed_ready_trial(
     team_id = uuid4()
     trial_id = uuid4()
     task_id = task_id or f"service-execution/{suffix}"
-    target = _target(suffix, execution_class_id=execution_class.class_id)
+    target = _target(suffix).model_copy(
+        update={"execution_class_id": execution_class.class_id},
+    )
     session.add_all(
         (
             Team(id=team_id, name=f"service-execution-{suffix}"),
