@@ -6,6 +6,7 @@ here.
 """
 from __future__ import annotations
 
+import math
 import os
 from functools import cached_property
 from typing import Any, Self
@@ -23,6 +24,10 @@ class LoomServiceSettings(_BaseSettings):
 
     @model_validator(mode="after")
     def _validate_service_mode(self) -> Self:
+        if (self.management_http_max_body_bytes <= 0 or self.management_http_max_inflight <= 0
+                or not math.isfinite(self.management_http_body_timeout_sec)
+                or self.management_http_body_timeout_sec <= 0):
+            raise ValueError("management HTTP limits must be positive and finite")
         if self.service_mode not in {"application", "management"}:
             raise ValueError("service_mode must be application or management")
         if self.service_mode == "application":

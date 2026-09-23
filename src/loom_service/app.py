@@ -514,4 +514,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     # hard to label-select), so production scrapers should target
     # the Service's cluster DNS, not the public URL.
     app.mount("/metrics", make_asgi_app())
+    if management:
+        from loom_service.management_request_limits import ManagementRequestLimitsMiddleware
+
+        # Last added is outermost: bound reception before any parser or auth.
+        app.add_middleware(
+            ManagementRequestLimitsMiddleware,
+            max_body_bytes=settings.management_http_max_body_bytes,
+            max_inflight=settings.management_http_max_inflight,
+            body_timeout_sec=settings.management_http_body_timeout_sec,
+        )
     return app

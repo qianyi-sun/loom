@@ -29,7 +29,7 @@ def _app(**overrides):
 
 
 def _scope(headers=(), *, path="/probe"):
-    return {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+    return {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}, "http_version": "1.1",
             "method": "POST", "scheme": "https", "path": path, "raw_path": path.encode(),
             "query_string": b"", "root_path": "", "headers": list(headers),
             "server": ("manage.example.com", 443), "client": ("127.0.0.1", 1234)}
@@ -66,7 +66,9 @@ def _status(messages):
     ([(b"content-length", b"no")], (b"x",), 400, 0),
     ([(b"content-length", b"-1")], (b"x",), 400, 0),
     ([(b"content-length", b"1"), (b"content-length", b"2")], (b"x",), 400, 0),
+    ([(b"content-length", b"1"), (b"transfer-encoding", b"chunked")], (b"x",), 400, 0),
     ([(b"content-length", b"4")], (b"x",), 400, 1),
+    ([(b"content-length", b"1")], (b"xy",), 400, 1),
     ([(b"content-encoding", b"gzip")], (b"x",), 415, 0),
 ])
 async def test_invalid_management_bodies_never_reach_handler(headers, chunks, status, read_count):
@@ -137,7 +139,8 @@ async def test_disconnect_does_not_call_handler_or_leak_slot():
     assert _status((await _call(app))[0]) == 200
 
 
-async def test_response_streams_while_admission_remains_bounded():
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_response_streams_while_admission_remains_bounded(spec_version):
     app = _app()
     first_byte = asyncio.Event()
     finish = asyncio.Event()
@@ -150,14 +153,22 @@ async def test_response_streams_while_admission_remains_bounded():
             yield b"second"
         return StreamingResponse(chunks())
 
+    received = False
+
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Future()
 
     async def send(message):
         if message.get("body") == b"first":
             first_byte.set()
 
-    task = asyncio.create_task(app(_scope(path="/stream"), receive, send))
+    scope = _scope(path="/stream")
+    scope["asgi"]["spec_version"] = spec_version
+    task = asyncio.create_task(app(scope, receive, send))
     try:
         await asyncio.wait_for(first_byte.wait(), timeout=1)
         assert _status((await _call(app))[0]) == 503
@@ -189,6 +200,23 @@ async def test_application_upload_behavior_is_unchanged():
     app = _app(service_mode="application", minio_access_key="test", minio_secret_key="test")
     sent, _ = await _call(app, (b"x" * 32,))
     assert _status(sent) == 200
+
+
+async def test_body_timeout_cannot_interrupt_an_error_response():
+    app = _app()
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 17, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+        if message["type"] == "http.response.start":
+            await asyncio.sleep(0.2)
+
+    await app(_scope(), receive, send)
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [413]
+    assert sent[-1]["type"] == "http.response.body"
 
 
 @pytest.mark.parametrize("field,value", [
