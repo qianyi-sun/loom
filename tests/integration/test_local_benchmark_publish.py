@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -583,7 +584,31 @@ def _write_harbor_layout(root: Path) -> None:
     online.chmod(0o755)
 
 
+@pytest.fixture
+async def harbor_publication_cleanup(postgres_url: str) -> AsyncIterator[None]:
+    """Keep these publications from leaving work in the shared test database."""
+    engine = create_async_engine(postgres_url)
+    try:
+        yield
+    finally:
+        try:
+            async with async_sessionmaker(engine)() as session:
+                await session.execute(delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == "harbor-nebius-profile/harbor-sample",
+                ))
+                await session.execute(delete(TaskRow).where(
+                    TaskRow.benchmark_id == "harbor-nebius-profile",
+                ))
+                await session.execute(delete(Benchmark).where(
+                    Benchmark.id == "harbor-nebius-profile",
+                ))
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("harbor_publication_cleanup")
 async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
     postgres_url: str,
     tmp_path: Path,
@@ -654,6 +679,7 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("harbor_publication_cleanup")
 async def test_publish_without_profile_keeps_harbor_root_verifier(
     postgres_url: str,
     tmp_path: Path,
