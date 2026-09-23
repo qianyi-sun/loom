@@ -205,18 +205,23 @@ def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_
                 response.begin()
                 return response.status, response.read()
 
-        # Kubernetes watches converge asynchronously; preserve last route result.
-        deadline = time.monotonic() + 30
-        last = None
-        while time.monotonic() < deadline:
-            try:
-                last = get("alice.dev.example.com", "/api/v1/health")
-            except (ConnectionRefusedError, ssl.SSLError) as exc:
-                last = type(exc).__name__ + ": " + str(exc)
-            if last == (200, b"loom-dev-alice:8090"):
-                break
-            time.sleep(0.5)
-        assert last == (200, b"loom-dev-alice:8090"), (last, _run(container, "kubectl", "logs", "-n", ns, "deployment/loom-shared-ingress", "--tail=20"))
+        def wait_for_route(host, path, expected):
+            # Pod readiness does not establish provider-watch or origin DNS/TLS
+            # readiness. The legacy file/TCP and Kubernetes routes are independent.
+            deadline = time.monotonic() + 30
+            last = None
+            while time.monotonic() < deadline:
+                try:
+                    last = get(host, path)
+                except (ConnectionRefusedError, ssl.SSLError, TimeoutError) as exc:
+                    last = type(exc).__name__ + ": " + str(exc)
+                if last == expected:
+                    return
+                time.sleep(0.5)
+            pytest.fail(f"route {host}{path} did not become ready: {last!r}")
+
+        wait_for_route(old_host, "/", (200, (ns + ":8443").encode()))
+        wait_for_route("alice.dev.example.com", "/api/v1/health", (200, b"loom-dev-alice:8090"))
         assert get("bob.dev.example.com", "/api") == (200, b"loom-dev-bob:8090")
         assert get("alice.dev.example.com", "/apiary") == (200, b"loom-dev-alice:8080")
         assert get("bob.dev.example.com") == (200, b"loom-dev-bob:8080")
