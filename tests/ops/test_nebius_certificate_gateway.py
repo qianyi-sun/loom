@@ -20,6 +20,39 @@ def module():
     return importlib.import_module("scripts.ops.nebius_certificate_gateway")
 
 
+@pytest.mark.parametrize("command", ["", "python3 -c pass", "loom-nebius-certificate-v1; id",
+                                      "loom-nebius-certificate-v1 extra"])
+def test_forced_entrypoint_rejects_other_commands_before_reading_input(command, monkeypatch):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", command)
+    monkeypatch.setattr(sys, "stdin", object())
+    assert module().authorized_main("a" * 64) == 126
+
+
+def test_forced_entrypoint_rejects_unapproved_bundle_before_preparation(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    content, root = bundle(tmp_path)
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-certificate-v1")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
+    assert module().authorized_main("a" * 64) == 126
+    assert not root.exists()
+
+
+def test_forced_entrypoint_accepts_only_the_exact_installed_bundle(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    content, _ = bundle(tmp_path)
+    report = {"status": "qualified", "installation_id": "024cfbfb-a7e8-4d85-9c60-c1d838730f9a",
+              "fingerprint_sha256": "a" * 64, "generation": "b" * 64,
+              "expires_at": "2026-12-02T12:00:00+00:00",
+              "sans": ["*.dev.example.test", "management.example.test"]}
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-certificate-v1")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
+    monkeypatch.setattr(module(), "qualify_bundle", lambda payload: report if payload == content else None)
+    assert module().authorized_main(hashlib.sha256(content).hexdigest()) == 0
+    assert json.loads(capsys.readouterr().out) == report
+
+
 def bundle(tmp_path, *, extra=None, altered_hash=False):
     root = tmp_path / "nebius-certificates"
     config = {"state_dir": str(root / "state"), "schema": "loom.nebius-certificate-installation.v1"}

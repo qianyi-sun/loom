@@ -43,6 +43,7 @@ def test_transfer_preserves_host_verification_and_passes_only_data_stdin(monkeyp
         assert "StrictHostKeyChecking=yes" in args and "IdentitiesOnly=yes" in args
         assert "UserKnownHostsFile=/private/known_hosts" in args
         assert args[-2] == "codex@192.0.2.1"
+        assert args[-1] == "loom-nebius-certificate-v1"
         assert kwargs["input"] == b"tooling-only"
         assert b"tooling-only" not in args[-1].encode()
         return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b"")
@@ -89,6 +90,8 @@ def test_certificate_operation_is_protected_and_not_a_route_to_application_rollo
     assert "nebius_certificate_rollout.py" in commands
     assert "nebius_idle_rollout.py" not in commands
     assert "--only-group nebius-certificates" in commands
+    transport = next(step for step in job["steps"] if step.get("name") == "Qualify certificate on the private gateway")
+    assert transport["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_CERTIFICATE_SSH_KEY }}"
     artifact = next(step for step in job["steps"] if step.get("name") == "Preserve sanitized certificate evidence")
     assert artifact["with"]["path"].endswith("/certificate-result.json")
 
