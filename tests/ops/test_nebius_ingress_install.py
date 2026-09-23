@@ -103,6 +103,10 @@ def installation(inputs, platform_inputs, inventory, tmp_path):
         def probe_public(self, receipt):
             self.public_probe()
 
+        def probe_original_backend(self, origin):
+            actual = next(d for d in self.stage.resources.values() if d["kind"] == "Service")
+            assert actual["metadata"]["uid"] == origin["uid"]
+
     from tests.ops.test_nebius_certificates import NOW
 
     return {"api": API(), "certificate_config": cert, "state_dir": tmp_path / "ingress",
@@ -152,3 +156,30 @@ def test_interrupted_public_probe_can_resume_same_installation_without_repeating
     assert module().install_ingress(**args)["status"] == "complete"
     assert api.owner is None and api.writes == ["acquire", "service", "config", "release"]
     assert tls.creates == 1 and len(api.stage.creates) == 8
+
+
+def test_connected_recovery_needs_neither_new_controller_health_nor_tls_redelivery(installation):
+    args, tls, _inventory = installation
+    api = args["api"]
+    api.probe_ok = False
+    with pytest.raises(module().OperationError):
+        module().install_ingress(**args)
+    api.legacy_ok = False  # The new controller is unhealthy; original backend is not.
+    tls.secrets.clear()
+    result = module().rollback_ingress(api=api, state_dir=args["state_dir"])
+    assert result["status"] == "rolled_back" and api.owner is None
+    assert api.service["spec"]["selector"] == {"app": "loom-web"}
+    assert tls.creates == 1 and len(api.stage.creates) == 8
+    assert api.writes == ["acquire", "service", "restore_service", "release"]
+
+
+def test_missing_origin_ownership_journal_cannot_authorize_connected_recovery(installation):
+    args, _tls, _inventory = installation
+    api = args["api"]
+    api.probe_ok = False
+    with pytest.raises(module().OperationError):
+        module().install_ingress(**args)
+    (args["state_dir"] / "stage" / (api.binding.installation_id + ".json")).unlink()
+    with pytest.raises(module().OperationError):
+        module().rollback_ingress(api=api, state_dir=args["state_dir"])
+    assert api.owner is not None and api.writes == ["acquire", "service"]

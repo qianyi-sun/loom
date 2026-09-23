@@ -40,6 +40,14 @@ class CutoverAPI(Protocol):
         ...
 
 
+class RecoveryAPI(Protocol):
+    def read(self) -> tuple[dict[str, Any], dict[str, Any]]: ...
+    def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]: ...
+    def restore(self, before: dict[str, Any], after: dict[str, Any], owner: str) -> None: ...
+    def probe_original_backend(self) -> None: ...
+    def probe_original_public(self) -> None: ...
+
+
 class KubectlCutoverAPI(KubectlControllerAPI):
     """Fixed transport only; the orchestrator supplies readiness/public probes."""
 
@@ -74,7 +82,7 @@ class KubectlCutoverAPI(KubectlControllerAPI):
                     raise CutoverError("public configuration is not standalone")
                 wanted = {**environment, "shared_ingress_enabled": True}
                 value = after["data"]["environment.json"]
-                if json.loads(value) != wanted:
+                if json.dumps(json.loads(value), sort_keys=True) != json.dumps(wanted, sort_keys=True):
                     raise CutoverError("cutover may change only the ingress mode")
                 desired["data"]["environment.json"] = value
                 field = "/data/environment.json"
@@ -96,6 +104,64 @@ class KubectlCutoverAPI(KubectlControllerAPI):
             raise
         except Exception:
             raise CutoverError("cutover patch unavailable; reconcile before any further write") from None
+
+    def restore(self, before: dict[str, Any], after: dict[str, Any], owner: str) -> None:
+        """Single reverse CAS; the private rollback journal supplies original values."""
+        try:
+            kind = before["kind"]
+            if kind not in {"Service", "ConfigMap"}:
+                raise CutoverError("resource outside rollback authority")
+            name = "loom-web" if kind == "Service" else "loom-platform-config"
+            resource_key = "spec" if kind == "Service" else "data"
+            _identity(before, kind=kind, name=name, namespace=self.binding.namespace)
+            if (str(UUID(owner)) != owner or UUID(owner).int == 0
+                    or before["metadata"].get("annotations", {}).get(MARKER) != owner):
+                raise CutoverError("rollback resource is not owned by this cutover")
+            annotations = {k: v for k, v in before["metadata"]["annotations"].items() if k != MARKER}
+            restored_annotations = after["metadata"].get("annotations", {})
+            if {k: v for k, v in restored_annotations.items() if k != MARKER} != annotations:
+                raise CutoverError("rollback cannot change unrelated annotations")
+            desired = copy.deepcopy(before)
+            if "annotations" in after["metadata"]:
+                desired["metadata"]["annotations"] = restored_annotations
+            else:
+                desired["metadata"].pop("annotations")
+            if kind == "Service":
+                if (before["spec"]["type"] != "LoadBalancer"
+                        or before["spec"]["selector"] != {"app": "loom-shared-ingress"}):
+                    raise CutoverError("rollback selector is outside cutover state")
+                field, value = "/spec/selector", {"app": "loom-web"}
+                desired["spec"]["selector"] = value
+            else:
+                if json.loads(before["data"]["profile.json"])["candidate_sha"] != self.candidate:
+                    raise CutoverError("rollback candidate differs")
+                current = json.loads(before["data"]["environment.json"])
+                original = json.loads(after["data"]["environment.json"])
+                if current.get("shared_ingress_enabled") is not True or original.get("shared_ingress_enabled", False) is not False:
+                    raise CutoverError("rollback ingress flags are invalid")
+                current.pop("shared_ingress_enabled")
+                original.pop("shared_ingress_enabled", None)
+                if json.dumps(current, sort_keys=True) != json.dumps(original, sort_keys=True):
+                    raise CutoverError("rollback cannot change unrelated environment settings")
+                field, value = "/data/environment.json", after["data"]["environment.json"]
+                desired["data"]["environment.json"] = value
+            if after != desired:
+                raise CutoverError("rollback contains an unauthorized field change")
+            patch = [
+                {"op": "test", "path": "/metadata/uid", "value": before["metadata"]["uid"]},
+                {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
+                {"op": "test", "path": "/" + resource_key, "value": before[resource_key]},
+                {"op": "replace", "path": field, "value": value},
+                ({"op": "add", "path": "/metadata/annotations", "value": restored_annotations}
+                 if "annotations" in after["metadata"] else {"op": "remove", "path": "/metadata/annotations"}),
+            ]
+            self.verify_identity(self.binding)
+            self._run(["patch", kind, name, "-n", self.binding.namespace, "--type=json", "--patch-file=/dev/stdin", "-o", "name"],
+                      payload=json.dumps(patch).encode())
+        except CutoverError:
+            raise
+        except Exception:
+            raise CutoverError("rollback patch outcome unavailable; reconcile before further writes") from None
 
     def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]:
         allowed = {"acquire": {"acquired", "skipped_busy", "skipped_locked"},
@@ -269,3 +335,106 @@ def cutover(*, api: CutoverAPI, state_dir: Path, installation_id: str, candidate
         raise
     except Exception:
         raise CutoverError("ingress cutover incomplete; preserve private journal and rollout pause") from None
+
+
+def rollback(*, api: RecoveryAPI, state_dir: Path, installation_id: str, candidate: str,
+             namespace: str) -> dict[str, Any]:
+    """Explicitly restore an interrupted, still-owned cutover; retain ingress state.
+
+    Not a reversal of a completed deployment. An unresolved guard-release intent
+    cannot authorize recovery: that release might still arrive after a read.
+    Never erase an uncertain forward write or automatically retry a restore.
+    """
+    try:
+        identity = {"installation_id": installation_id, "candidate": candidate, "namespace": namespace}
+        with private_state._locked_state(state_dir):
+            path = state_dir / "cutover.json"
+            record = json.loads(private_state._private_read(path, limit=2 * 1024 * 1024))
+            if (record["binding"] != identity or str(UUID(record["owner"])) != record["owner"]
+                    or UUID(record["owner"]).int == 0):
+                raise CutoverError("rollback binding differs from paused operation")
+
+            def save(phase: str) -> None:
+                record["phase"] = phase
+                private_state._atomic_json(path, record)
+
+            def read_matches(service_key: str, config_key: str) -> tuple[dict[str, Any], dict[str, Any]]:
+                observed = api.read()
+                if (_stable(observed[0]) != _stable(record[service_key])
+                        or _stable(observed[1]) != _stable(record[config_key])):
+                    raise CutoverError("rollback cannot overwrite drift or an unresolved write")
+                return observed
+
+            def observe() -> str:
+                result = api.guard("observe", record["owner"], candidate)
+                if result.get("status") not in {"open", "held", "skipped_locked"}:
+                    raise CutoverError("rollback guard observation unavailable")
+                return str(result["status"])
+
+            def held() -> None:
+                if observe() != "held":
+                    raise CutoverError("rollback requires this operation's exact pause")
+
+            def restore(which: str, other: str) -> None:
+                held()
+                api.probe_original_backend()
+                keys = ("service_after", other) if which == "service" else (other, "config_after")
+                current = read_matches(*keys)[0 if which == "service" else 1]
+                desired = copy.deepcopy(record[which + "_before"])
+                desired["metadata"]["resourceVersion"] = current["metadata"]["resourceVersion"]
+                save("rollback_" + which + "_intent")
+                try:
+                    api.restore(current, desired, record["owner"])
+                except Exception:
+                    pass  # Only a matching readback can resolve this single write.
+
+            phase = record["phase"]
+            if phase == "rolled_back":
+                read_matches("service_before", "config_before")
+                api.probe_original_public()
+                return {"status": "rolled_back", **identity}
+            if phase in {"complete", "release_intent", "prepared", "skipped_busy", "skipped_locked"}:
+                raise CutoverError("operation has no unambiguous owned pause for rollback")
+            if phase != "rollback_release_intent":
+                held()
+            if phase in {"acquire_intent", "acquired"}:
+                read_matches("service_before", "config_before")
+                save("rollback_verify")
+            elif phase in {"selector_intent", "selector_switched"}:
+                read_matches("service_after", "config_before")
+                save("rollback_service_pending")
+            elif phase in {"config_intent", "configuration_switched"}:
+                read_matches("service_after", "config_after")
+                restore("config", "service_after")
+            if record["phase"] == "rollback_config_intent":
+                held()
+                read_matches("service_after", "config_before")
+                save("rollback_service_pending")
+            if record["phase"] == "rollback_service_pending":
+                restore("service", "config_before")
+            if record["phase"] == "rollback_service_intent":
+                held()
+                read_matches("service_before", "config_before")
+                save("rollback_verify")
+            if record["phase"] == "rollback_verify":
+                held()
+                read_matches("service_before", "config_before")
+                api.probe_original_public()
+                read_matches("service_before", "config_before")
+                save("rollback_release_intent")
+                try:
+                    api.guard("release", record["owner"], candidate)
+                except Exception:
+                    pass
+            if record["phase"] == "rollback_release_intent":
+                read_matches("service_before", "config_before")
+                if observe() != "open":
+                    raise CutoverError("rollback guard release unresolved; do not retry")
+                save("rolled_back")
+            if record["phase"] != "rolled_back":
+                raise CutoverError("unknown paused rollback phase")
+            return {"status": "rolled_back", **identity}
+    except CutoverError:
+        raise
+    except Exception:
+        raise CutoverError("ingress rollback incomplete; preserve journal and any owned pause") from None

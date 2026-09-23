@@ -78,6 +78,25 @@ class API:
         if not self.probe_ok:
             raise RuntimeError("private health detail")
 
+    def probe_original_backend(self):
+        pass
+
+    def probe_original_public(self):
+        assert self.service["spec"]["selector"] == {"app": "loom-web"}
+
+    def restore(self, before, after, owner):
+        assert self.owner == owner
+        field = "service" if before["kind"] == "Service" else "config"
+        assert getattr(self, field) == before
+        self.writes.append("restore_" + field)
+        if self.failure == "restore_" + field + "-before":
+            raise TimeoutError("private restore outcome unknown")
+        result = copy.deepcopy(after)
+        result["metadata"]["resourceVersion"] = str(int(before["metadata"]["resourceVersion"]) + 10)
+        setattr(self, field, result)
+        if self.failure == "restore_" + field + "-after":
+            raise TimeoutError("private restore outcome unknown")
+
 
 @pytest.fixture
 def args(tmp_path):
@@ -189,3 +208,81 @@ def test_old_installed_guard_without_observation_support_is_rejected_before_paus
     with pytest.raises(module().CutoverError):
         module().cutover(**args)
     assert api.writes == [] and api.owner is None
+
+
+@pytest.mark.parametrize("configuration_written", [False, True])
+def test_explicit_paused_rollback_restores_only_original_values_and_releases_after_legacy_proof(args, configuration_written):
+    api = args["api"]
+    original_service, original_config = api.read()
+    if configuration_written:
+        patch = api.patch
+        def stop_after_config(before, after):
+            patch(before, after)
+            if before["kind"] == "ConfigMap":
+                api.preflight_ok = False
+        api.patch = stop_after_config
+    else:
+        api.probe_ok = False
+    with pytest.raises(module().CutoverError):
+        module().cutover(**args)
+    assert api.owner is not None
+    # Recovery must not depend on the new ingress controller being healthy.
+    api.preflight_ok = False
+    result = module().rollback(**args)
+    assert result["status"] == "rolled_back" and api.owner is None
+    for actual, wanted in ((api.service, original_service), (api.config, original_config)):
+        wanted["metadata"]["resourceVersion"] = actual["metadata"]["resourceVersion"]
+        assert actual == wanted
+    expected = ["acquire", "service", *(["config", "restore_config"] if configuration_written else []), "restore_service", "release"]
+    assert api.writes == expected
+    assert module().rollback(**args) == result and api.writes == expected
+
+
+@pytest.mark.parametrize("failure", ["service-before", "config-before", "release-before"])
+def test_rollback_never_erases_an_unresolved_inflight_write_or_release(args, failure):
+    args["api"].failure = failure
+    with pytest.raises(module().CutoverError):
+        module().cutover(**args)
+    before = list(args["api"].writes)
+    with pytest.raises(module().CutoverError):
+        module().rollback(**args)
+    assert args["api"].writes == before
+
+
+@pytest.mark.parametrize("drift", ["owner", "allocation", "configuration", "marker"])
+def test_rollback_cannot_overwrite_foreign_changes(args, drift):
+    api = args["api"]
+    api.probe_ok = False
+    with pytest.raises(module().CutoverError):
+        module().cutover(**args)
+    if drift == "owner":
+        api.owner = "foreign"
+    elif drift == "allocation":
+        api.service["status"]["loadBalancer"]["ingress"][0]["ip"] = "192.0.2.14"
+    elif drift == "configuration":
+        api.config["data"]["keyring.json"] = "foreign-config"
+    else:
+        api.service["metadata"]["annotations"] = {}
+    before = list(api.writes)
+    with pytest.raises(module().CutoverError):
+        module().rollback(**args)
+    assert api.writes == before
+
+
+@pytest.mark.parametrize("when", ["before", "after"])
+def test_unknown_restore_is_reconciled_by_readback_and_never_reissued(args, when):
+    api = args["api"]
+    api.probe_ok = False
+    with pytest.raises(module().CutoverError):
+        module().cutover(**args)
+    api.failure = "restore_service-" + when
+    if when == "after":
+        assert module().rollback(**args)["status"] == "rolled_back"
+    else:
+        with pytest.raises(module().CutoverError):
+            module().rollback(**args)
+        api.failure = None
+        with pytest.raises(module().CutoverError):
+            module().rollback(**args)
+        assert api.owner is not None and "release" not in api.writes
+    assert api.writes.count("restore_service") == 1

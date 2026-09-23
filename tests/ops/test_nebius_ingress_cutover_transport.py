@@ -125,3 +125,61 @@ def test_transport_never_retries_a_lost_patch_response(transport):
     with pytest.raises(module().CutoverError):
         transport.patch(before, after)  # Empty response fixture simulates lost transport.
     assert sum(args[0] == "patch" for args, _payload in transport.calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["Service", "ConfigMap"])
+def test_restore_is_conditioned_on_owned_marker_and_restores_only_recorded_routing_field(transport, kind):
+    fixture = API()
+    original = fixture.service if kind == "Service" else fixture.config
+    current = copy.deepcopy(original)
+    owner = str(uuid4())
+    current["metadata"]["annotations"] = {module().MARKER: owner}
+    if kind == "Service":
+        current["spec"]["selector"] = {"app": "loom-shared-ingress"}
+    else:
+        current["data"]["environment.json"] = json.dumps({"shared_ingress_enabled": True, "keep": "unchanged"})
+    transport.responses = [b"patched"]
+    transport.restore(current, original, owner)
+    patches = [json.loads(payload) for args, payload in transport.calls if args[0] == "patch"]
+    assert len(patches) == 1
+    assert patches[0][:2] == [
+        {"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]},
+        {"op": "test", "path": "/metadata/resourceVersion", "value": current["metadata"]["resourceVersion"]},
+    ]
+    assert {"op": "remove", "path": "/metadata/annotations"} in patches[0]
+    assert {"op": "replace", "path": "/spec/selector" if kind == "Service" else "/data/environment.json",
+            "value": {"app": "loom-web"} if kind == "Service" else original["data"]["environment.json"]} in patches[0]
+
+
+@pytest.mark.parametrize("drift", ["owner", "allocation", "config", "numeric-flag"])
+def test_restore_cannot_modify_extra_fields_or_foreign_ownership(transport, drift):
+    fixture = API()
+    original = fixture.config if drift in {"config", "numeric-flag"} else fixture.service
+    current = copy.deepcopy(original)
+    owner = str(uuid4())
+    current["metadata"]["annotations"] = {module().MARKER: owner}
+    if current["kind"] == "Service":
+        current["spec"]["selector"] = {"app": "loom-shared-ingress"}
+    else:
+        current["data"]["environment.json"] = json.dumps({"shared_ingress_enabled": True, "keep": "unchanged"})
+    if drift == "owner":
+        current["metadata"]["annotations"][module().MARKER] = str(uuid4())
+    elif drift == "allocation":
+        original["spec"]["clusterIP"] = "10.0.0.40"
+    elif drift == "config":
+        original["data"]["keyring.json"] = "foreign"
+    else:
+        original["data"]["environment.json"] = '{"shared_ingress_enabled":0,"keep":"unchanged"}'
+    with pytest.raises(module().CutoverError):
+        transport.restore(current, original, owner)
+    assert not transport.calls
+
+
+def test_forward_transport_does_not_confuse_json_number_with_boolean(transport):
+    before = API().config
+    after = copy.deepcopy(before)
+    after["metadata"]["annotations"] = {module().MARKER: str(uuid4())}
+    after["data"]["environment.json"] = '{"shared_ingress_enabled":1,"keep":"unchanged"}'
+    with pytest.raises(module().CutoverError):
+        transport.patch(before, after)
+    assert not transport.calls

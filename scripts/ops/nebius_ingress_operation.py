@@ -7,7 +7,8 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ from uuid import UUID
 from cryptography import x509
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops import nebius_ingress_probe as probes
-from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI, cutover
+from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI, cutover, rollback
 from scripts.ops.nebius_ingress_cutover import _identity as resource_identity
 from scripts.ops.nebius_ingress_cutover import _stable as stable_resource
 from scripts.ops.nebius_ingress_gateway import (
@@ -30,6 +31,7 @@ from scripts.ops.nebius_ingress_gateway import (
 )
 from scripts.ops.nebius_ingress_image import DIGEST
 from scripts.ops.nebius_ingress_stage import KubectlStageAPI, StageAPI, stage_controller
+from scripts.ops.nebius_ingress_stage import _snapshot as staged_snapshot
 
 from loom.nebius_environment_contract import FoundationBinding
 from loom.nebius_shared_ingress import SharedIngressInstallation
@@ -53,6 +55,9 @@ class InstallationAPI(ControllerAPI, Protocol):
     def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]: ...
     def probe_legacy_pod(self, pod: dict[str, Any]) -> None: ...
     def probe_public(self, receipt: dict[str, Any]) -> None: ...
+    def restore(self, before: dict[str, Any], after: dict[str, Any], owner: str) -> None: ...
+    def probe_original_backend(self, origin: dict[str, Any]) -> None: ...
+    def probe_original_public(self) -> None: ...
 
 
 class _InstalledIngress:
@@ -98,6 +103,48 @@ class _InstalledIngress:
 
     def public_probe(self) -> None:
         self.api.probe_public(self.tls)
+
+
+class _RecoveryIngress:
+    def __init__(self, api: InstallationAPI, origin: dict[str, Any]):
+        self.api, self.origin = api, origin
+
+    def read(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        self.api.foundation()
+        return self.api.read()
+
+    def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]:
+        return self.api.guard(action, owner, candidate)
+
+    def restore(self, before: dict[str, Any], after: dict[str, Any], owner: str) -> None:
+        self.api.restore(before, after, owner)
+
+    def probe_original_backend(self) -> None:
+        self.api.probe_original_backend(self.origin)
+
+    def probe_original_public(self) -> None:
+        self.api.probe_original_public()
+
+
+def rollback_ingress(*, api: InstallationAPI, state_dir: Path) -> dict[str, Any]:
+    """Explicit paused recovery using retained original-route ownership evidence."""
+    try:
+        with private_state._locked_state(state_dir):
+            api.foundation()
+            record = json.loads(private_state._private_read(
+                state_dir / "stage" / (api.binding.installation_id + ".json"), limit=1024 * 1024,
+            ))
+            if record["status"] != "controller_staged" or record["binding"] != asdict(api.binding):
+                raise OperationError("original ingress staging identity is unavailable")
+            origin = record["resources"][f"Service:{api.binding.namespace}:loom-web-origin"]
+            if origin["status"] != "created" or not origin["uid"] or not origin["observed"]:
+                raise OperationError("retained legacy origin identity is unavailable")
+            return rollback(api=_RecoveryIngress(api, origin), state_dir=state_dir / "cutover",
+                            installation_id=api.binding.installation_id, candidate=api.candidate, namespace=api.binding.namespace)
+    except OperationError:
+        raise
+    except Exception:
+        raise OperationError("ingress recovery incomplete; preserve journals and any owned pause") from None
 
 
 def install_ingress(*, api: InstallationAPI, certificate_config: dict[str, Any], state_dir: Path,
@@ -171,31 +218,50 @@ class LiveIngressAPI(KubectlCutoverAPI):
                         or observed.get("deletionTimestamp") is not None):
                     raise OperationError("legacy probe Pod identity changed")
 
-            check_pod()
-            config = self.foundation().platform_config
-            process = subprocess.Popen(
-                [*self.prefix, "port-forward", "--address=127.0.0.1", "-n", self.binding.namespace,
-                 "pod/" + meta["name"], ":8443"],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                env={"PATH": os.defpath, "LANG": "C.UTF-8"},
-            )
-            try:
-                port = _forward_port(process)
-                probes.probe_legacy(address="127.0.0.1", port=port, hostname=config["public_host"], environment=config["environment"])
-                check_pod()
-                if process.poll() is not None:
-                    raise OperationError("private legacy forwarder exited during qualification")
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            self._forward_legacy("pod/" + meta["name"], 8443, check_pod)
         except OperationError:
             raise
         except Exception:
             raise OperationError("staged ingress legacy HTTPS proof failed") from None
+
+    def probe_original_backend(self, origin: dict[str, Any]) -> None:
+        try:
+            def check_origin() -> None:
+                self.verify_identity(self.binding)
+                current = self._get(["get", "service", "loom-web-origin", "-n", self.binding.namespace])
+                if (current is None or current["metadata"]["uid"] != origin["uid"]
+                        or staged_snapshot(current) != origin["observed"]):
+                    raise OperationError("original legacy origin differs from staged ownership")
+            self._forward_legacy("service/loom-web-origin", 443, check_origin)
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("original legacy backend proof failed") from None
+
+    def _forward_legacy(self, target: str, remote_port: int, check: Callable[[], None]) -> None:
+        check()
+        config = self.foundation().platform_config
+        process = subprocess.Popen(
+            [*self.prefix, "port-forward", "--address=127.0.0.1", "-n", self.binding.namespace, target, ":" + str(remote_port)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+        )
+        try:
+            port = _forward_port(process)
+            probes.probe_legacy(address="127.0.0.1", port=port, hostname=config["public_host"], environment=config["environment"])
+            check()
+            if process.poll() is not None:
+                raise OperationError("private legacy forwarder exited during qualification")
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    def probe_original_public(self) -> None:
+        self._probe_public(None)
 
     def read(self) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
@@ -234,6 +300,9 @@ class LiveIngressAPI(KubectlCutoverAPI):
             raise OperationError("live ingress capacity observation unavailable") from None
 
     def probe_public(self, receipt: dict[str, Any]) -> None:
+        self._probe_public(receipt)
+
+    def _probe_public(self, receipt: dict[str, Any] | None) -> None:
         try:
             before = self.read()
             config = self.foundation().platform_config
@@ -243,9 +312,12 @@ class LiveIngressAPI(KubectlCutoverAPI):
             addresses = service["status"]["loadBalancer"]["ingress"]
             if service["spec"]["type"] != "LoadBalancer" or len(ports) != 1 or not addresses:
                 raise OperationError("public HTTPS allocation unavailable")
+            if receipt is None and service["spec"]["selector"] != {"app": "loom-web"}:
+                raise OperationError("original public selector is not restored")
             for endpoint in addresses:
-                probes.probe_management(address=endpoint["ip"], port=443, hostname=self.binding.management_host,
-                                        fingerprint=receipt["fingerprint_sha256"])
+                if receipt is not None:
+                    probes.probe_management(address=endpoint["ip"], port=443, hostname=self.binding.management_host,
+                                            fingerprint=receipt["fingerprint_sha256"])
                 probes.probe_legacy(address=endpoint["ip"], port=443, hostname=config["public_host"], environment=config["environment"])
             if tuple(map(stable_resource, self.read())) != tuple(map(stable_resource, before)):
                 raise OperationError("public routing identity changed during HTTPS proof")
