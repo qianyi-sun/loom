@@ -27,6 +27,7 @@ def management_inputs(platform_inputs):
         "platform_budget": {"cpu_millis": 2000, "memory_mib": 6000,
                             "storage_mib": 30000, "ephemeral_storage_mib": 30000},
         "provider_runtime": {
+            "concurrency": 4, "poll_seconds": 5,
             "kubernetes": {"endpoint": config["kubernetes_api_server"],
                            "ca_file": "/var/run/loom-management-kubernetes/ca.crt",
                            "credentials_file": "/var/run/loom-management-kubernetes/credentials.json"},
@@ -205,3 +206,16 @@ def test_manager_cannot_be_installed_from_personal_or_retired_source(management_
     management_inputs[1]["source_ref"] = source
     with pytest.raises(ValueError, match="protected dev"):
         render(management_inputs)
+
+
+def test_management_material_is_fresh_and_does_not_include_worker_or_cloud_credentials():
+    from loom_service.environment_management.credentials import generate_management_material
+
+    first = generate_management_material(namespace="loom-nebius-management")
+    second = generate_management_material(namespace="loom-nebius-management")
+    assert set(first) == {"loom-platform-db", "loom-management-db-tls", "loom-platform-auth", "loom-admin-secret"}
+    assert set(first["loom-platform-db"]) == {"ca.crt", "postgres-password", "admin-url", "service-password", "service-url"}
+    assert set(first["loom-platform-auth"]) == {"secret-store-master-key"}
+    assert first["loom-platform-auth"] != second["loom-platform-auth"]
+    assert first["loom-admin-secret"] != second["loom-admin-secret"]
+    assert first["loom-platform-db"]["service-password"] != second["loom-platform-db"]["service-password"]
