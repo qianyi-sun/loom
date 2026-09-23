@@ -32,6 +32,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 def test_immutable_tls_delivery_replays_and_rotates_without_replacing_old_secret(tmp_path, monkeypatch):
     from kubernetes import client
 
+    working = tmp_path / "working"
+    working.mkdir(mode=0o700)
+    monkeypatch.chdir(working)
     container = _start_k3s(ephemeral_storage_floor="2Gi")
     try:
         _, core, _ = _load_client(container)
@@ -118,5 +121,7 @@ server.serve_forever()
         with pytest.raises(IngressError, match="unresolved"):
             deliver_tls(config, binding=binding, api=api, roots=new_roots, now=NOW)
         assert len(core.list_namespaced_secret(namespace).items) == 1
+        assert not (working / ".kube").exists()
+        assert (tmp_path / ".loom-ingress-kubectl-cache").stat().st_mode & 0o077 == 0
     finally:
         container.stop()

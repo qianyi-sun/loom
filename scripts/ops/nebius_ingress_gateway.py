@@ -71,9 +71,11 @@ class KubectlTLSAPI:
             raise IngressError("protected Kubernetes tooling paths required")
         try:
             certificates._private_read(kubeconfig, limit=512 * 1024)
+            cache = kubeconfig.parent / ".loom-ingress-kubectl-cache"
+            certificates._private_directory(cache)
         except Exception:
             raise IngressError("private Kubernetes configuration unavailable") from None
-        self.prefix = [str(executable), "--kubeconfig", str(kubeconfig), "--request-timeout=30s"]
+        self.prefix = [str(executable), "--kubeconfig", str(kubeconfig), "--request-timeout=30s", "--cache-dir", str(cache)]
         self.binding = binding
 
     def _run(self, arguments: list[str], *, payload: bytes | None = None) -> bytes:
