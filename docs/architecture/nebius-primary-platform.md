@@ -110,6 +110,43 @@ execution and lifecycle acceptance must still be qualified before enabling owner
 creation. A healthy management process is not evidence that personal environments
 or shared execution are operational.
 
+### Management deployment manifests
+
+`loom_service.environment_management.deployment.render_management` renders the
+always-on management stack using the existing platform database, migration and
+backup templates. Its protected input schema is
+`loom.nebius-management-deployment.v1`: a non-nil `installation_id`, independent
+`loom-nebius-management[-suffix]` namespace, `public_host`, explicit
+`postgres_storage_gi`, separate `backup_bucket`, and the full `installation`
+described below. The management host is outside the child DNS zone and cannot
+replace the existing standalone host. The installation UUID labels its objects;
+labels alone are not permission to adopt existing objects.
+
+Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
+backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,
+execution namespace, cloud resource, public LoadBalancer or Secret is emitted.
+`management-database` reuses the existing migration chain but creates only the
+ordinary `loom_service` database role, without collector/batch-runner tokens.
+The Service mounts its own database CA/admin/master-key material, a read-only
+publication credential, and separate Kubernetes/cloud provider credentials.
+Migration and backup Pods receive none of the provisioning/publication credentials;
+backup dump and upload containers retain their separate database/storage access.
+Management database keys are newly generated once, persisted privately and reused
+on retry; regenerating them is not a supported update/recovery operation.
+
+The returned `platform_envelope` includes database PVC, rollout/migration overhead
+and backup scratch equal to the management database size. It is fixed overhead,
+not part of the installation's child allowance or permission to resize a node.
+All management Pods remain on the dedicated platform node. NetworkPolicy admits
+public API traffic only from the configured shared ingress controller, and database
+traffic only from the management namespace. Shared ingress must enforce HTTPS;
+its certificate private key is never copied into a child namespace.
+
+The [render-only operator command](../runbooks/nebius-deployment.md#render-management-manifests)
+does not install the shared ingress, provision IAM/DNS/Secrets, verify a GitHub
+publication, or perform a live rollout. Those activation prerequisites and
+installed multi-owner acceptance remain separate from manifest generation.
+
 ### Managed provisioning requests
 
 `LOOM_SVC_ENVIRONMENT_MANAGEMENT_CONFIG_FILE` optionally enables the request

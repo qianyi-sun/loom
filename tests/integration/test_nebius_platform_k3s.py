@@ -12,6 +12,7 @@ import yaml
 
 from loom.nebius_platform_render import build_platform
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.unit.test_nebius_management_render import management_inputs  # noqa: F401
 from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
 
 pytestmark = pytest.mark.skipif(
@@ -20,13 +21,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("mode", ["standalone", "management"])
 def test_complete_platform_resources_and_pods_pass_server_admission(
-    request: pytest.FixtureRequest, tmp_path: Path
+    request: pytest.FixtureRequest, tmp_path: Path, mode: str,
 ) -> None:
-    config, candidate, profile = request.getfixturevalue("platform_inputs")
-    files = build_platform(
-        config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2]
-    )
+    if mode == "management":
+        from loom_service.environment_management.deployment import (
+            ManagementDeployment,
+            render_management,
+        )
+
+        config, candidate, profile = request.getfixturevalue("management_inputs")
+        files = render_management(ManagementDeployment.model_validate(config), candidate=candidate,
+                                  profile=profile, repo_root=Path(__file__).resolve().parents[2]).files
+    else:
+        config, candidate, profile = request.getfixturevalue("platform_inputs")
+        files = build_platform(
+            config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2]
+        )
     documents = [doc for batch in files.values() for doc in batch]
     container = _start_k3s()
     try:
@@ -92,8 +104,9 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
         assert result.exit_code == 0
         import json
 
+        namespaces = {doc["metadata"]["name"] for doc in documents if doc["kind"] == "Namespace"}
         assert not any(
-            row["metadata"]["namespace"] in {config["namespace"], config["execution_namespace"]}
+            row["metadata"]["namespace"] in namespaces
             for row in json.loads(result.output)["items"]
         )
     finally:
