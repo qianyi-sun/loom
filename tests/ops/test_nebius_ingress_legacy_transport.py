@@ -21,7 +21,8 @@ def test_legacy_forwarder_is_bound_to_current_resource_and_always_cleaned(live, 
     from scripts.ops.nebius_ingress_stage import _snapshot
 
     api, config = live
-    address, _state, paths, _fingerprint = endpoint
+    address, state, paths, _fingerprint = endpoint
+    state["version"]["buildRevision"] = api.candidate
     config["public_host"] = "legacy.example.test"
     api.config["data"]["environment.json"] = json.dumps(config)
     pod = {"metadata": {"namespace": api.binding.namespace, "name": "ingress-current", "uid": str(uuid4()),
@@ -67,7 +68,8 @@ def test_legacy_forwarder_is_bound_to_current_resource_and_always_cleaned(live, 
             api.probe_original_backend({"uid": pod["metadata"]["uid"], "observed": _snapshot(pod)})
     if drift is None:
         probe()
-        assert paths == [("/api/v1/health", "legacy.example.test"), ("/loom-frontend-config.json", "legacy.example.test")]
+        assert paths == [("/api/v1/health", "legacy.example.test"), ("/api/v1/version", "legacy.example.test"),
+                         ("/loom-frontend-config.json", "legacy.example.test")]
     else:
         with pytest.raises(OperationError):
             probe()

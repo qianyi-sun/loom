@@ -43,10 +43,10 @@ def probe_management(*, address: str, port: int, hostname: str, fingerprint: str
             raise ProbeError("public ingress serves a different certificate")
 
 
-def probe_legacy(*, address: str, port: int, hostname: str, environment: str) -> None:
-    if environment not in {"development", "staging", "production"}:
-        raise ProbeError("invalid expected legacy environment")
-    for path in ("/api/v1/health", "/loom-frontend-config.json"):
+def probe_legacy(*, address: str, port: int, hostname: str, environment: str, candidate: str) -> None:
+    if environment not in {"development", "staging", "production"} or not re.fullmatch(r"[0-9a-f]{40}", candidate):
+        raise ProbeError("invalid expected legacy identity")
+    for path in ("/api/v1/health", "/api/v1/version", "/loom-frontend-config.json"):
         with _connect(address, port, hostname) as stream:
             stream.sendall(f"GET {path} HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n".encode("ascii"))
             with http.client.HTTPResponse(stream) as response:
@@ -55,7 +55,9 @@ def probe_legacy(*, address: str, port: int, hostname: str, environment: str) ->
                 if response.status != 200 or len(payload) > 1024 * 1024:
                     raise ProbeError("legacy HTTPS response failed qualification")
                 value = json.loads(payload)
-                if not isinstance(value, dict) or (path.endswith("config.json") and (
-                    value.get("environment") != environment or value.get("apiRouteBase") != "https://" + hostname + "/api"
-                )):
-                    raise ProbeError("legacy HTTPS route points to a different environment")
+                if (not isinstance(value, dict)
+                        or (path.endswith("/health") and value.get("status") != "ok")
+                        or (path.endswith("/version") and value.get("buildRevision") != candidate)
+                        or (path.endswith("config.json") and (
+                            value.get("environment") != environment or value.get("apiRouteBase") != "https://" + hostname + "/api"))):
+                    raise ProbeError("legacy HTTPS health, candidate or environment differs")

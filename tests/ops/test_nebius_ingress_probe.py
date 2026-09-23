@@ -29,7 +29,8 @@ def endpoint(tmp_path, monkeypatch):
     private.chmod(0o600)
     client_context = ssl.create_default_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode())
     monkeypatch.setattr(ssl, "create_default_context", lambda: client_context)
-    state = {"status": 200, "environment": "development", "apiRouteBase": "https://legacy.example.test/api"}
+    state = {"status": 200, "environment": "development", "apiRouteBase": "https://legacy.example.test/api",
+             "health": {"status": "ok"}, "version": {"buildRevision": "a" * 40, "buildTime": None}}
     paths = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -42,7 +43,8 @@ def endpoint(tmp_path, monkeypatch):
 
         def do_GET(self):
             paths.append((self.path, self.headers["Host"]))
-            payload = json.dumps({"status": "ok"} if self.path == "/api/v1/health" else state).encode()
+            payload = json.dumps(state["health"] if self.path == "/api/v1/health" else
+                                 state["version"] if self.path == "/api/v1/version" else state).encode()
             self.send_response(state["status"])
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
@@ -74,10 +76,20 @@ def test_public_management_tls_requires_delivered_fingerprint(endpoint):
         module().probe_management(**address, hostname="management.example.test", fingerprint="0" * 64)
 
 
-def test_legacy_probe_uses_literal_address_and_original_host_for_both_routes(endpoint):
+def test_legacy_probe_binds_health_revision_and_environment_to_original_host(endpoint):
     address, _state, paths, _fingerprint = endpoint
-    module().probe_legacy(**address, hostname="legacy.example.test", environment="development")
-    assert paths == [("/api/v1/health", "legacy.example.test"), ("/loom-frontend-config.json", "legacy.example.test")]
+    module().probe_legacy(**address, hostname="legacy.example.test", environment="development", candidate="a" * 40)
+    assert paths == [("/api/v1/health", "legacy.example.test"), ("/api/v1/version", "legacy.example.test"),
+                     ("/loom-frontend-config.json", "legacy.example.test")]
+
+
+@pytest.mark.parametrize("key,value", [("health", {}), ("health", {"status": "unhealthy"}),
+    ("version", {"buildRevision": "b" * 40}), ("version", {"buildRevision": None}), ("version", {})])
+def test_legacy_probe_rejects_invalid_health_and_wrong_running_candidate(endpoint, key, value):
+    address, state, _paths, _fingerprint = endpoint
+    state[key] = value
+    with pytest.raises(module().ProbeError):
+        module().probe_legacy(**address, hostname="legacy.example.test", environment="development", candidate="a" * 40)
 
 
 @pytest.mark.parametrize("hostname", ["foreign.example.test", "legacy.example.test\r\nInjected: true"])
@@ -93,7 +105,7 @@ def test_legacy_probe_rejects_redirect_error_or_wrong_environment(endpoint, key,
     address, state, _paths, _fingerprint = endpoint
     state[key] = value
     with pytest.raises(module().ProbeError):
-        module().probe_legacy(**address, hostname="legacy.example.test", environment="development")
+        module().probe_legacy(**address, hostname="legacy.example.test", environment="development", candidate="a" * 40)
 
 
 def test_public_probe_cannot_replace_the_pinned_address_with_dns(endpoint):

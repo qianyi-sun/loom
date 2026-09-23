@@ -40,8 +40,10 @@ def live(tmp_path, platform_inputs, inventory):
             self.namespace_uid = tls.namespace_uid
             self.service = routing.API().service
             self.service["metadata"]["namespace"] = tls.namespace
-            self.node_list = {"apiVersion": "v1", "kind": "NodeList", "items": inventory["nodes"]}
-            self.pod_list = {"apiVersion": "v1", "kind": "PodList", "items": inventory["pods"]}
+            self.node_list = {"apiVersion": "v1", "kind": "List", "items": [
+                {"apiVersion": "v1", "kind": "Node", **row} for row in inventory["nodes"]]}
+            self.pod_list = {"apiVersion": "v1", "kind": "List", "items": [
+                {"apiVersion": "v1", "kind": "Pod", **row} for row in inventory["pods"]]}
             self.calls = []
 
         def _run(self, arguments, *, payload=None):
@@ -128,6 +130,21 @@ def test_live_snapshot_and_capacity_read_full_bound_resources(live):
         api.capacity()
 
 
+@pytest.mark.parametrize("drift", ["wrong-kind", "wrong-api", "missing-kind", "wrong-list"])
+def test_live_inventory_rejects_mixed_or_untyped_resources(live, drift):
+    api, _ = live
+    if drift == "wrong-kind":
+        api.node_list["items"][0]["kind"] = "Pod"
+    elif drift == "wrong-api":
+        api.pod_list["items"][0]["apiVersion"] = "foreign/v1"
+    elif drift == "missing-kind":
+        del api.pod_list["items"][0]["kind"]
+    else:
+        api.node_list["kind"] = "PodList"
+    with pytest.raises(module().OperationError):
+        api.capacity()
+
+
 @pytest.mark.parametrize("drift", ["namespace", "deleting", "candidate", "partial-nodes", "partial-pods"])
 def test_live_snapshot_denies_identity_drift_and_partial_inventory(live, drift):
     api, _ = live
@@ -156,7 +173,7 @@ def test_public_probes_use_preserved_service_addresses_and_detect_drift(live, mo
     api.probe_public({"fingerprint_sha256": "a" * 64})
     assert endpoints == [
         {"address": "192.0.2.12", "port": 443, "hostname": "management.example.test", "fingerprint": "a" * 64},
-        {"address": "192.0.2.12", "port": 443, "hostname": "nebius.yylx.world", "environment": "development"},
+        {"address": "192.0.2.12", "port": 443, "hostname": "nebius.yylx.world", "environment": "development", "candidate": api.candidate},
     ]
     def changed(**kwargs):
         api.service["metadata"]["uid"] = str(uuid4())

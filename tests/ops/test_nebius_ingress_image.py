@@ -66,6 +66,19 @@ def test_copy_returns_only_digest_bound_evidence_and_replay_rechecks_without_wri
     assert (options["state_dir"] / "image-mirror.json").stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.parametrize("exists", [True, False])
+def test_new_runner_without_copy_grant_can_only_read_destination(mirror, exists):
+    module, data, options, _ = mirror
+    if exists:
+        data["destination"] = data["source"]
+        assert module.mirror_ingress_image(**options, allow_copy=False)["status"] == "mirrored"
+    else:
+        with pytest.raises(module.ImageError):
+            module.mirror_ingress_image(**options, allow_copy=False)
+    assert data["commands"] and all(command[1] == "inspect" for command in data["commands"])
+    assert all("docker.io/library/traefik" not in command[-1] for command in data["commands"])
+
+
 @pytest.mark.parametrize("failure", ["before", "after"])
 def test_unknown_copy_outcome_requires_exact_readback_never_a_second_copy(mirror, failure):
     module, data, options, _ = mirror

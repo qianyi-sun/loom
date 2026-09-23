@@ -248,7 +248,8 @@ class LiveIngressAPI(KubectlCutoverAPI):
         )
         try:
             port = _forward_port(process)
-            probes.probe_legacy(address="127.0.0.1", port=port, hostname=config["public_host"], environment=config["environment"])
+            probes.probe_legacy(address="127.0.0.1", port=port, hostname=config["public_host"],
+                                environment=config["environment"], candidate=self.candidate)
             check()
             if process.poll() is not None:
                 raise OperationError("private legacy forwarder exited during qualification")
@@ -284,11 +285,12 @@ class LiveIngressAPI(KubectlCutoverAPI):
         try:
             self.verify_identity(self.binding)
             rows = []
-            for kind, arguments in (("NodeList", ["get", "nodes"]), ("PodList", ["get", "pods", "--all-namespaces"])):
+            for kind, arguments in (("Node", ["get", "nodes"]), ("Pod", ["get", "pods", "--all-namespaces"])):
                 listing = self._get(arguments)
-                if (listing is None or listing.get("kind") != kind or listing.get("apiVersion") != "v1"
+                if (listing is None or listing.get("kind") not in {"List", kind + "List"} or listing.get("apiVersion") != "v1"
                         or listing.get("metadata", {}).get("continue") or not isinstance(listing.get("items"), list)
-                        or any(not isinstance(item, dict) for item in listing["items"])):
+                        or any(not isinstance(item, dict) or item.get("kind") != kind or item.get("apiVersion") != "v1"
+                               for item in listing["items"])):
                     raise OperationError("complete live capacity inventory required")
                 rows.append(listing["items"])
             result = qualify_capacity(nodes=rows[0], pods=rows[1])
@@ -318,7 +320,8 @@ class LiveIngressAPI(KubectlCutoverAPI):
                 if receipt is not None:
                     probes.probe_management(address=endpoint["ip"], port=443, hostname=self.binding.management_host,
                                             fingerprint=receipt["fingerprint_sha256"])
-                probes.probe_legacy(address=endpoint["ip"], port=443, hostname=config["public_host"], environment=config["environment"])
+                probes.probe_legacy(address=endpoint["ip"], port=443, hostname=config["public_host"],
+                                    environment=config["environment"], candidate=self.candidate)
             if tuple(map(stable_resource, self.read())) != tuple(map(stable_resource, before)):
                 raise OperationError("public routing identity changed during HTTPS proof")
         except OperationError:
