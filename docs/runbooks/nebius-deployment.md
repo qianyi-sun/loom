@@ -108,8 +108,9 @@ Preserve the original selector and protected configuration as rollback evidence.
 The selector change and persisted flag must share the rollout concurrency boundary;
 ordinary rollout rechecks the selected mode after acquiring its guard, before any
 backup or resource mutation. Never remove `loom-web-tls`
-or replace the LoadBalancer to perform this migration. No protected shared-ingress
-install operation is supplied yet; do not use an ad-hoc `kubectl` cutover.
+or replace the LoadBalancer to perform this migration. Use the protected
+`operation=ingress` installation described below, never an ad-hoc `kubectl`
+cutover.
 
 The renderer uses Traefik 3.7.13 features and receives trusted read-only Secret
 discovery across the cluster. Budget 200m CPU, 256 MiB memory and 128 MiB ephemeral

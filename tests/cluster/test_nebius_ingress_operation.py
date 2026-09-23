@@ -112,16 +112,6 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
                     "--no-emit-workspace", "--format", "requirements-txt", "--no-header", "--quiet",
                     "--output-file", str(tools / "requirements.txt")], cwd=ROOT, check=True, timeout=60)
     shutil.copy2(uv, tools / "uv")
-    archives = []
-    for index, image in enumerate((TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON)):
-        # Reuse exact local digests; repeated disposable nodes must not fetch
-        # the same fixture images from the public registry on every run.
-        available = subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=15)
-        if available.returncode:
-            subprocess.run(["docker", "pull", image], check=True, capture_output=True, timeout=180)
-        archive = tmp_path / ("image-" + str(index) + ".tar")
-        subprocess.run(["docker", "save", "-o", str(archive), image], check=True, capture_output=True, timeout=120)
-        archives.append((image, archive))
     container = _start_k3s(node_name=node_name, ephemeral_storage_floor="2Gi")
     try:
         from kubernetes import client
@@ -134,10 +124,17 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
         _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
         _run(container, "mkdir", "-p", "/tmp/loom-ingress-qualification")
         subprocess.run(["docker", "cp", str(tools) + "/.", ident + ":/tmp/loom-ingress-qualification/"], check=True, timeout=60)
-        for image, archive in archives:
-            remote = "/tmp/" + archive.name
-            subprocess.run(["docker", "cp", str(archive), ident + ":" + remote], check=True, capture_output=True, timeout=60)
-            _run(container, "ctr", "images", "import", "--digests", "--base-name", image.split("@", 1)[0], remote)
+        for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON):
+            # Classic Docker save archives omit the registry manifest. Import
+            # reconstructs different bytes/digests, so they cannot supply pinned
+            # Pod images. Pull the original manifest directly from the official
+            # public mirror, then alias only its repository name (no credentials).
+            mirror = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+            _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", mirror, timeout=180)
+            rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
+            assert any(row[0] == mirror and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
+            if mirror != image:
+                _run(container, "ctr", "images", "tag", mirror, image)
         image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
