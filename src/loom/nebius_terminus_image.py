@@ -57,6 +57,10 @@ def _unwrap_installer_guards(lines: list[str]) -> list[str]:
     Nested branches, task setup, and conditional installation of other packages
     cannot be made unconditional by image preparation.
     """
+    if any("<<" in line for line in lines if not line.lstrip().startswith("#")):
+        # This recognizer cannot distinguish shell commands from heredoc data.
+        # Fail closed before inspecting any apparent installer in that data.
+        raise ValueError("nebius-terminus: verifier heredoc syntax requires explicit adaptation")
     output: list[str] = []
     position = 0
     while position < len(lines):

@@ -329,7 +329,9 @@ must contain the complete pinned uv installation and activation. Task commands,
 nested branches, or other conditional packages inside that guard require
 explicit adaptation. A removed guard leaves a shell no-op to preserve any
 enclosing branch or function. The converter does not evaluate arbitrary shell
-control flow. Recognized fixed-commit Git dependencies and explicit verifier asset downloads are prepared
+control flow. Verifier scripts containing `<<` outside comment lines require
+explicit adaptation, so heredoc payloads cannot be mistaken for installers.
+Recognized fixed-commit Git dependencies and explicit verifier asset downloads are prepared
 at image build time. Assets are copied into the verifier workspace at the
 original script location; test assertions and reward branches are unchanged.
 If the original script emits a valid reward and then exits nonzero, the wrapper
