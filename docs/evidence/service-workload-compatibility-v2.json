@@ -4,18 +4,18 @@
   ],
   "execution_class_id": "linux-amd64-cpu-pod-v1",
   "schema_version": "loom.service-workload-compatibility-report.v2",
-  "source_sha256": "5a8cd7ab9673eba57eeab894ac3ec183f833f388f7355a525e92562b79185e73",
+  "source_sha256": "c7fa3b1a718bc8eac227f894b4ca5bb3493c66bab7fbffb5a3fafa7baefc37ee",
   "summary": {
     "pools": {
       "nebius-cpu": {
         "conversion_required": 66,
         "runtime_admission_required": 0,
         "supported": 0,
-        "total": 69,
-        "unsupported": 3
+        "total": 75,
+        "unsupported": 9
       }
     },
-    "total_workloads": 69
+    "total_workloads": 75
   },
   "workload_policy_pool_id": "nebius-cpu",
   "workloads": [
@@ -1207,6 +1207,102 @@
         }
       ],
       "workload_id": "user-taskset-bundle"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "No qualified service class provides an isolated trial-owned Docker daemon and build cache.",
+          "required_actions": [
+            "qualify daemon, nested build, resource limits and teardown in a separately isolated runtime",
+            "never mount a trusted host Docker socket"
+          ]
+        }
+      ],
+      "workload_id": "capability:nested_docker"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "Singularity bootstrap, image mounts and loop-device semantics are unqualified.",
+          "required_actions": [
+            "qualify the declared Singularity version and image format in an isolated runtime",
+            "preserve image size, egress, artifact transfer and cleanup requirements"
+          ]
+        }
+      ],
+      "workload_id": "capability:singularity_mounts"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "The shared-kernel CPU class cannot isolate task-specific kernel settings.",
+          "required_actions": [
+            "qualify isolated kernel configuration and restoration",
+            "never change shared-host kernel settings for a task"
+          ]
+        }
+      ],
+      "workload_id": "capability:isolated_kernel_settings"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "External cluster endpoint, managed authentication and trial-owned lifecycle are unqualified.",
+          "required_actions": [
+            "bind managed endpoint and secret prerequisites",
+            "qualify cluster API behavior, egress, ownership and cleanup; review local fixtures separately"
+          ]
+        }
+      ],
+      "workload_id": "capability:external_cluster"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "Physical or emulated smartcard authentication and socket forwarding are unqualified.",
+          "required_actions": [
+            "declare the actual fixture or device and managed authentication prerequisites",
+            "qualify authentication and forwarding without passwordless bypass"
+          ]
+        }
+      ],
+      "workload_id": "capability:pkcs11_authentication"
+    },
+    {
+      "kind": "dynamic_service_workload",
+      "pool_dispositions": [
+        {
+          "disposition": "unsupported",
+          "logical_pool_id": "nebius-cpu",
+          "owner": "qianyi-sun",
+          "reason": "DPDK traffic generation, owned devices, hugepages and driver binding are unqualified.",
+          "required_actions": [
+            "qualify a dedicated isolated device and traffic runtime with cleanup",
+            "distinguish full traffic generation from tasks whose original verifier accepts captured initialization failure"
+          ]
+        }
+      ],
+      "workload_id": "capability:dpdk_networking"
     },
     {
       "kind": "dynamic_service_workload",

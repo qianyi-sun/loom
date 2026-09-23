@@ -10,7 +10,9 @@ and verifier/runtime use.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -22,13 +24,7 @@ DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT = "environment"
 _HARBOR_VERIFIER_ARTIFACT_GLOB = "logs/verifier/**"
 _HARBOR_ENV_MODES = frozenset({"shared", "separate"})
 
-_UNSUPPORTED_ENVIRONMENT_FIELDS: frozenset[str] = frozenset(
-    {
-        "cpus",
-        "memory",
-        "storage",
-    }
-)
+_RESOURCE_SIZE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([MGT])(?:I?B)?", re.IGNORECASE)
 
 
 def is_terminal_bench_shape(raw: dict[str, Any]) -> bool:
@@ -44,17 +40,25 @@ def is_terminal_bench_shape(raw: dict[str, Any]) -> bool:
 
 def _is_harbor_native_task(raw: dict[str, Any]) -> bool:
     task = raw.get("task")
-    if not isinstance(task, dict) or "id" in task:
+    if not isinstance(task, dict):
+        return False
+    if "id" in task and not (
+        isinstance(raw.get("metadata"), dict)
+        and (raw.get("version") == "1.0" or raw.get("schema_version") == "1.1")
+    ):
         return False
     name = task.get("name")
     return isinstance(name, str) and bool(name)
 
 
-def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
+def normalize_terminal_bench_task_toml(
+    raw: dict[str, Any], *, task_id: str | None = None,
+) -> dict[str, Any]:
     """Return a Loom-TaskConfig-shaped dict derived from a TB-shaped source.
 
     Idempotent for already-Loom-shaped inputs; the input object is never
-    mutated.
+    mutated. ``task_id`` supplies deterministic intake identity only when the
+    Harbor source omits one; it never replaces authored task identity.
     """
     payload = deepcopy(raw)
     if not is_terminal_bench_shape(payload):
@@ -65,15 +69,17 @@ def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
 
     metadata = payload.pop("metadata")
     payload.pop("version", None)
-    payload.setdefault("schema_version", "1")
+    payload["schema_version"] = "1"
 
     task_section: dict[str, Any] = {}
     if "id" in metadata:
         task_section["id"] = metadata["id"]
+    elif task_id:
+        task_section["id"] = task_id
     if "name" in metadata:
         task_section["name"] = metadata["name"]
-    elif "id" in metadata:
-        task_section["name"] = metadata["id"]
+    elif "id" in task_section:
+        task_section["name"] = task_section["id"]
     if "description" in metadata:
         task_section["description"] = metadata["description"]
     tags = metadata.get("tags")
@@ -83,11 +89,17 @@ def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
 
     environment = payload.get("environment")
     if isinstance(environment, dict):
-        for field in _UNSUPPORTED_ENVIRONMENT_FIELDS:
-            environment.pop(field, None)
         environment.setdefault("os", "linux")
     else:
-        payload["environment"] = {"os": "linux"}
+        environment = {"os": "linux"}
+        payload["environment"] = environment
+    _normalize_resource_sizes(environment)
+    environment.setdefault("workdir", "/app")
+    if "dockerfile" not in environment and "docker_image" not in environment:
+        environment["dockerfile"] = DEFAULT_HARBOR_DOCKERFILE
+        environment.setdefault("docker_build_context", DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT)
+    if "allow_internet" in environment:
+        _normalize_internet_declaration(environment, environment.pop("allow_internet"))
 
     agent = payload.get("agent")
     if not isinstance(agent, dict):
@@ -118,6 +130,33 @@ def normalize_terminal_bench_task_toml(raw: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _normalize_resource_sizes(environment: dict[str, Any]) -> None:
+    """Harbor legacy G/M quantities use the same binary units as *_mb fields."""
+    for field in ("memory", "storage"):
+        if field not in environment:
+            continue
+        value = environment[field]
+        match = _RESOURCE_SIZE.fullmatch(value.strip()) if isinstance(value, str) else None
+        if match is None:
+            raise ValueError(f"environment.{field} requires a positive M/G/T size (for example '2G')")
+        amount = Decimal(match.group(1)) * {"M": 1, "G": 1024, "T": 1024 ** 2}[match.group(2).upper()]
+        if amount <= 0 or amount != amount.to_integral_value():
+            raise ValueError(f"environment.{field} must resolve to a positive whole number of MiB")
+        target = f"{field}_mb"
+        if target in environment and environment[target] != int(amount):
+            raise ValueError(f"environment.{field} conflicts with environment.{target}")
+        environment[target] = int(amount)
+        del environment[field]
+
+
+def _normalize_internet_declaration(environment: dict[str, Any], value: Any) -> None:
+    if value is False:
+        environment["network_policies_supported"] = ["no-network"]
+        environment["baseline_network_policy"] = {"kind": "no-network"}
+    elif value is not True and value is not None:
+        raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+
+
 def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
     """Project a Harbor-native Terminal-Bench task into Loom's runnable schema.
 
@@ -132,7 +171,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
     if not isinstance(source_name, str) or not source_name:
         return payload
 
-    task: dict[str, Any] = {"id": source_name, "name": source_name}
+    task: dict[str, Any] = {"id": source_task.get("id", source_name), "name": source_name}
     description = source_task.get("description")
     if isinstance(description, str):
         task["description"] = description
@@ -148,6 +187,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
 
     source_environment = payload.get("environment")
     source_environment = source_environment if isinstance(source_environment, dict) else {}
+    _normalize_resource_sizes(source_environment)
     environment: dict[str, Any] = {
         "os": source_environment.get("os", "linux"),
         # Harbor-native images and the verifier bridge use /app. Without this
@@ -166,6 +206,9 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
         "tmpfs",
         "healthcheck",
         "workdir",
+        "mutable_paths",
+        "service_lifecycle",
+        "execution_requirements",
         "user",
         "network_policies_supported",
         "baseline_network_policy",
@@ -197,11 +240,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
     if isinstance(source_env, dict):
         environment["environment"] = {str(key): str(value) for key, value in source_env.items()}
     allow_internet = source_environment.get("allow_internet")
-    if allow_internet is False:
-        environment["network_policies_supported"] = ["no-network"]
-        environment["baseline_network_policy"] = {"kind": "no-network"}
-    elif allow_internet not in {None, True}:
-        raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+    _normalize_internet_declaration(environment, allow_internet)
     gpus = source_environment.get("gpus")
     if isinstance(gpus, int) and gpus > 0 and "gpu_vendor" not in environment:
         environment["gpu_vendor"] = "nvidia"
@@ -217,6 +256,7 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
         "user",
         "extra_mcp_servers",
         "skills",
+        "continue_until_timeout",
     ):
         if field in source_agent:
             agent[field] = deepcopy(source_agent[field])

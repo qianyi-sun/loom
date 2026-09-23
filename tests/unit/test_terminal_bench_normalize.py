@@ -264,10 +264,12 @@ class TestNormalizeMapping:
         assert "version" not in normalized
         assert normalized["schema_version"] == "1"
 
-    def test_drops_unsupported_environment_resource_fields(self) -> None:
+    def test_maps_harbor_resource_units_without_dropping_cpu_request(self) -> None:
         normalized = normalize_terminal_bench_task_toml(_tb_raw())
         env = normalized["environment"]
-        assert "cpus" not in env
+        assert env["cpus"] == 2
+        assert env["memory_mb"] == 4096
+        assert env["storage_mb"] == 10240
         assert "memory" not in env
         assert "storage" not in env
         assert env["dockerfile"] == "Dockerfile"
@@ -345,3 +347,93 @@ class TestErrorPaths:
         normalized = normalize_terminal_bench_task_toml(raw)
         with pytest.raises(ValidationError):
             TaskConfig.model_validate(normalized)
+
+
+@pytest.mark.parametrize("resources", [
+    {"cpus": 1, "memory": "2G", "storage": "6G", "memory_mb": 2048, "storage_mb": 6144},
+    {"cpus": 1, "memory": "2GiB", "storage": "6144M"},
+])
+def test_anonymous_harbor_bundle_uses_context_identity_and_preserves_resources(resources) -> None:
+    raw = {
+        "version": "1.0", "metadata": {"difficulty": "medium", "tags": ["shell"]},
+        "environment": {"build_timeout_sec": 120, **resources},
+        "agent": {"timeout_sec": 600}, "verifier": {"timeout_sec": 300},
+    }
+    original = repr(raw)
+
+    normalized = normalize_terminal_bench_task_toml(raw, task_id="slice/alpha")
+    task = TaskConfig.model_validate(normalized)
+
+    assert task.task.id == task.task.name == "slice/alpha"
+    assert task.environment.dockerfile.as_posix() == "environment/Dockerfile"
+    assert task.environment.docker_build_context.as_posix() == "environment"
+    assert task.environment.workdir.as_posix() == "/app"
+    assert task.environment.cpus == 1
+    assert task.environment.memory_mb == 2048
+    assert task.environment.storage_mb == 6144
+    assert task.environment.build_timeout_sec == 120
+    assert task.agent.timeout_sec == 600
+    assert task.verifier.timeout_sec == 300
+    assert repr(raw) == original
+    assert normalize_terminal_bench_task_toml(normalized, task_id="other") == normalized
+
+
+def test_context_identity_does_not_replace_an_authored_identity() -> None:
+    task = TaskConfig.model_validate(normalize_terminal_bench_task_toml(_tb_raw(), task_id="import/context"))
+    assert task.task.id == "src-useful/task-1"
+    assert task.task.name == "Task One"
+
+
+@pytest.mark.parametrize("environment", [
+    {"memory": "2G", "memory_mb": 1024},
+    {"storage": "5G", "storage_mb": 6000},
+    {"memory": "plenty"}, {"memory": "0G"}, {"storage": "-1G"},
+])
+def test_ambiguous_or_conflicting_harbor_resources_are_rejected(environment) -> None:
+    with pytest.raises(ValueError, match=r"memory|storage"):
+        normalize_terminal_bench_task_toml(_tb_raw(**environment))
+
+
+@pytest.mark.parametrize("identity", [{"metadata": {"id": "one"}}, {"task": {"name": "one"}}])
+def test_continue_until_timeout_is_retained_for_explicit_rejection(identity) -> None:
+    normalized = normalize_terminal_bench_task_toml({**identity, "agent": {"continue_until_timeout": True}})
+    assert normalized["agent"]["continue_until_timeout"] is True
+    with pytest.raises(ValidationError, match="continue_until_timeout"):
+        TaskConfig.model_validate(normalized)
+
+
+@pytest.mark.parametrize("stamp", [{"version": "1.0"}, {"schema_version": "1.1"}])
+def test_harbor_schema_markers_do_not_depend_on_missing_task_identity(stamp) -> None:
+    raw = {
+        **stamp, "metadata": {"tags": ["shell"]},
+        "task": {"id": "authored-id", "name": "Authored title"},
+        "environment": {"cpus": 2, "memory": "1.5G", "storage": "3G"},
+    }
+    normalized = normalize_terminal_bench_task_toml(raw, task_id="context")
+    task = TaskConfig.model_validate(normalized)
+    assert task.task.id == "authored-id"
+    assert task.task.name == "Authored title"
+    assert task.environment.memory_mb == 1536
+    assert task.environment.storage_mb == 3072
+
+
+def test_metadata_only_harbor_schema_1_1_is_stamped_as_loom_schema() -> None:
+    raw = {"schema_version": "1.1", "metadata": {"tags": ["shell"]}}
+    task = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw, task_id="context"))
+    assert task.task.id == "context"
+    assert task.schema_version == "1"
+
+
+def test_native_harbor_preserves_explicit_service_lifecycle_declaration() -> None:
+    raw = {
+        "task": {"name": "service-task"},
+        "environment": {"service_lifecycle": {
+            "startup_command": ["/usr/local/bin/start-fixture"],
+            "readiness": {"command": "test -f /data/ready"},
+        }},
+    }
+    normalized = normalize_terminal_bench_task_toml(raw)
+    assert normalized["environment"]["service_lifecycle"] == {
+        "startup_command": ["/usr/local/bin/start-fixture"],
+        "readiness": {"command": "test -f /data/ready"},
+    }

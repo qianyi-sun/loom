@@ -67,7 +67,10 @@ async def test_signal_and_finalization_budget_do_not_grant_unsafe_handoff(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.05))
-    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "0.1")
+    # The successful handoff performs real archive IO on worker threads. Give
+    # it scheduling headroom under the full suite; expiry cases keep the short
+    # budget so they still prove the grace period cannot restart.
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "2" if mode == "deadline_signal" else "0.1")
     callbacks = []
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "add_signal_handler", lambda _, callback: callbacks.append(callback))
@@ -128,6 +131,48 @@ class Sandbox(FakeDriver):
     async def export_workspace_archive(self, src, dst):
         assert self.quiesced
         await super().export_workspace_archive(src, dst)
+
+
+@pytest.mark.asyncio
+async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(tmp_path, monkeypatch):
+    from loom.models.task import TaskConfig
+
+    task, trial, _ = _inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["mutable_paths"] = ["/data", "/home/agent"]
+    task = TaskConfig.model_validate(raw)
+    (tmp_path / "instruction.md").write_text("Produce outputs outside workdir")
+    agent, verifier = Sandbox(), Sandbox()
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
+                        lambda role, task: agent if role == "task-sandbox" else verifier)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        agent.filesystem[PurePosixPath("/data/answer")] = b"unique output"
+        agent.filesystem[PurePosixPath("/home/agent/kernelspec")] = b"installed kernel"
+        agent.filesystem[PurePosixPath("/undeclared/secret")] = b"not exported"
+
+    def check(cmd, user, cwd, env):
+        if cmd == "id -u; id -g":
+            return ExecResult(return_code=0, stdout=b"0\n0\n", stderr=b"", duration_sec=0)
+        if env and "LOOM_VERIFIER_OUTPUT" in env:
+            assert verifier.filesystem[PurePosixPath("/data/answer")] == b"unique output"
+            assert verifier.filesystem[PurePosixPath("/home/agent/kernelspec")] == b"installed kernel"
+            assert PurePosixPath("/undeclared/secret") not in verifier.filesystem
+            verifier.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    verifier.exec_handler = check
+    monkeypatch.setattr("loom.service_execution_sandbox_task._execution_identity", identity)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.run_terminus2", terminus)
+    await run_agent(tmp_path, task, trial)
+    await run_verifier(tmp_path, task, trial)
+    manifest = json.loads((tmp_path / ".loom/mutable-paths/manifest.json").read_text())
+    assert [item["path"] for item in manifest["paths"]] == ["/data", "/home/agent"]
 
 
 @pytest.mark.asyncio

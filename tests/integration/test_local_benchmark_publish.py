@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -583,7 +584,31 @@ def _write_harbor_layout(root: Path) -> None:
     online.chmod(0o755)
 
 
+@pytest.fixture
+async def harbor_publication_cleanup(postgres_url: str) -> AsyncIterator[None]:
+    """Keep these publications from leaving work in the shared test database."""
+    engine = create_async_engine(postgres_url)
+    try:
+        yield
+    finally:
+        try:
+            async with async_sessionmaker(engine)() as session:
+                await session.execute(delete(TaskImageMaterialization).where(
+                    TaskImageMaterialization.task_id == "harbor-nebius-profile/harbor-sample",
+                ))
+                await session.execute(delete(TaskRow).where(
+                    TaskRow.benchmark_id == "harbor-nebius-profile",
+                ))
+                await session.execute(delete(Benchmark).where(
+                    Benchmark.id == "harbor-nebius-profile",
+                ))
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("harbor_publication_cleanup")
 async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
     postgres_url: str,
     tmp_path: Path,
@@ -635,7 +660,9 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             ).scalar_one()
             env = task.config["environment"]
             assert env["cpu_arch"] == "x86_64"
-            assert env["user"] == "agent"
+            # Publication preserves each source identity; runtime admission
+            # separately requires the constrained private-root policy.
+            assert env["user"] == "root"
             assert env["workdir"] == "/app"
             assert env["dockerfile"] == "environment/Dockerfile.loom-nebius"
             assert env["cpus"] == 1
@@ -643,7 +670,7 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             assert env["storage_mb"] == 4096
             assert env["network_policies_supported"] == ["gateway-only"]
             assert env["baseline_network_policy"] == {"kind": "gateway-only"}
-            assert "user" not in task.config["verifier"]
+            assert task.config["verifier"]["user"] == "root"
             assert task.config["verifier"]["env_mode"] == "shared"
             assert task.config["verifier"]["args"]["script_path"] == "verifier/run.sh"
             assert "service_execution_input" in task.source_provenance
@@ -652,6 +679,7 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("harbor_publication_cleanup")
 async def test_publish_without_profile_keeps_harbor_root_verifier(
     postgres_url: str,
     tmp_path: Path,

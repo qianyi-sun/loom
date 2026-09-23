@@ -16,10 +16,22 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_serializer,
+    model_validator,
+)
 
+from loom.execution_requirements import (
+    TaskExecutionRequirementsV1,
+    execution_requirement_diagnostics,
+)
+from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig
 
 _IMMUTABLE_OCI_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -135,6 +147,7 @@ class ExecutionClassV1(_StrictContract):
     gpu_vendor: Literal["none", "nvidia"]
     isolation_level: IsolationLevel
     network_access: frozenset[NetworkAccess]
+    supports_task_web_egress: bool = False
     maximum_cpu_millis: int | None = Field(default=None, gt=0)
     maximum_memory_mib: int | None = Field(default=None, gt=0)
     maximum_ephemeral_storage_mib: int | None = Field(default=None, gt=0)
@@ -150,6 +163,13 @@ class ExecutionClassV1(_StrictContract):
     permits_host_network: bool
     permits_nested_containers: bool
     permits_host_devices: bool
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_web_egress(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if not self.supports_task_web_egress:
+            payload.pop("supports_task_web_egress", None)
+        return payload
 
     @field_serializer("network_access", when_used="json")
     def _serialize_network_access(self, value: frozenset[NetworkAccess]) -> list[str]:
@@ -274,6 +294,7 @@ class WorkloadRequirementsV1(_StrictContract):
     ephemeral_storage_mib: int | None = Field(gt=0)
     isolation_level: IsolationLevel
     network_access: NetworkAccess
+    task_egress: WebAllowlist | None = None
     image_materialization: ImageMaterialization
     image_ref: str | None
     sidecar_count: int = Field(ge=0)
@@ -287,9 +308,21 @@ class WorkloadRequirementsV1(_StrictContract):
     nested_containers: bool
     host_devices: bool
     host_specialized: bool
+    execution_requirements: TaskExecutionRequirementsV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unused_egress(self, handler: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = handler(self)
+        if self.task_egress is None:
+            payload.pop("task_egress", None)
+        return payload
 
     @model_validator(mode="after")
     def _image_identity_matches_materialization(self) -> WorkloadRequirementsV1:
+        if self.task_egress is not None and self.network_access != NetworkAccess.APPROVED_ALLOWLIST:
+            raise ValueError("task egress requires approved_allowlist networking")
         if self.image_materialization == ImageMaterialization.IMMUTABLE_OCI:
             if self.image_ref is None or not _IMMUTABLE_OCI_REF.fullmatch(self.image_ref):
                 raise ValueError(
@@ -456,6 +489,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
     """
 
     env = task.environment
+    capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
         image_ref: str | None = None
@@ -474,6 +508,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         "no-network": NetworkAccess.NONE,
         "gateway-only": NetworkAccess.GATEWAY_ONLY,
         "allowlist": NetworkAccess.APPROVED_ALLOWLIST,
+        "web-allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
     verifier_topology = (
@@ -491,6 +526,8 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         ephemeral_storage_mib=env.storage_mb,
         isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=network_access,
+        task_egress=(env.baseline_network_policy
+                     if isinstance(env.baseline_network_policy, WebAllowlist) else None),
         image_materialization=materialization,
         image_ref=image_ref,
         sidecar_count=len(env.sidecars),
@@ -501,9 +538,10 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         privileged=False,
         host_path=False,
         host_network=False,
-        nested_containers=False,
-        host_devices=False,
-        host_specialized=False,
+        nested_containers=bool({"nested_docker", "singularity_mounts"}.intersection(capabilities)),
+        host_devices="dpdk_networking" in capabilities,
+        host_specialized="isolated_kernel_settings" in capabilities,
+        execution_requirements=env.execution_requirements,
     )
 
 
@@ -517,6 +555,9 @@ def evaluate_execution_admission(
 
     def reject(code: str, message: str) -> None:
         reasons.append(CompatibilityReasonV1(code=code, message=message))
+
+    for diagnostic in execution_requirement_diagnostics(requirements.execution_requirements):
+        reject(diagnostic.code, diagnostic.reason)
 
     if requirements.operating_system != execution_class.operating_system:
         reject("operating_system_unsupported", "execution class only supports Linux")
@@ -532,6 +573,8 @@ def evaluate_execution_admission(
             "isolation_level_unsupported",
             "workload isolation requirement does not exactly match the admitted class",
         )
+    if requirements.task_egress is not None and not execution_class.supports_task_web_egress:
+        reject("task_web_egress_unsupported", "execution class does not support task HTTP(S) egress")
     if requirements.network_access not in execution_class.network_access:
         reject(
             "network_access_unsupported",
@@ -608,6 +651,7 @@ NEBIUS_CPU_EXECUTION_CLASS_V1 = ExecutionClassV1(
             NetworkAccess.APPROVED_ALLOWLIST,
         }
     ),
+    supports_task_web_egress=True,
     maximum_sidecars=8,
     supports_separate_verifier=True,
     supports_custom_dns=False,

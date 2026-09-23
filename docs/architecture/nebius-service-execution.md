@@ -65,7 +65,7 @@ execution unit:
 - GPU vendor/count;
 - positive CPU, RAM, and ephemeral-storage limits;
 - minimum sandbox isolation;
-- network mode;
+- network mode and optional immutable HTTP(S) destination policy;
 - immutable image/runtime identity or an explicit non-admissible build mode;
 - sidecar count and verifier topology;
 - custom DNS, extra hosts, and tmpfs;
@@ -97,6 +97,17 @@ fields that exist in that schema. Dynamic operator and user bundles therefore
 remain `conversion_required` until materialization emits and validates the
 complete new contract; absence from the legacy schema is not evidence that a
 capability is false.
+
+### Task HTTP(S) capability
+
+`WebAllowlist` carries exact host/protocol destinations through workload
+requirements and the runtime plan. Both the execution class and runtime profile
+must advertise `supports_task_web_egress`; an old profile receives the actionable
+`task_egress_runtime_unavailable` rejection. Unused extension fields remain omitted
+from existing canonical records. The Gateway independently requires a protected
+address configuration before authorizing tunnels. Gateway-only defaults and task
+Pod network restrictions are unchanged. See [sandbox isolation](sandbox-isolation.md#declared-hosted-task-web-egress)
+for configuration, task declarations, transport bounds and acceptance limits.
 
 ## Logical pool and regional policy
 
@@ -696,6 +707,37 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
+Task identity, web egress, mutable paths and retained-service declarations require
+automatic native execution. A task-supplied `service_execution.runtime_template`
+cannot enable these extensions or bypass deployment readiness; intake rejects
+such combinations before submission or scheduling.
+
+Automatic Terminus tasks may declare `environment.mutable_paths` for directory
+state outside their workdir. The controller captures each root in a separate
+validated archive and binds its path, size and SHA-256 in a required manifest.
+The independent verifier receives the same absolute paths, including deletions,
+mode and ownership, before running private tests. There are at most 16 roots,
+100,000 entries and 256 MiB aggregate archived/expanded content. Runtime and
+verifier roots, overlapping roots, symlink ancestors, escaping links, special
+files and cross-root hardlinks are rejected. Ownership that the verifier cannot
+restore is an explicit handoff failure. This does not copy an entire writable
+container layer or expose private verifier dependencies to task mutations.
+
+An explicit `environment.service_lifecycle` retains task processes through the
+independent verifier. Its optional returning startup argv initializes the
+environment before agent execution; agent-owned services have no initializer.
+Readiness checks have an explicit deadline. On successful or acknowledged
+deadline handoff, the native task PID 1 suspends descendants, snapshots workspace
+and declared directories, then resumes those same process identities. Processes
+already stopped remain stopped. The verifier container can reach the retained
+service over the trial Pod's loopback network while its private files remain
+separate. Startup is not repeated in the verifier. Failed/cancelled handoffs stop
+the descendants; verifier completion or failure stops retained task services.
+Attempt cancellation, deadlines, sandbox-incarnation monitoring and Pod deletion
+remain authoritative. Existing undeclared tasks retain stop-before-snapshot
+behavior. The deployment must explicitly set `service_lifecycle_ready` after
+qualifying matching controller and sandbox runtimes; the default is disabled.
+
 The frozen plan also declares every workspace output that belongs in the
 complete Trial bundle, including its source path, package path, semantic kind,
 and whether it is required. For the automatic direct-completion profile this
@@ -789,6 +831,61 @@ the CPU class. They must be converted to the exact contract or retained in a
 separately accepted product; compatibility is never obtained by relaxing this
 class.
 
+### Declared execution capabilities and prerequisites
+
+Tasks can retain special execution requirements in the ordinary task schema:
+
+```toml
+[environment.execution_requirements]
+capabilities = ["external_cluster"]
+
+[[environment.execution_requirements.prerequisites]]
+name = "cluster"
+kind = "endpoint"
+reference = "loom://inventory/cluster"
+
+[[environment.execution_requirements.prerequisites]]
+name = "cluster_auth"
+kind = "managed_secret"
+reference = "k8s-secret://team/cluster-auth"
+```
+
+The bounded declaration survives Harbor normalization and freezing into
+`WorkloadRequirementsV1`. Absent declarations preserve the previous frozen
+serialization. Capability names are explicit; task names or script keywords
+never infer them. References are opaque `loom://` or `k8s-secret://` inventory
+identifiers, not credentials or proof of availability. Prerequisite kinds are
+`endpoint`, `managed_secret`, `device`, and `fixture`. Unknown fields, literal
+secret values, duplicate capabilities and duplicate prerequisite names are
+rejected. Invalid declaration values are redacted from compatibility reports.
+
+Both execution-class admission and the ordinary TaskSet compiler reject every
+currently declared special capability. The local compatibility report records
+the same reasons before bootstrap adaptation, so later conversion errors do
+not hide them. A prerequisite without a reference yields
+`execution_prerequisite_missing`; a supplied reference yields
+`execution_prerequisite_unverified`. No reference resolver or new runtime class
+is implemented by this declaration contract.
+
+| Capability | Qualification required before support |
+| --- | --- |
+| `nested_docker` | Trial-owned daemon and cache, nested builds, limits and teardown; no trusted host socket. |
+| `singularity_mounts` | Declared Singularity version, image format, bootstrap/mount behavior, image transfer and cleanup. |
+| `isolated_kernel_settings` | An isolated kernel with task-specific configuration and restoration; no shared-host sysctl changes. |
+| `external_cluster` | Owned endpoint, managed authentication, API behavior, egress and resource cleanup. |
+| `pkcs11_authentication` | Actual emulated or physical authentication fixture, socket forwarding and device isolation where needed. |
+| `dpdk_networking` | Owned NICs, hugepages, driver binding, isolated traffic and cleanup in a dedicated runtime. |
+
+These remain unsupported classes, not a privilege switch. The existing
+`ExecutionClassV1` prohibition on privileged containers, host paths/network,
+nested containers and host devices remains enforced. Local cluster fixtures
+must be evaluated on their own evidence; they do not necessarily require a
+real external cluster or credentials. Likewise, a task that downloads a Docker
+installer does not necessarily run Docker, and an original verifier accepting
+a captured DPDK initialization failure does not establish working DPDK support.
+Review the original instructions, Dockerfile, fixtures and private verifier
+together without weakening any of them.
+
 ## Compatibility inventory
 
 `config/service-execution-compatibility.toml` assigns every repo-known
@@ -802,9 +899,11 @@ uv run --no-sync python scripts/ops/generate_execution_contract_artifacts.py --c
 ```
 
 The generator fails on missing/overlapping rules, missing accepted-pool
-identities, and duplicate workload identities. At this decision point no
-workload is statically supported on Nebius: 66 require conversion and OSWorld
-plus the two GPU/host-specialized Behavior profiles are unsupported there.
+identities, and duplicate workload identities. The generated report records
+the current counts. No workload is statically supported on Nebius: catalog
+candidates require per-task conversion and admission; OSWorld, the two
+GPU/host-specialized Behavior profiles, and the six special execution
+capabilities above are unsupported there.
 OLDLAB, GB10, and Slurm are retired and cannot receive hosted work.
 The unconverted catalog classes are availability gaps, not fallback routes.
 Desktop/GUI and Behavior GPU execution remain local-only. Pipeline submission

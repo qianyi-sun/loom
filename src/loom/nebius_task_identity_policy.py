@@ -1,0 +1,147 @@
+"""Target-scoped Pod admission for private root sandboxes.
+
+Baseline PSS still applies. This policy restores stricter runtime controls and
+permits only the two native private sandboxes to use root and installation caps.
+Installing these documents does not establish runtime qualification.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from loom.sandbox_identity import ROOT_INSTALL_CAPABILITIES
+
+PSS_VERSION = "v1.33"
+
+
+def validate_identity_policy(config: dict[str, Any]) -> bool:
+    policy = config.get("task_identity_policy")
+    if policy is None:
+        return False
+    if policy != {
+        "mode": "private-root-v1", "target_id": config["target_id"],
+        "execution_namespace": config["execution_namespace"],
+    }:
+        raise ValueError("task identity policy must bind the exact execution target and namespace")
+    if (config.get("regional_execution_targets")
+            or config.get("schema_version") == "loom.nebius-managed-environment.v1"):
+        raise ValueError("task identity policy is qualified only for a single independent target")
+    return True
+
+
+def identity_namespace_labels() -> dict[str, str]:
+    return {
+        "pod-security.kubernetes.io/enforce": "baseline",
+        "pod-security.kubernetes.io/enforce-version": PSS_VERSION,
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": PSS_VERSION,
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": PSS_VERSION,
+    }
+
+
+def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, Any]]:
+    name = namespace + "-private-root-v1"
+    # Pod defaults below explicitly constrain the inherited identity. A
+    # container may inherit runAsNonRoot, but cannot override it to false.
+    common = (
+        "has(c.securityContext) && "
+        "has(c.securityContext.allowPrivilegeEscalation) && !c.securityContext.allowPrivilegeEscalation && "
+        "(!has(c.securityContext.privileged) || !c.securityContext.privileged) && "
+        "has(c.securityContext.capabilities) && has(c.securityContext.capabilities.drop) && "
+        "'ALL' in c.securityContext.capabilities.drop && "
+        "(!has(c.securityContext.procMount) || c.securityContext.procMount == 'Default') && "
+        "(!has(c.securityContext.seccompProfile) || c.securityContext.seccompProfile.type == 'RuntimeDefault') && "
+        "(!has(c.securityContext.appArmorProfile) || c.securityContext.appArmorProfile.type == 'RuntimeDefault') && "
+        "!has(c.securityContext.seLinuxOptions) && "
+        "(!has(c.volumeDevices) || size(c.volumeDevices) == 0) && "
+        "(!has(c.resources.claims) || size(c.resources.claims) == 0) && "
+        "(!has(c.resources.requests) || c.resources.requests.all(k, k in ['cpu','memory','ephemeral-storage'])) && "
+        "(!has(c.resources.limits) || c.resources.limits.all(k, k in ['cpu','memory','ephemeral-storage']))"
+    )
+    nonroot = (
+        "(!has(c.securityContext.runAsNonRoot) || c.securityContext.runAsNonRoot) && "
+        "(!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) && "
+        "(!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)"
+    )
+    private = (
+        "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
+        "size(c.command) == 5 && c.command[0] == '/loom/bin/loom-sandbox-runtime' && "
+        "c.command[1] == '--socket' && c.command[2] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
+        "c.command[3] == '--exec-timeout-seconds' && c.command[4].matches('^[0-9]+$') && "
+        "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
+        "(!has(c.envFrom) || size(c.envFrom) == 0) && "
+        "(!has(c.env) || c.env.all(e, !has(e.valueFrom))) && "
+        "size(c.volumeMounts) == 2 && c.volumeMounts.all(m, "
+        "!has(m.subPathExpr) && !has(m.mountPropagation) && "
+        "((m.name == c.name + '-socket' && m.mountPath == '/loom/sandboxes/' + c.name && !has(m.subPath)) || "
+        "(m.name == 'runtime' && m.mountPath == '/loom/bin/loom-sandbox-runtime' && "
+        "has(m.subPath) && m.subPath == 'loom-sandbox-runtime' && has(m.readOnly) && m.readOnly))) && "
+        "has(c.securityContext.runAsNonRoot) && "
+        "((has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0) ? "
+        "(!c.securityContext.runAsNonRoot && has(c.securityContext.runAsGroup) && "
+        "c.securityContext.runAsGroup >= 0 && c.securityContext.runAsGroup <= 2147483647 && "
+        "has(c.securityContext.capabilities.add) && "
+        f"size(c.securityContext.capabilities.add) == {len(ROOT_INSTALL_CAPABILITIES)} && "
+        f"{json.dumps(list(ROOT_INSTALL_CAPABILITIES))}.all(k, k in c.securityContext.capabilities.add)) : "
+        "(c.securityContext.runAsNonRoot && (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) && "
+        "(!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)))"
+    )
+    validations = [
+        ("!has(object.spec.hostNetwork) || !object.spec.hostNetwork", "Host networking is forbidden."),
+        ("!has(object.spec.hostPID) || !object.spec.hostPID", "Host PID is forbidden."),
+        ("!has(object.spec.hostIPC) || !object.spec.hostIPC", "Host IPC is forbidden."),
+        ("!has(object.spec.shareProcessNamespace) || !object.spec.shareProcessNamespace", "Shared PID is forbidden."),
+        ("has(object.spec.securityContext) && object.spec.securityContext.runAsNonRoot && "
+         "object.spec.securityContext.runAsUser > 0 && object.spec.securityContext.runAsGroup > 0 && "
+         "object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' && "
+         "(!has(object.spec.securityContext.sysctls) || size(object.spec.securityContext.sysctls) == 0) && "
+         "!has(object.spec.securityContext.seLinuxOptions) && "
+         "(!has(object.spec.securityContext.appArmorProfile) || "
+         "object.spec.securityContext.appArmorProfile.type == 'RuntimeDefault')", "Trusted Pod defaults must remain restricted."),
+        ("!has(object.metadata.annotations) || object.metadata.annotations.all(k, "
+         "!k.startsWith('container.apparmor.security.beta.kubernetes.io/') || "
+         "object.metadata.annotations[k] == 'runtime/default')", "Unconfined AppArmor is forbidden."),
+        ("!has(object.spec.volumes) || object.spec.volumes.all(v, "
+         "has(v.configMap) || has(v.downwardAPI) || has(v.emptyDir) || has(v.ephemeral) || "
+         "has(v.persistentVolumeClaim) || has(v.projected) || has(v.secret))", "Only restricted volume types are allowed."),
+        (f"variables.allContainers.all(c, {common})", "Container security and resource boundaries must remain restricted."),
+        (f"variables.ordinary.all(c, {nonroot})", "Only private native sandboxes may run as root or add capabilities."),
+        (f"variables.private.all(c, {private})", "Private sandbox command, identity, capabilities or mounts are invalid."),
+        ("variables.regular.all(c, !(c.name in ['task-sandbox','verifier-sandbox']))", "Private sandboxes must be native init sidecars."),
+        ("size(variables.private) == 0 || (object.spec.serviceAccountName == 'loom-execution-attempt' && "
+         "has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && "
+         "has(object.metadata.annotations) && object.metadata.annotations['loom.openai.com/target-id'] == "
+         + json.dumps(target_id) + " && object.spec.volumes.filter(v, "
+         "v.name in ['runtime','task-sandbox-socket','verifier-sandbox-socket']).all(v, has(v.emptyDir)) && "
+         "!has(object.spec.resourceClaims))", "Private sandboxes require the target-bound execution Pod shape."),
+    ]
+    policy = {
+        "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicy",
+        "metadata": {"name": name},
+        "spec": {
+            "failurePolicy": "Fail",
+            "matchConstraints": {"resourceRules": [{
+                "apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE", "UPDATE"],
+                "resources": ["pods", "pods/ephemeralcontainers"], "scope": "Namespaced",
+            }]},
+            "variables": [
+                {"name": "init", "expression": "has(object.spec.initContainers) ? object.spec.initContainers : []"},
+                {"name": "ephemeral", "expression": "has(object.spec.ephemeralContainers) ? object.spec.ephemeralContainers : []"},
+                {"name": "regular", "expression": "object.spec.containers + variables.ephemeral"},
+                {"name": "allContainers", "expression": "variables.regular + variables.init"},
+                {"name": "private", "expression": "variables.init.filter(c, c.name in ['task-sandbox','verifier-sandbox'])"},
+                {"name": "ordinary", "expression": "variables.allContainers.filter(c, !(c.name in ['task-sandbox','verifier-sandbox']))"},
+            ],
+            "validations": [{"expression": expression, "message": message} for expression, message in validations],
+        },
+    }
+    binding = {
+        "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",
+        "metadata": {"name": name},
+        "spec": {"policyName": name, "validationActions": ["Deny"], "matchResources": {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": namespace}},
+        }},
+    }
+    return [policy, binding]

@@ -171,3 +171,44 @@ def test_preflight_reports_amd64_binary_url_for_arm64_task(tmp_path: Path) -> No
     assert issues[0].phase == "task_image_build"
     assert "linux_amd64" in issues[0].message
     assert issues[0].evidence["target_arch"] == "arm64"
+
+
+@pytest.mark.parametrize(
+    "heredoc",
+    [
+        "RUN python3 <<'PY'\nfrom datetime import datetime\nPY\n",
+        'RUN python3 <<"PY"\nfrom datetime import datetime\nPY\n',
+        "RUN <<-'SCRIPT'\n\tfrom datetime import datetime\n\tSCRIPT\n",
+        "COPY <<FIRST <<'SECOND' /tmp/\nFROM alpine:3.20\nFIRST\nSHELL []\nSECOND\n",
+        "RUN python3 \\\n  <<'PY'\nfrom datetime import datetime\nPY\n",
+    ],
+)
+def test_heredoc_content_cannot_reset_workdir(tmp_path: Path, heredoc: str) -> None:
+    task_dir = _write_task_dir(
+        tmp_path,
+        "FROM debian:bookworm\nWORKDIR /app\n" + heredoc + "RUN echo ok > /app/result\n",
+    )
+    assert collect_task_dir_compatibility_issues(task_dir) == []
+
+
+def test_real_stage_after_heredoc_resets_workdir(tmp_path: Path) -> None:
+    task_dir = _write_task_dir(
+        tmp_path,
+        "FROM debian:bookworm\nWORKDIR /app\n"
+        "RUN cat <<EOF\nFROM fake\nEOF\n"
+        "FROM debian:bookworm\nRUN echo ok > /app/result\n",
+    )
+    issues = collect_task_dir_compatibility_issues(task_dir)
+    assert [(issue.code, issue.line) for issue in issues] == [
+        ("TASK_COMPAT_APP_PARENT_MISSING", 7),
+    ]
+
+
+def test_unterminated_heredoc_reports_parse_boundary(tmp_path: Path) -> None:
+    task_dir = _write_task_dir(
+        tmp_path,
+        "FROM debian:bookworm\nRUN cat <<EOF\nFROM fake\n",
+    )
+    issues = collect_task_dir_compatibility_issues(task_dir)
+    assert [(issue.code, issue.line) for issue in issues] == [("TASK_COMPAT_DOCKERFILE_PARSE", 2)]
+    assert "unterminated heredoc" in issues[0].message

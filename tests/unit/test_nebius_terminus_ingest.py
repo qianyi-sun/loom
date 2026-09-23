@@ -93,16 +93,16 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert env["memory_mb"] == DEFAULT_MEMORY_MB
     assert env["storage_mb"] == DEFAULT_STORAGE_MB
     assert env["cpu_arch"] == "x86_64"
-    assert env["user"] == "agent"
+    assert env["user"] == "root"
     assert env["workdir"] == "/app"
     assert env["network_policies_supported"] == ["gateway-only"]
     assert env["baseline_network_policy"] == {"kind": "gateway-only"}
-    assert "user" not in adapted["verifier"]
+    assert adapted["verifier"]["user"] == "root"
     assert adapted["verifier"]["env_mode"] == "shared"
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert stats.resources_filled
     assert stats.network_forced_gateway_only
-    assert stats.verifier_identity_stripped
+    assert not stats.verifier_identity_stripped
     assert stats.verifier_path_forced
     assert stats.cpu_arch_forced
     assert stats.workspace_identity_forced
@@ -219,8 +219,8 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     adapted, stats = adapt_bundle_for_nebius_terminus(staged, normalized)
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert adapted["environment"]["cpu_arch"] == "x86_64"
-    assert adapted["environment"]["user"] == "agent"
-    assert "user" not in adapted["verifier"]
+    assert adapted["environment"]["user"] == "root"
+    assert adapted["verifier"]["user"] == "root"
     assert stats.cpu_arch_forced
     assert stats.verifier_wrapper_installed
     assert stats.artifact_globs_stripped
@@ -234,7 +234,7 @@ def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:
     assert "gateway_only_network_required" in reasons
     assert "resource_limits_required" in reasons
     assert "standard_workspace_identity_required" in reasons
-    assert "custom_verifier_identity_unsupported" in reasons
+    assert "custom_verifier_identity_unsupported" not in reasons
     assert "shared_script_verifier_required" in reasons
     assert "private_verifier_directory_required" in reasons
 
@@ -244,3 +244,18 @@ def test_offline_template_preserves_full_harbor_runner() -> None:
     assert b'cp -R "$task_dir/tests/." /tests/' in wrapper
     assert b'bash "$task_dir/verifier/harbor-offline.sh"' in wrapper
     assert b"pip install" not in wrapper
+
+
+def test_ingest_preserves_explicit_web_allowlist_and_identity(tmp_path: Path) -> None:
+    _write_runtime_inputs(tmp_path)
+    policy = {"kind": "web-allowlist", "destinations": [{"host": "registry.npmjs.org", "protocol": "https"}]}
+    config = _harbor_shaped_config(
+        user="1001:1002", environment={"HOME": "/home/miles"},
+        baseline_network_policy=policy, network_policies_supported=["web-allowlist"],
+    )
+    adapted, stats = adapt_bundle_for_nebius_terminus(tmp_path, config)
+    assert adapted["environment"]["baseline_network_policy"] == policy
+    assert adapted["environment"]["network_policies_supported"] == ["web-allowlist"]
+    assert adapted["environment"]["user"] == "1001:1002"
+    assert adapted["environment"]["environment"] == {"HOME": "/home/miles"}
+    assert not stats.network_forced_gateway_only

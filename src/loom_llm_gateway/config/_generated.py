@@ -57,6 +57,7 @@ class GatewaySettings(BaseSettings):
     step_jwt_signing_key: SecretStr
     storage_auth_kind: str = "static_keys"
     storage_backend: str = "minio"
+    task_egress_config_file: Path | None = None
     together_api_key: SecretStr | None = None
     upstream_timeout_sec: float = 200.0
 

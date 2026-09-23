@@ -187,8 +187,13 @@ def adapt_bundle_for_nebius_terminus(
         environment.get("network_policies_supported") != ["gateway-only"]
         or environment.get("baseline_network_policy") != {"kind": "gateway-only"}
     )
-    environment["network_policies_supported"] = ["gateway-only"]
-    environment["baseline_network_policy"] = {"kind": "gateway-only"}
+    if (environment.get("baseline_network_policy") or {}).get("kind") == "web-allowlist":
+        # Admission validates the exact destinations; preparation must retain
+        # the declared network requirement for the runtime profile to enforce.
+        network_forced = False
+    else:
+        environment["network_policies_supported"] = ["gateway-only"]
+        environment["baseline_network_policy"] = {"kind": "gateway-only"}
 
     cpu_arch_forced = environment.get("cpu_arch") != "x86_64"
     environment["cpu_arch"] = "x86_64"
@@ -197,13 +202,12 @@ def adapt_bundle_for_nebius_terminus(
 
     workdir = environment.get("workdir")
     workdir_ok = workdir in {"/app", "/workspace", PurePosixPath("/app"), PurePosixPath("/workspace")}
-    workspace_forced = environment.get("user") != "agent" or not workdir_ok
-    environment["user"] = "agent"
+    workspace_forced = not workdir_ok
+    environment.setdefault("user", "agent")
     if not workdir_ok:
         environment["workdir"] = "/app"
 
-    verifier_identity_stripped = verifier.get("user") is not None
-    verifier.pop("user", None)
+    verifier_identity_stripped = False
     verifier["name"] = verifier.get("name") or "script"
     verifier["env_mode"] = "shared"
     verifier_path_forced = verifier_args.get("script_path") != VERIFIER_SCRIPT_PATH

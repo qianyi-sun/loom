@@ -15,6 +15,7 @@ import shlex
 import signal
 import sys
 import tomllib
+from collections.abc import Callable
 from glob import escape
 from pathlib import Path, PurePosixPath
 from uuid import UUID
@@ -25,6 +26,7 @@ from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.models.capabilities import Capabilities
+from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
@@ -35,6 +37,7 @@ from loom.service_execution_task import (
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
+from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
 from loom.trial.workspace_snapshot import (
     _export_workspace_archive,
@@ -66,14 +69,25 @@ def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
 
 
 def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
+    command_environment = {}
+    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+        from urllib.parse import urlsplit
+
+        proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
+        url = urlsplit(proxy)
+        if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
+            raise ServiceExecutionTaskError("task_egress_runtime_unavailable")
+        command_environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+        command_environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
     return ServiceSandboxDriver(
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
             os="linux", cpu_arch="x86_64", gpu_vendor="none",
-            network_policies=frozenset({"gateway-only"}), dynamic_network_policy=False,
+            network_policies=frozenset({"gateway-only", "web-allowlist"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
         network_policy=task.environment.baseline_network_policy,
+        command_environment=command_environment,
     )
 
 
@@ -114,6 +128,10 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     output.mkdir(parents=True, exist_ok=True)
     trial_id = None
     agent_entered = False
+    handoff_allowed = False
+    services_retained = False
+    driver_started = False
+    lifecycle = task.environment.service_lifecycle
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -137,10 +155,26 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             async with asyncio.timeout(deadline.remaining() if deadline else None):
                 trial_id, team_id = await _execution_identity(gateway)
                 await driver.start()
+                driver_started = True
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=_agent_input_exclusions(task),
                 )
+                if lifecycle is not None and lifecycle.startup_command:
+                    result = await driver.exec(
+                        shlex.join(lifecycle.startup_command), cwd=task.environment.workdir,
+                        timeout_sec=lifecycle.startup_timeout_sec,
+                    )
+                    _write_json_atomic(workspace / ".loom/service-startup.json", {
+                        "return_code": result.return_code,
+                        "stdout": result.stdout.decode("utf-8", errors="replace"),
+                        "stderr": result.stderr.decode("utf-8", errors="replace"),
+                        "truncated": result.truncated,
+                    })
+                    if result.return_code:
+                        raise ServiceExecutionTaskError("environment service startup failed")
+                    async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                        await driver.run_healthcheck(lifecycle.readiness)
                 instruction = _safe_workspace_path(
                     workspace, str(task.steps[0].instruction_file),
                 ).read_text()
@@ -150,10 +184,12 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
                     deadline=deadline,
                 )
+                handoff_allowed = True
         except (TimeoutError, asyncio.CancelledError):
             if deadline is None or not deadline.reached or not agent_entered:
                 raise
             timed_out = True
+            handoff_allowed = True
         except Exception as exc:
             _write_json_atomic(output / "exception.json", exception_info(exc).model_dump(mode="json"))
             raise
@@ -173,31 +209,86 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 )
                                 _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
                         finally:
-                            await driver.stop_processes()
+                            if lifecycle is not None and handoff_allowed:
+                                async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                                    await driver.run_healthcheck(lifecycle.readiness)
+                                await driver.pause_processes()
+                            else:
+                                await driver.stop_processes()
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(driver, task.environment.workdir, archive)
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
                         await asyncio.to_thread(_validate_workspace_archive, archive, _POLICY)
+                        if task.environment.mutable_paths:
+                            await export_mutable_paths(
+                                driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
+                                workdir=task.environment.workdir,
+                            )
                         for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
                                 await driver.download(task.environment.workdir / path, destination)
                             except (DriverError, FileNotFoundError):
                                 print(f"task artifact unavailable: {path}", file=sys.stderr)
+                        if lifecycle is not None and handoff_allowed:
+                            await driver.resume_processes()
+                            services_retained = True
                 finally:
-                    await driver.stop()
+                    if lifecycle is None or services_retained:
+                        await driver.stop()
         # A successful agent may use the grace period for its snapshot. Once
         # that handoff completes, acknowledge the expired Go phase with 124 too.
         if timed_out or (agent_entered and deadline is not None and deadline.reached):
             raise AgentTimeoutFinalizedError("agent deadline reached; verifier handoff completed")
     finally:
-        if deadline is not None:
-            loop.remove_signal_handler(signal.SIGTERM)
+        try:
+            if lifecycle is not None and not services_retained:
+                try:
+                    # Cleanup has its own bounded RPC and also runs if startup,
+                    # snapshot, or the finalization budget fails or is cancelled.
+                    if driver_started:
+                        await driver.stop_processes()
+                finally:
+                    await driver.stop()
+        finally:
+            if deadline is not None:
+                loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
+    deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
+    grace = float(os.environ.get("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30"))
+    if not math.isfinite(grace) or grace <= 0:
+        raise ServiceExecutionTaskError("termination grace must be finite and positive")
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    assert current is not None
+    finalizing = False
+
+    def begin_cleanup() -> None:
+        nonlocal finalizing
+        finalizing = True
+
+    def terminate() -> None:
+        if not finalizing:
+            current.cancel()
+
+    loop.add_signal_handler(signal.SIGTERM, terminate)
+    try:
+        async with asyncio.timeout(deadline.remaining() if deadline else None):
+            await _run_verifier(workspace, task, trial, deadline=deadline, grace=grace,
+                                begin_cleanup=begin_cleanup)
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
+async def _run_verifier(
+    workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
+    begin_cleanup: Callable[[], None],
+) -> None:
     driver = sandbox_driver("verifier-sandbox", task)
-    await driver.start()
+    driver_started = False
     failure: BaseException | None = None
 
     def retain_failure(operation: str, exc: BaseException) -> None:
@@ -215,6 +306,8 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
             )
 
     try:
+        await driver.start()
+        driver_started = True
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=task.environment.workdir,
             policy=_POLICY, phase="verifier",
@@ -224,6 +317,11 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         # The archive was validated by the agent phase before durable capture;
         # it stays in the private controller workspace between phases.
         await _import_workspace_archive(driver, archive, task.environment.workdir)
+        if task.environment.mutable_paths:
+            await import_mutable_paths(
+                driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
+                workdir=task.environment.workdir,
+            )
         remote_output = task.environment.workdir / ".loom/verifier/output.json"
         result = await driver.exec(
             "/bin/sh " + shlex.quote(str(task.verifier.args["script_path"])),
@@ -255,14 +353,44 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
     except BaseException as exc:
         retain_failure("execution", exc)
     finally:
+        begin_cleanup()
+
+        async def cleanup_verifier() -> None:
+            try:
+                if driver_started:
+                    await driver.stop_processes()
+            except Exception as exc:
+                retain_failure("stop_processes", exc)
+            finally:
+                try:
+                    await driver.stop()
+                except Exception as exc:
+                    retain_failure("stop", exc)
+
+        async def cleanup_service() -> None:
+            if task.environment.service_lifecycle is not None:
+                service_driver = sandbox_driver("task-sandbox", task)
+                try:
+                    await service_driver.start()
+                    await service_driver.stop_processes()
+                except Exception as exc:
+                    retain_failure("service_cleanup", exc)
+                finally:
+                    try:
+                        await service_driver.stop()
+                    except Exception as exc:
+                        retain_failure("service_disconnect", exc)
+
+        remaining = min(grace, max(0, deadline.monotonic_deadline + grace - asyncio.get_running_loop().time())) if deadline else grace
         try:
-            await driver.stop_processes()
+            # A second Go SIGTERM at the same deadline cannot bypass cleanup.
+            # The supervisor still has its independent hard kill/Pod teardown.
+            async with asyncio.timeout(remaining):
+                async with asyncio.TaskGroup() as cleanup_tasks:
+                    cleanup_tasks.create_task(cleanup_verifier())
+                    cleanup_tasks.create_task(cleanup_service())
         except BaseException as exc:
-            retain_failure("stop_processes", exc)
-        try:
-            await driver.stop()
-        except BaseException as exc:
-            retain_failure("stop", exc)
+            retain_failure("cleanup_deadline", exc)
     if failure is not None:
         raise failure
 

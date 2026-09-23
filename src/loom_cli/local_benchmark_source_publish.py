@@ -95,7 +95,9 @@ async def publish_versioned_local_benchmark(
                 adapt_stats = None
                 if execution_profile == NEBIUS_TERMINUS_PROFILE:
                     authored = staged / "task.toml"
-                    normalized = normalize_terminal_bench_task_toml(tomllib.loads(authored.read_text()))
+                    normalized = normalize_terminal_bench_task_toml(
+                        tomllib.loads(authored.read_text()), task_id=task_id,
+                    )
                     adapted, adapt_stats = adapt_bundle_for_nebius_terminus(staged, normalized)
                     # Versioned registration binds config to the staged authored
                     # bytes; capture the opt-in adaptation before registration.

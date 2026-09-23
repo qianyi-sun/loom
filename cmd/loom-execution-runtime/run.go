@@ -132,7 +132,7 @@ func runPlan(
 	p plan,
 	workspace, outputRoot string,
 	trustedEnvironment map[string]string,
-	phaseBoundary ...func(time.Time),
+	phaseBoundary ...func(string, time.Time),
 ) (resultManifest, error) {
 	started := time.Now().UTC()
 	result := resultManifest{
@@ -230,14 +230,14 @@ func runPhase(
 	limit int64,
 	terminationGrace time.Duration,
 	trustedEnvironment map[string]string,
-	phaseBoundary ...func(time.Time),
+	phaseBoundary ...func(string, time.Time),
 ) (phaseEvidence, error) {
 	phaseCtx, cancel := context.WithTimeout(parent, time.Duration(item.TimeoutSeconds)*time.Second)
 	defer cancel()
 	deadline, _ := phaseCtx.Deadline()
 	for _, boundary := range phaseBoundary {
-		boundary(deadline)
-		defer boundary(time.Time{})
+		boundary(item.Role, deadline)
+		defer boundary(item.Role, time.Time{})
 	}
 	directory := filepath.Clean(item.WorkingDirectory)
 	// /app is the fixed trusted controller directory. Do not normalize task

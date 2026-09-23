@@ -21,6 +21,8 @@ from pydantic import (
 
 from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
+from loom.models.networking import WebAllowlist
+from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -181,6 +183,15 @@ class SidecarContainerV1(_Strict):
     readiness_probe: ProbeV1
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
+    identity: SandboxIdentityV1 | None = None
+
+    @model_validator(mode="after")
+    def _identity_is_private(self) -> SidecarContainerV1:
+        if self.identity is not None and not self.private_sandbox:
+            raise ValueError("task identity requires a private sandbox")
+        if self.identity is not None and "HOME" in self.environment:
+            raise ValueError("sandbox HOME must be declared by its identity")
+        return self
 
     @field_validator("image_ref")
     @classmethod
@@ -245,6 +256,12 @@ class RuntimeOutputDeclarationV1(_Strict):
         return self
 
 
+TASK_EGRESS_OUTPUT = RuntimeOutputDeclarationV1(
+    source_path=".loom/task-egress.jsonl", relative_path="diagnostics/task-egress.jsonl",
+    kind="diagnostic", required=True,
+)
+
+
 class RuntimeOutputEvidenceV1(RuntimeOutputDeclarationV1):
     state: Literal["captured", "missing"]
     size_bytes: int | None = Field(default=None, ge=0)
@@ -276,6 +293,7 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
+    task_egress: WebAllowlist | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     workspace_mib: int = Field(gt=0, le=1_048_576)
@@ -311,6 +329,8 @@ class ExecutionRuntimePlanV1(_Strict):
 
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
+        if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
+            raise ValueError("task egress requires its immutable diagnostic output declaration")
         if self.task_image_materialization_id is not None and (
             self.task_image_materialization_id.int == 0
             or self.agent_image_ref is None
@@ -407,6 +427,8 @@ class ExecutionRuntimePlanV1(_Strict):
 
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
+        if self.task_egress is None:
+            payload.pop("task_egress")
         # Keep existing published plans byte-compatible when new fields are unused.
         if not self.verifier_after_agent_timeout:
             payload.pop("verifier_after_agent_timeout")
@@ -421,6 +443,8 @@ class ExecutionRuntimePlanV1(_Strict):
         for sidecar in payload["sidecars"]:
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
+            if sidecar["identity"] is None:
+                sidecar.pop("identity")
         return payload
 
     @property
@@ -584,6 +608,8 @@ def validate_runtime_plan_requirements(
 ) -> None:
     """Reject semantic drift between admission requirements and the runtime plan."""
 
+    if requirements.task_egress != plan.task_egress:
+        raise ValueError("runtime plan network policy does not match workload requirements")
     if requirements.image_ref != plan.task_image_ref:
         raise ValueError("runtime plan task image does not match workload requirements")
     expected_resources = (

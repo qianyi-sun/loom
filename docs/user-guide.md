@@ -1426,6 +1426,21 @@ or create a bucket. For a local bootstrap with a bucket-capable identity, opt in
 with `--create-bucket`. Missing buckets and denied object writes remain errors;
 failed publication does not commit catalog rows.
 
+To inspect an entire input folder even when some tasks are invalid, use:
+
+```bash
+loom datasets validate-local ./team-evals \
+  --execution-profile nebius-terminus --compatibility-report --json \
+  > compatibility-report.json
+```
+
+Exit code 1 means the report contains blocked tasks; the JSON still includes
+every discovered `task.toml`. It records source locations, original runtime
+declarations, configuration changes and suggested actions. This command uses
+temporary copies and makes no model calls. A passing static check is not image
+build, runtime or trajectory-delivery evidence. For schema and local build-input
+checks without Nebius adaptation, omit `--execution-profile`.
+
 For `publish-local` and `audit`, set `--minio-region` to the storage region or
 export `LOOM_MINIO_REGION` (fallback: `LOOM_SVC_MINIO_REGION`). The default is
 `us-east-1`; native Nebius storage must use its configured region.

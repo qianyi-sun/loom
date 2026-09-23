@@ -56,6 +56,30 @@ def test_tooling_step_ignores_unrelated_apt_sources() -> None:
     ]
 
 
+@pytest.mark.parametrize("ready", ["false", "true", "invalid"])
+def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None:
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                if step.get("name") == "Build and publish the fixed candidate")
+    script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+         'uv() { printf "%s\\n" "$@"; }\npublication_args=(--mode "$PUBLICATION_MODE")' + script],
+        capture_output=True, text=True,
+        env={**os.environ, "PUBLICATION_MODE": "platform", "AGENT_VERSION": "",
+             "NEBIUS_TASK_WEB_EGRESS_READY": ready, "NEBIUS_SERVICE_LIFECYCLE_READY": ready,
+             "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
+             "work": "/unused", "RUNNER_TEMP": "/unused"},
+    )
+    if ready == "invalid":
+        assert result.returncode != 0
+    else:
+        assert result.returncode == 0, result.stderr
+        for flag in ("--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"):
+            assert (flag in result.stdout.splitlines()) is (ready == "true")
+
+
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
     key = Ed25519PrivateKey.generate()
     private = tmp_path / "signer.pem"
@@ -104,7 +128,8 @@ def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
     return document, private, keyring
 
 
-def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path) -> None:
+@pytest.mark.parametrize("enabled", [False, True])
+def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path, enabled: bool) -> None:
     document, private, keyring = inputs(tmp_path)
     record, trust = tmp_path / "build.json", tmp_path / "trust.json"
     record.write_text(json.dumps(document))
@@ -126,12 +151,19 @@ def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path) -> None:
             str(trust),
             "--output",
             str(output),
+            *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
         ],
         capture_output=True,
         text=True,
         env=environment,
     )
     assert create.returncode == 0, create.stderr
+    profile = json.loads((output / "runtime-profile.json").read_text())
+    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
+        if enabled:
+            assert profile[capability] is True
+        else:
+            assert capability not in profile
     verify = [
         *command,
         "check-shape",
@@ -326,8 +358,9 @@ def test_runtime_release_rejects_bad_binding(tmp_path: Path, fault: str) -> None
 
 
 @pytest.mark.parametrize("mode", ["harness-only", "platform"])
+@pytest.mark.parametrize("enabled", [False, True])
 def test_publication_builds_selected_images_and_reuses_platform_admission(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, enabled: bool,
 ) -> None:
     import shutil
 
@@ -380,6 +413,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         upload_timeout_seconds=1200, mode=mode, agent_version="test-1" if mode == "harness-only" else None, output=output,
         registry_prefix=document["registry_prefix"], signing_key=private,
         signing_key_id="publisher", trusted_keyring=trust,
+        supports_task_web_egress=enabled, service_lifecycle_ready=enabled, supports_task_identity=enabled,
     ))
     builds = [call for call in calls if len(call) > 1 and call[1] == "build"]
     expected = 1 if mode == "harness-only" else len(candidate.COMPONENTS)
@@ -400,6 +434,11 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         assert "tb90_task" not in manifest["images"]
         assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
         assert release["image_admission"] in profile["image_admission"]["admissions"]
+        for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
+            if enabled:
+                assert profile[capability] is True
+            else:
+                assert capability not in profile
 
 
 def test_duplicate_input_fields_rejected(tmp_path: Path) -> None:

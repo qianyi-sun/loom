@@ -384,6 +384,10 @@ def _add_provision_catalog_provision_args(p: argparse.ArgumentParser) -> None:
 def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("path", type=Path)
     p.add_argument(
+        "--compatibility-report", action="store_true",
+        help="Report every input task, declared requirement conflicts and conversion failures; exit 1 if blocked.",
+    )
+    p.add_argument(
         "--id",
         dest="benchmark_id",
         default=None,
@@ -1492,10 +1496,26 @@ def _cmd_validate_local(args: argparse.Namespace) -> int:
             license_spdx=args.license_spdx,
             source_subdir=args.source_subdir,
             execution_profile=args.execution_profile,
+            compatibility_report=args.compatibility_report,
         )
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
+
+    if args.compatibility_report:
+        reports = result.compatibility_reports or ()
+        if args.as_json:
+            print(render_validation_json(result))
+        else:
+            print("local compatibility report (static checks; runtime not verified)")
+            for report in reports:
+                print(f"{report.task_id}: {report.status} ({report.source_location})")
+                for diagnostic in report.diagnostics:
+                    print(f"  [{diagnostic['category']}] {diagnostic['reason']}")
+                    print(f"    {diagnostic['source_location']}: {diagnostic['suggested_action']}")
+                for change in report.changes:
+                    print(f"  {change['field']}: {change['before']!r} -> {change['after']!r}")
+        return int(any(report.status == "blocked" for report in reports))
 
     if args.as_json:
         print(render_validation_json(result))
