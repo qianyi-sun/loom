@@ -3,16 +3,33 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import time
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
-from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI
+from cryptography import x509
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops import nebius_ingress_probe as probes
+from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI, cutover
 from scripts.ops.nebius_ingress_cutover import _identity as resource_identity
-from scripts.ops.nebius_ingress_gateway import TLSBinding
+from scripts.ops.nebius_ingress_cutover import _stable as stable_resource
+from scripts.ops.nebius_ingress_gateway import (
+    ControllerAPI,
+    IngressError,
+    TLSBinding,
+    _forward_port,
+    deliver_tls,
+    qualify_controller,
+)
 from scripts.ops.nebius_ingress_image import DIGEST
+from scripts.ops.nebius_ingress_stage import KubectlStageAPI, StageAPI, stage_controller
 
 from loom.nebius_environment_contract import FoundationBinding
 from loom.nebius_shared_ingress import SharedIngressInstallation
@@ -23,12 +40,219 @@ class OperationError(RuntimeError):
     """Payload-free installation failure; never expose inventory or credentials."""
 
 
+class InstallationAPI(ControllerAPI, Protocol):
+    binding: TLSBinding
+    candidate: str
+    image: str
+
+    def foundation(self) -> FoundationBinding: ...
+    def capacity(self) -> dict[str, Any]: ...
+    def staging(self, installation: SharedIngressInstallation) -> StageAPI: ...
+    def read(self) -> tuple[dict[str, Any], dict[str, Any]]: ...
+    def patch(self, before: dict[str, Any], after: dict[str, Any]) -> None: ...
+    def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]: ...
+    def probe_legacy_pod(self, pod: dict[str, Any]) -> None: ...
+    def probe_public(self, receipt: dict[str, Any]) -> None: ...
+
+
+class _InstalledIngress:
+    """Connect cutover's checks to the exact objects just staged by this operation."""
+
+    def __init__(self, api: InstallationAPI, installation: SharedIngressInstallation,
+                 tls: dict[str, Any], stage: dict[str, Any], staging: StageAPI, state: Path):
+        self.api, self.installation = api, installation
+        self.tls, self.stage, self.staging, self.state = tls, stage, staging, state
+        self.deployment_uid = str(stage["resource_uids"][f"Deployment:{api.binding.namespace}:loom-shared-ingress"])
+
+    def controller(self) -> dict[str, Any]:
+        return qualify_controller(binding=self.api.binding, api=self.api, deployment_uid=self.deployment_uid,
+                                  image=self.api.image, tls_receipt=self.tls)
+
+    def qualify(self) -> None:
+        if self.api.foundation() != self.installation.foundation:
+            raise OperationError("live configuration changed during ingress installation")
+        self.api.capacity()
+        journal = self.state / (self.api.binding.installation_id + ".json")
+        record = json.loads(private_state._private_read(journal, limit=1024 * 1024))
+        if record.get("status") != "controller_staged":
+            raise OperationError("completed initial staging journal required for cutover")
+        if stage_controller(self.installation, binding=self.api.binding, api=self.staging, state_dir=self.state) != self.stage:
+            raise OperationError("staging identity changed before cutover")
+        proof = self.controller()
+        pods = self.api.list_controller_pods(self.api.binding.namespace)
+        if [p["metadata"]["uid"] for p in pods] != proof["pod_uids"]:
+            raise OperationError("controller membership changed before legacy probe")
+        for pod in pods:
+            self.api.probe_legacy_pod(pod)
+        if [p["metadata"]["uid"] for p in self.api.list_controller_pods(self.api.binding.namespace)] != proof["pod_uids"]:
+            raise OperationError("controller membership changed during legacy probe")
+
+    def read(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        return self.api.read()
+
+    def patch(self, before: dict[str, Any], after: dict[str, Any]) -> None:
+        self.api.patch(before, after)
+
+    def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]:
+        return self.api.guard(action, owner, candidate)
+
+    def public_probe(self) -> None:
+        self.api.probe_public(self.tls)
+
+
+def install_ingress(*, api: InstallationAPI, certificate_config: dict[str, Any], state_dir: Path,
+                    qualification_timeout: int = 180, now: datetime | None = None,
+                    roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
+    """Deliver → stage → prove current Pods/legacy route → guarded public cutover.
+
+    Trust roots/clock are injectable for disposable qualification only; installed
+    callers use the real clock and system trust. The protected transport is the
+    authority for all arguments. No arbitrary manifests or tenant inputs enter.
+    """
+    try:
+        if type(qualification_timeout) is not int or not 1 <= qualification_timeout <= 600:
+            raise OperationError("invalid ingress qualification deadline")
+        with private_state._locked_state(state_dir):
+            foundation = api.foundation()
+            api.capacity()
+            tls = deliver_tls(certificate_config, binding=api.binding, api=api, now=now, roots=roots)
+            if api.foundation() != foundation:
+                raise OperationError("live foundation changed before staging")
+            installation = SharedIngressInstallation(
+                installation_id=UUID(api.binding.installation_id), foundation=foundation,
+                image=api.image, tls_secret_name=tls["secret_name"],
+            )
+            staging = api.staging(installation)
+            stage_state = state_dir / "stage"
+            stage = stage_controller(installation, binding=api.binding, api=staging, state_dir=stage_state)
+            connected = _InstalledIngress(api, installation, tls, stage, staging, stage_state)
+            deadline = time.monotonic() + qualification_timeout
+            while True:
+                try:
+                    connected.controller()
+                    break
+                except IngressError:
+                    if time.monotonic() >= deadline:
+                        raise OperationError("current ingress Pods did not qualify before deadline") from None
+                    time.sleep(min(2, max(0, deadline - time.monotonic())))
+            # Qualification includes the legacy route BEFORE any guard or public
+            # mutation. cutover rechecks it again before each mutation/release.
+            result = cutover(api=connected, state_dir=state_dir / "cutover", installation_id=api.binding.installation_id,
+                             candidate=api.candidate, namespace=api.binding.namespace)
+            return {**result, "controller_uid": connected.deployment_uid, "secret_uid": tls["secret_uid"],
+                    "fingerprint_sha256": tls["fingerprint_sha256"]}
+    except OperationError:
+        raise
+    except Exception:
+        raise OperationError("ingress installation incomplete; preserve journals and any owned rollout pause") from None
+
+
 class LiveIngressAPI(KubectlCutoverAPI):
     def __init__(self, kubeconfig: Path, *, binding: TLSBinding, executable: Path, candidate: str,
                  cluster_id: str, api_server: str, ingress_class: str, image: str):
         super().__init__(kubeconfig, binding=binding, executable=executable, candidate=candidate)
         self.cluster_id, self.api_server = cluster_id, api_server
         self.ingress_class, self.image = ingress_class, image
+        self.kubeconfig, self.executable = kubeconfig, executable
+
+    def staging(self, installation: SharedIngressInstallation) -> StageAPI:
+        return KubectlStageAPI(self.kubeconfig, binding=self.binding, executable=self.executable, installation=installation)
+
+    def probe_legacy_pod(self, pod: dict[str, Any]) -> None:
+        try:
+            meta = pod["metadata"]
+            if meta["namespace"] != self.binding.namespace or meta.get("labels", {}).get("app") != "loom-shared-ingress":
+                raise OperationError("legacy probe Pod outside ingress binding")
+
+            def check_pod() -> None:
+                current = self.get_pod(self.binding.namespace, meta["name"])
+                observed = (current or {}).get("metadata", {})
+                if (observed.get("uid") != meta["uid"] or observed.get("resourceVersion") != meta["resourceVersion"]
+                        or observed.get("deletionTimestamp") is not None):
+                    raise OperationError("legacy probe Pod identity changed")
+
+            check_pod()
+            config = self.foundation().platform_config
+            process = subprocess.Popen(
+                [*self.prefix, "port-forward", "--address=127.0.0.1", "-n", self.binding.namespace,
+                 "pod/" + meta["name"], ":8443"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            )
+            try:
+                port = _forward_port(process)
+                probes.probe_legacy(address="127.0.0.1", port=port, hostname=config["public_host"], environment=config["environment"])
+                check_pod()
+                if process.poll() is not None:
+                    raise OperationError("private legacy forwarder exited during qualification")
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("staged ingress legacy HTTPS proof failed") from None
+
+    def read(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            self.verify_identity(self.binding)
+            service = self._get(["get", "service", "loom-web", "-n", self.binding.namespace])
+            config = self._get(["get", "configmap", "loom-platform-config", "-n", self.binding.namespace])
+            if service is None or config is None:
+                raise OperationError("public routing resources unavailable")
+            resource_identity(service, kind="Service", name="loom-web", namespace=self.binding.namespace)
+            resource_identity(config, kind="ConfigMap", name="loom-platform-config", namespace=self.binding.namespace)
+            if json.loads(config["data"]["profile.json"])["candidate_sha"] != self.candidate:
+                raise OperationError("live candidate changed during ingress operation")
+            return service, config
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("live public routing snapshot is unqualified") from None
+
+    def capacity(self) -> dict[str, Any]:
+        try:
+            self.verify_identity(self.binding)
+            rows = []
+            for kind, arguments in (("NodeList", ["get", "nodes"]), ("PodList", ["get", "pods", "--all-namespaces"])):
+                listing = self._get(arguments)
+                if (listing is None or listing.get("kind") != kind or listing.get("apiVersion") != "v1"
+                        or listing.get("metadata", {}).get("continue") or not isinstance(listing.get("items"), list)
+                        or any(not isinstance(item, dict) for item in listing["items"])):
+                    raise OperationError("complete live capacity inventory required")
+                rows.append(listing["items"])
+            result = qualify_capacity(nodes=rows[0], pods=rows[1])
+            self.verify_identity(self.binding)
+            return result
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("live ingress capacity observation unavailable") from None
+
+    def probe_public(self, receipt: dict[str, Any]) -> None:
+        try:
+            before = self.read()
+            config = self.foundation().platform_config
+            service = before[0]
+            ports = [p for p in service["spec"]["ports"] if p["port"] == 443 and p["targetPort"] == 8443
+                     and p.get("protocol", "TCP") == "TCP"]
+            addresses = service["status"]["loadBalancer"]["ingress"]
+            if service["spec"]["type"] != "LoadBalancer" or len(ports) != 1 or not addresses:
+                raise OperationError("public HTTPS allocation unavailable")
+            for endpoint in addresses:
+                probes.probe_management(address=endpoint["ip"], port=443, hostname=self.binding.management_host,
+                                        fingerprint=receipt["fingerprint_sha256"])
+                probes.probe_legacy(address=endpoint["ip"], port=443, hostname=config["public_host"], environment=config["environment"])
+            if tuple(map(stable_resource, self.read())) != tuple(map(stable_resource, before)):
+                raise OperationError("public routing identity changed during HTTPS proof")
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("public ingress HTTPS proof failed") from None
 
     def foundation(self) -> FoundationBinding:
         """Read and validate current deployment configuration before rendering."""

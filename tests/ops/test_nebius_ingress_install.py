@@ -8,13 +8,12 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from tests.ops.test_nebius_ingress_cutover import API as RoutingAPI
-from tests.ops.test_nebius_ingress_gateway import inputs as certificate_inputs
-from tests.ops.test_nebius_ingress_operation import inventory as inventory
-from tests.ops.test_nebius_ingress_stage import API as StagingAPI
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
-
 from scripts.ops.nebius_ingress_image import DIGEST
+from tests.ops import test_nebius_ingress_cutover as routing
+from tests.ops import test_nebius_ingress_stage as staging
+from tests.ops.test_nebius_ingress_gateway import inputs as inputs
+from tests.ops.test_nebius_ingress_operation import inventory as inventory
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 from loom.nebius_environment_contract import FoundationBinding
 
@@ -24,14 +23,14 @@ def module():
 
 
 @pytest.fixture
-def installation(certificate_inputs, platform_inputs, inventory, tmp_path):
-    cert, binding, tls, roots, selected, _root = certificate_inputs
+def installation(inputs, platform_inputs, inventory, tmp_path):
+    cert, binding, tls, roots, selected, _root = inputs
     config, _candidate, profile = platform_inputs
     binding = replace(binding, namespace=config["namespace"])
     tls.binding = binding
     inventory["nodes"][0]["status"]["allocatable"].update(cpu="1100m", memory="1152Mi", **{"ephemeral-storage": "2176Mi"})
 
-    class API(RoutingAPI):
+    class API(routing.API):
         def __init__(self):
             super().__init__()
             self.binding, self.image, self.candidate = binding, "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + DIGEST, "a" * 40
@@ -39,13 +38,13 @@ def installation(certificate_inputs, platform_inputs, inventory, tmp_path):
                 row["metadata"]["namespace"] = binding.namespace
             self.config["data"]["environment.json"] = json.dumps(config)
             self.config["data"]["profile.json"] = json.dumps({**profile, "candidate_sha": self.candidate})
-            self.stage = StagingAPI()
+            self.stage = staging.API()
             self.rs_uid, self.pod_uid = str(uuid4()), str(uuid4())
             self.legacy_ok = True
 
         def foundation(self):
             live = json.loads(self.config["data"]["environment.json"])
-            return FoundationBinding(platform_config_json=json.dumps({**live, "shared_ingress_enabled": False}),
+            return FoundationBinding(platform_config_json=json.dumps({**live, "shared_ingress_enabled": False}, sort_keys=True),
                                      public_dns_zone=binding.child_domain, ingress_class_name="loom-shared",
                                      ingress_namespace=binding.namespace, ingress_controller_label="loom-shared-ingress")
 
@@ -77,7 +76,8 @@ def installation(certificate_inputs, platform_inputs, inventory, tmp_path):
         def list_controller_replicasets(self, namespace):
             deployment = self.get_deployment(namespace, "loom-shared-ingress")
             return [] if deployment is None else [{"metadata": {"uid": self.rs_uid, "ownerReferences": [
-                {"kind": "Deployment", "uid": deployment["metadata"]["uid"], "controller": True}]}}]
+                {"apiVersion": "apps/v1", "kind": "Deployment", "name": "loom-shared-ingress",
+                 "uid": deployment["metadata"]["uid"], "controller": True}]}}]
 
         def list_controller_pods(self, namespace):
             deployment = self.get_deployment(namespace, "loom-shared-ingress")
@@ -85,7 +85,8 @@ def installation(certificate_inputs, platform_inputs, inventory, tmp_path):
                 return []
             return [{"metadata": {"name": "ingress-pod", "namespace": binding.namespace, "uid": self.pod_uid,
                                   "resourceVersion": "1", "labels": {"app": "loom-shared-ingress"},
-                                  "ownerReferences": [{"kind": "ReplicaSet", "uid": self.rs_uid, "controller": True}]},
+                                  "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "ingress-rs",
+                                                       "uid": self.rs_uid, "controller": True}]},
                      "spec": {**deployment["spec"]["template"]["spec"], "nodeName": "computeinstance-test"},
                      "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}]
 

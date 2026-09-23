@@ -9,6 +9,8 @@ from uuid import uuid4
 import pytest
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_image import DIGEST
+from tests.ops import test_nebius_ingress_cutover as routing
+from tests.ops.test_nebius_ingress_operation import inventory as inventory
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -17,7 +19,7 @@ def module():
 
 
 @pytest.fixture
-def live(tmp_path, platform_inputs):
+def live(tmp_path, platform_inputs, inventory):
     config, candidate, profile = copy.deepcopy(platform_inputs)
     tls = TLSBinding(str(uuid4()), str(uuid4()), config["namespace"], str(uuid4()), str(uuid4()),
                      "dev.example.test", "management.example.test")
@@ -36,6 +38,10 @@ def live(tmp_path, platform_inputs):
             self.view = {"clusters": [{"name": "nebius-" + config["cluster_id"], "cluster": {
                 "server": config["kubernetes_api_server"], "certificate-authority-data": "test-ca"}}]}
             self.namespace_uid = tls.namespace_uid
+            self.service = routing.API().service
+            self.service["metadata"]["namespace"] = tls.namespace
+            self.node_list = {"apiVersion": "v1", "kind": "NodeList", "items": inventory["nodes"]}
+            self.pod_list = {"apiVersion": "v1", "kind": "PodList", "items": inventory["pods"]}
             self.calls = []
 
         def _run(self, arguments, *, payload=None):
@@ -49,6 +55,13 @@ def live(tmp_path, platform_inputs):
                 return json.dumps(self.view).encode()
             if arguments[:3] == ["get", "configmap", "loom-platform-config"]:
                 return json.dumps(self.config).encode()
+            if arguments[:3] == ["get", "service", "loom-web"]:
+                return json.dumps(self.service).encode()
+            if arguments[:2] == ["get", "nodes"]:
+                return json.dumps(self.node_list).encode()
+            if arguments[:2] == ["get", "pods"]:
+                assert "--all-namespaces" in arguments
+                return json.dumps(self.pod_list).encode()
             raise AssertionError(arguments)
 
     return Live(), config
@@ -104,3 +117,49 @@ def test_image_must_match_fixed_qualified_manifest_in_live_region(live):
     api.image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@sha256:" + "a" * 64
     with pytest.raises(module().OperationError):
         api.foundation()
+
+
+def test_live_snapshot_and_capacity_read_full_bound_resources(live):
+    api, _ = live
+    assert api.read() == (api.service, api.config)
+    assert api.capacity()["reserved_pods"] == 2
+    api.pod_list["items"][0]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "801m"
+    with pytest.raises(module().OperationError):
+        api.capacity()
+
+
+@pytest.mark.parametrize("drift", ["namespace", "deleting", "candidate", "partial-nodes", "partial-pods"])
+def test_live_snapshot_denies_identity_drift_and_partial_inventory(live, drift):
+    api, _ = live
+    if drift == "namespace":
+        api.service["metadata"]["namespace"] = "foreign"
+    elif drift == "deleting":
+        api.service["metadata"]["deletionTimestamp"] = "2026-09-23T23:00:00Z"
+    elif drift == "candidate":
+        api.config["data"]["profile.json"] = json.dumps({"candidate_sha": "f" * 40})
+    else:
+        listing = api.node_list if drift == "partial-nodes" else api.pod_list
+        listing["metadata"] = {"continue": "remaining-page"}
+    with pytest.raises(module().OperationError):
+        api.capacity() if drift.startswith("partial") else api.read()
+
+
+def test_public_probes_use_preserved_service_addresses_and_detect_drift(live, monkeypatch):
+    from scripts.ops import nebius_ingress_probe as probes
+
+    api, _ = live
+    endpoints = []
+    def management(**kwargs):
+        endpoints.append(kwargs)
+    monkeypatch.setattr(probes, "probe_management", management)
+    monkeypatch.setattr(probes, "probe_legacy", lambda **kwargs: endpoints.append(kwargs))
+    api.probe_public({"fingerprint_sha256": "a" * 64})
+    assert endpoints == [
+        {"address": "192.0.2.12", "port": 443, "hostname": "management.example.test", "fingerprint": "a" * 64},
+        {"address": "192.0.2.12", "port": 443, "hostname": "nebius.yylx.world", "environment": "development"},
+    ]
+    def changed(**kwargs):
+        api.service["metadata"]["uid"] = str(uuid4())
+    monkeypatch.setattr(probes, "probe_legacy", changed)
+    with pytest.raises(module().OperationError):
+        api.probe_public({"fingerprint_sha256": "a" * 64})

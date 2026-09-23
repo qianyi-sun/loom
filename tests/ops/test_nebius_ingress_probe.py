@@ -36,7 +36,7 @@ def endpoint(tmp_path, monkeypatch):
         def handle(self):
             try:
                 super().handle()
-            except (ConnectionResetError, ssl.SSLEOFError):
+            except (ConnectionResetError, BrokenPipeError, ssl.SSLEOFError):
                 # Certificate-only clients intentionally send no HTTP request.
                 pass
 
