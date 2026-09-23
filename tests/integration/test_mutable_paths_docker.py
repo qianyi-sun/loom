@@ -22,6 +22,7 @@ async def test_multiple_absolute_roots_preserve_changes_deletions_and_attributes
         "rm /data/deleted; mkdir -m 0710 /data/empty; "
         "echo unique > /data/marker; chmod 0751 /data/marker; "
         "ln /data/marker /data/hard; ln -s marker /data/link; "
+        "ln -s /data/marker /data/absolute-link; "
         "chown 1234:1235 /data/marker; echo kernel > /home/task/kernelspec",
         user="root",
     )
@@ -35,7 +36,9 @@ async def test_multiple_absolute_roots_preserve_changes_deletions_and_attributes
         "test \"$(stat -c %a /data/marker)\" = 751; "
         "test \"$(stat -c %u:%g /data/marker)\" = 1234:1235; "
         "test \"$(stat -c %i /data/marker)\" = \"$(stat -c %i /data/hard)\"; "
-        "test \"$(readlink /data/link)\" = marker", user="root",
+        "test \"$(readlink /data/link)\" = marker; "
+        "test \"$(readlink /data/absolute-link)\" = /data/marker; "
+        "test \"$(cat /data/absolute-link)\" = unique", user="root",
     )
     assert result.return_code == 0, result.stderr
 

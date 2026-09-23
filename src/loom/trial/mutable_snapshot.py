@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 _POLICY = WorkspaceStagingPolicy((".loom/**",), (".loom/**",), ())
 
 
-def _archive_evidence(archive: Path) -> dict[str, int | str]:
+def _archive_evidence(archive: Path, root: PurePosixPath | None = None) -> dict[str, int | str]:
     if archive.is_symlink() or not archive.is_file():
         raise WorkspaceSnapshotError("mutable path archive is not a regular file")
     size = archive.stat().st_size
@@ -48,7 +48,7 @@ def _archive_evidence(archive: Path) -> dict[str, int | str]:
                 expanded += member.size
                 if count > MAX_MUTABLE_ENTRIES or expanded > MAX_MUTABLE_BYTES:
                     raise WorkspaceSnapshotError("mutable path archive exceeds content limits")
-        _validate_workspace_archive(archive, _POLICY)
+        _validate_workspace_archive(archive, _POLICY, root=root)
         with archive.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
     except (tarfile.TarError, OSError) as exc:
@@ -114,7 +114,7 @@ async def export_mutable_paths(
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
         await _export_workspace_archive(driver, root, archive)
-        evidence = await asyncio.to_thread(_archive_evidence, archive)
+        evidence = await asyncio.to_thread(_archive_evidence, archive, root)
         records.append({"path": str(root), "archive": archive.name, **evidence})
         _check_totals(records)
     temporary = directory / "manifest.json.tmp"
@@ -137,7 +137,7 @@ async def import_mutable_paths(
     # Validate every archive before changing any verifier directory.
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
-        evidence = await asyncio.to_thread(_archive_evidence, archive)
+        evidence = await asyncio.to_thread(_archive_evidence, archive, root)
         records.append({"path": str(root), "archive": archive.name, **evidence})
         _check_totals(records)
     if declared != {"schema_version": 1, "paths": records}:
