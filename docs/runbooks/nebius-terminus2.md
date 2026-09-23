@@ -321,7 +321,17 @@ bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
 bootstraps retain the base Python interpreter and its task dependencies through
 a verifier venv with system-site-packages; uv bootstraps retain their declared
 Python version, exact dependency pins and package-index selection. Recognized
-fixed-commit Git dependencies and explicit verifier asset downloads are prepared
+installer forms include apt's `-qq` and pip's `--no-cache-dir` flags, pinned uv
+installation followed by `source "$HOME/.local/bin/env"` or
+`export PATH="$HOME/.local/bin:$PATH"`, and simple missing-command guards for
+curl or uv. A curl guard may install only curl; a uv guard may install curl and
+must contain the complete pinned uv installation and activation. Task commands,
+nested branches, or other conditional packages inside that guard require
+explicit adaptation. A removed guard leaves a shell no-op to preserve any
+enclosing branch or function. The converter does not evaluate arbitrary shell
+control flow. Verifier scripts containing `<<` outside comment lines require
+explicit adaptation, so heredoc payloads cannot be mistaken for installers.
+Recognized fixed-commit Git dependencies and explicit verifier asset downloads are prepared
 at image build time. Assets are copied into the verifier workspace at the
 original script location; test assertions and reward branches are unchanged.
 If the original script emits a valid reward and then exits nonzero, the wrapper

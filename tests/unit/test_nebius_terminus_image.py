@@ -1,5 +1,6 @@
 """Behavioral boundaries for the bounded Harbor image preparation adapter."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,144 @@ def test_preserves_other_shell_continuations() -> None:
     statement = 'printf "%s" \\\n  "hello"\n'
     result = adapt_harbor_test_script(SCRIPT.replace("rm *.csv\n", statement))
     assert statement in result.script
+
+
+def test_quiet_apt_bootstrap_preserves_packages_and_reward() -> None:
+    script = SCRIPT.replace(
+        "apt-get update\napt-get install -y curl primer3",
+        "apt-get update -qq && apt-get install -y -qq curl primer3 "
+        "&& rm -rf /var/lib/apt/lists/*",
+    )
+    result = adapt_harbor_test_script(script)
+    assert result.apt_packages == ("curl", "primer3")
+    assert result.script.endswith(SCRIPT[SCRIPT.index("if [ $? -eq 0 ]") :])
+
+
+def test_pip_no_cache_flag_is_not_a_requirement() -> None:
+    result = adapt_harbor_test_script(
+        "pip3 install --no-cache-dir pytest==8.3.5 pytest-json-ctrf==0.5.0\n"
+        "pytest /tests/test_state.py -rA\n"
+        "exit $?\n"
+    )
+    assert result.requirements == ("pytest==8.3.5", "pytest-json-ctrf==0.5.0")
+    assert result.system_site_packages
+    assert result.script == "/opt/verifier/bin/pytest /tests/test_state.py -rA\nexit $?\n"
+
+
+def test_uv_path_activation_relocates_only_installer_path() -> None:
+    script = SCRIPT.replace(
+        'source "$HOME/.local/bin/env"', 'export PATH="$HOME/.local/bin:$PATH"',
+    )
+    result = adapt_harbor_test_script(script)
+    assert 'export PATH=' not in result.script
+    assert "python3 /tests/gen_large_csv.py input\n" in result.script
+    assert result.python_version == "3.13"
+
+
+@pytest.mark.parametrize("flag", ["--allow-unauthenticated", "--force-yes", "--purge"])
+def test_apt_behavior_changing_flags_remain_rejected(flag: str) -> None:
+    with pytest.raises(ValueError, match="unsupported apt bootstrap"):
+        adapt_harbor_test_script(SCRIPT.replace("install -y", f"install -y {flag}"))
+
+
+def test_custom_path_activation_is_not_silently_removed() -> None:
+    script = SCRIPT.replace('source "$HOME/.local/bin/env"', 'export PATH="/task/bin:$PATH"')
+    with pytest.raises(ValueError, match="recognized Harbor"):
+        adapt_harbor_test_script(script)
+
+
+@pytest.mark.parametrize("redirect", [">/dev/null 2>&1", "&> /dev/null"])
+def test_missing_curl_guard_relocates_only_curl_installer(redirect: str) -> None:
+    script = SCRIPT.replace(
+        "apt-get update\napt-get install -y curl primer3",
+        f"if ! command -v curl {redirect}; then\n"
+        "  # Installer-only guard.\n"
+        "  apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*\n"
+        "fi",
+    )
+    result = adapt_harbor_test_script(script)
+    assert result.apt_packages == ("curl",)
+    assert "command -v" not in result.script
+    assert result.script.endswith(SCRIPT[SCRIPT.index("if [ $? -eq 0 ]") :])
+    assert "python3 /tests/gen_large_csv.py input\n" in result.script
+
+
+def test_missing_uv_guard_relocates_complete_pinned_installer() -> None:
+    script = SCRIPT.replace(
+        "apt-get update\napt-get install -y curl primer3",
+        "if ! command -v uv &> /dev/null; then\n"
+        "  apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*",
+    ).replace('source "$HOME/.local/bin/env"', 'source "$HOME/.local/bin/env"\nfi')
+    result = adapt_harbor_test_script(script)
+    assert result.apt_packages == ("curl",)
+    assert "command -v" not in result.script
+    assert result.python_version == "3.13"
+    assert result.requirements == ("pytest==8.4.1", "pandas==2.3.3", "pytest-json-ctrf==0.3.5")
+    assert result.script.endswith(SCRIPT[SCRIPT.index("if [ $? -eq 0 ]") :])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "apt-get install -y curl primer3",
+        "apt-get install -y curl\ntouch /tmp/task-output",
+        "apt-get install -y curl\nelse\ntouch /tmp/task-output",
+        "if true; then\napt-get install -y curl\nfi",
+        "curl -LsSf https://astral.sh/uv/0.9.5/install.sh | sh",
+        "# No installation",
+    ],
+)
+def test_guard_with_non_installer_work_is_rejected(body: str) -> None:
+    script = "if ! command -v curl >/dev/null 2>&1; then\n" + body + "\nfi\n" + SCRIPT
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
+def test_unterminated_installer_guard_is_rejected() -> None:
+    script = SCRIPT + "if ! command -v curl >/dev/null 2>&1; then\napt-get install -y curl\n"
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
+def test_guard_comment_backslash_cannot_hide_task_work() -> None:
+    script = (
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\n"
+        "# A shell comment does not continue onto the next physical line. \\\n"
+        "echo TASK_WORK\nfi\n" + SCRIPT
+    )
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
+@pytest.mark.parametrize("opening", ["cat <<'PAYLOAD'", "cat <<-PAYLOAD", "cat <<PAYLOAD"])
+def test_installer_guard_inside_heredoc_requires_explicit_adaptation(opening: str) -> None:
+    script = (
+        opening + "\n"
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\nfi\nPAYLOAD\n" + SCRIPT
+    )
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
+@pytest.mark.parametrize("condition", ["true", "false"])
+def test_relocated_guard_preserves_enclosing_branch_semantics(condition: str) -> None:
+    script = (
+        f"if {condition}; then\n"
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\nfi\nfi\n"
+        "if [ $? -eq 0 ]; then echo TASK_WORK; fi\n"
+        "exit 0\n" + SCRIPT
+    )
+    # Exit before pytest: exercise real shell control flow without executing
+    # installers, changing system files, or requiring the verifier environment.
+    converted = adapt_harbor_test_script(script).script
+    syntax = subprocess.run(["bash", "-n"], input=converted, text=True, capture_output=True)
+    assert syntax.returncode == 0, syntax.stderr
+    result = subprocess.run(["bash"], input=converted, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "TASK_WORK\n"
 
 
 @pytest.mark.parametrize(
