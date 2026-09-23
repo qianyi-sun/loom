@@ -83,6 +83,7 @@ def _configuration(
     # Builder settings include write authority and are activated only with the
     # shared gateway. They cannot be inherited from the standalone installation.
     config.pop("task_image_builder", None)
+    config.pop("shared_ingress_enabled", None)
     return config
 
 

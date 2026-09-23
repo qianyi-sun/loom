@@ -95,6 +95,7 @@ def validate_environment(config: dict[str, Any]) -> None:
         set(config)
         - {
             "public_tls_bootstrap",
+            "shared_ingress_enabled",
             "execution_resource_quota",
             "regional_execution_targets",
             "public_gateway_ipv4",
@@ -136,6 +137,10 @@ def validate_environment(config: dict[str, Any]) -> None:
                 raise NebiusPlatformError(
                     "task egress protected_cidrs must cover configured platform addresses"
                 )
+    if type(config.get("shared_ingress_enabled", False)) is not bool:
+        raise NebiusPlatformError("shared_ingress_enabled must be a boolean")
+    if managed and "shared_ingress_enabled" in config:
+        raise NebiusPlatformError("shared_ingress_enabled belongs only to the standalone platform")
     ExecutionResourceRequestsV1.model_validate(
         config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
     )
@@ -1852,6 +1857,10 @@ def _build_platform(
         )
     )
     app_docs.append(web)
+    if config.get("shared_ingress_enabled", False):
+        origin = _service("loom-web-origin", ns, 443, 8443)
+        origin["spec"]["selector"] = {"app": "loom-web"}
+        app_docs.append(origin)
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
     execution_docs = (
@@ -1887,6 +1896,8 @@ def _build_platform(
     files["60-execution.yaml"] = [doc for doc in execution_docs if doc["kind"] != "Namespace"]
     public = _service("loom-web", ns, 443, 8443)
     public["spec"]["type"] = "LoadBalancer"
+    if config.get("shared_ingress_enabled", False):
+        public["spec"]["selector"] = {"app": "loom-shared-ingress"}
     public["metadata"]["annotations"] = {
         "nebius.com/load-balancer-allocation-id": config["public_allocation_id"]
     }
