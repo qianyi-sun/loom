@@ -1151,3 +1151,75 @@ def test_whoami_auth_error_redacts_signed_url_and_token(
     assert "loom_api_leaked_detail_abcdef" not in err
     assert raw_token not in err
     assert "[REDACTED:" in err
+
+
+@pytest.mark.parametrize("rotate_cookie", [False, True])
+def test_password_login_selects_exported_team_and_saves_rotated_credentials(
+    monkeypatch: pytest.MonkeyPatch, mock_public_auth_server: MockAuthServer,
+    rotate_cookie: bool,
+) -> None:
+    monkeypatch.setenv("ADA_PASSWORD", "test-password")
+    default_team, target_team = str(uuid4()), str(uuid4())
+    mock_public_auth_server.canned[("POST", "/api/v1/auth/login")] = httpx.Response(
+        200, json={"csrf_token": "csrf-initial", "current_team": {"id": default_team}},
+        headers={"set-cookie": "__Host-loom_session=initial; Path=/; HttpOnly; Secure"},
+    )
+    mock_public_auth_server.canned[("POST", "/api/v1/auth/team")] = httpx.Response(
+        200, json={"csrf_token": "csrf-selected", "current_team": {"id": target_team}},
+        headers={"set-cookie": "__Host-loom_session=selected; Path=/; HttpOnly; Secure"}
+        if rotate_cookie else {},
+    )
+    assert main([
+        "auth", "login", "--server", "https://loom.test", "--username", "Ada",
+        "--password", "env:ADA_PASSWORD", "--team-id", target_team,
+    ]) == 0
+    assert len(mock_public_auth_server.requests) == 2
+    request = mock_public_auth_server.requests[1]
+    assert request.url.path == "/api/v1/auth/team"
+    assert json.loads(request.content) == {"team_id": target_team}
+    assert request.headers["Cookie"] == "__Host-loom_session=initial"
+    assert request.headers["X-Loom-CSRF"] == "csrf-initial"
+    cfg = load_config()
+    assert cfg.auth_session_cookie == ("selected" if rotate_cookie else "initial")
+    assert cfg.auth_session_cookie_name == "__Host-loom_session"
+    assert cfg.auth_csrf_token == "csrf-selected"
+    assert cfg.auth_token is None
+
+
+@pytest.mark.parametrize("selection_response", [
+    httpx.Response(403, json={"detail": "user is not a team member"}),
+    httpx.Response(200, json={"csrf_token": "rotated", "current_team": {"id": "wrong-team"}}),
+])
+def test_failed_team_login_preserves_previous_login_and_returns_nonzero(
+    monkeypatch: pytest.MonkeyPatch, mock_public_auth_server: MockAuthServer,
+    selection_response: httpx.Response,
+) -> None:
+    monkeypatch.setenv("ADA_PASSWORD", "test-password")
+    save_config(LoomConfig(server_url="https://previous.test", auth_token="previous-token"))
+    mock_public_auth_server.canned[("POST", "/api/v1/auth/login")] = httpx.Response(
+        200, json={"csrf_token": "csrf-initial"},
+        headers={"set-cookie": "__Host-loom_session=initial; Path=/; HttpOnly; Secure"},
+    )
+    mock_public_auth_server.canned[("POST", "/api/v1/auth/team")] = selection_response
+    assert main([
+        "auth", "login", "--server", "https://loom.test", "--username", "Ada",
+        "--password", "env:ADA_PASSWORD", "--team-id", str(uuid4()),
+    ]) != 0
+    assert load_config().server_url == "https://previous.test"
+    assert load_config().auth_token == "previous-token"
+    assert load_config().auth_session_cookie is None
+    assert len(mock_public_auth_server.requests) == 2
+
+
+def test_token_login_rejects_team_selection(
+    monkeypatch: pytest.MonkeyPatch, mock_public_auth_server: MockAuthServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("TEST_TOKEN", "test-token")
+    assert main([
+        "auth", "login", "--server", "https://loom.test", "--token", "env:TEST_TOKEN",
+        "--team-id", str(uuid4()),
+    ]) == 2
+    assert "--team-id requires username/password login" in capsys.readouterr().err
+    assert load_config().auth_token is None
+    assert not mock_public_auth_server.requests

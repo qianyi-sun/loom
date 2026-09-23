@@ -1,3 +1,4 @@
+import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 import { ProgressSummary } from "../components/TrialProgress";
 /**
@@ -14,7 +15,6 @@ import type { components } from "../api/schema";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
@@ -383,11 +383,7 @@ export default function BatchDetail(): JSX.Element {
             </div>
           ) : null}
 
-          <div className="grid gap-3 lg:grid-cols-2">
-            {batchInspectionCommands(c.id).map((command) => (
-              <CommandSnippet key={command} label="Batch CLI" command={command} />
-            ))}
-          </div>
+          <CommandActions title="Batch CLI" label="Inspect with CLI" commands={batchInspectionCommands(c.id)} />
 
           <BatchDeliveryExport batchId={c.id} state={c.state} />
 

@@ -517,6 +517,26 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
 
 def _batch_create(args: argparse.Namespace) -> int:
     def _body() -> int:
+        request_json = getattr(args, "request_json", None)
+        if request_json is not None:
+            conflicting = [
+                "--" + dest.replace("_", "-")
+                for dest, default in args.batch_create_defaults.items()
+                if dest != "request_json" and getattr(args, dest, default) != default
+            ]
+            if conflicting:
+                sys.stderr.write(
+                    "error: --request-json is a complete batch request; omit "
+                    + ", ".join(conflicting) + ".\n",
+                )
+                return 2
+            cfg = require_logged_in()
+            with authed_client(cfg) as c:
+                response = c.post("/api/v1/batches", json=request_json)
+            body = assert_2xx(response, action="create batch from request JSON")
+            print(f"Created batch {body.get('name') or '(server-generated)'}:")
+            _print_batch_summary(body)
+            return 0
         warn_legacy_backend_flag(args.backend)
         if args.storage_preflight_evidence is not None:
             validation = validate_minio_storage_preflight_artifact(
@@ -1582,10 +1602,20 @@ def dispatch(argv: list[str]) -> int:
             "optional label, provider_connection_id, and provider_model_id."
         ),
     )
-    p_bc.add_argument(
+    request_source = p_bc.add_mutually_exclusive_group(required=True)
+    request_source.add_argument(
+        "--request-json",
+        type=lambda raw: _load_task_filter_json(raw, flag="--request-json"),
+        default=None,
+        help=(
+            "Complete POST /api/v1/batches request as JSON or @file.json. "
+            "Submitted unchanged with normal authentication and server validation; "
+            "cannot be combined with other batch creation options."
+        ),
+    )
+    request_source.add_argument(
         "--purpose",
         choices=("evaluation", "trajectory_generation"),
-        required=True,
         help=(
             "Batch purpose. evaluation = native benchmarks with verification; "
             "trajectory_generation = TaskSets and/or benchmarks (transition), "
@@ -1816,7 +1846,15 @@ def dispatch(argv: list[str]) -> int:
             "Replays inherit this seed."
         ),
     )
-    p_bc.set_defaults(handler=_batch_create)
+    # Future creation options must also fail closed with a complete request.
+    p_bc.set_defaults(
+        handler=_batch_create,
+        batch_create_defaults={
+            action.dest: action.default
+            for action in p_bc._actions
+            if action.dest != "help"
+        },
+    )
 
     p_bl = batch_sub.add_parser("list", help="List batches.")
     p_bl.add_argument(

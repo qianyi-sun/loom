@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 const sections: Record<string, string> = {
+  "getting-started": "Getting started",
   monitor: "Monitor",
   library: "Run Library",
   providers: "Providers",

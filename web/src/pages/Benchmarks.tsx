@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
  * Benchmarks list — registered benchmark suites grouped by series.
@@ -18,8 +19,6 @@ import { useMemo, useState } from "react";
 
 import { api } from "../api";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -31,8 +30,6 @@ import {
   type PageState,
 } from "../components/paginationState";
 import { cn } from "../lib/cn";
-import { benchmarkCatalogCommands } from "../lib/quickstartSnippets";
-import { currentServerOrigin } from "../lib/serverOrigin";
 
 interface BenchmarkRow {
   id: string;
@@ -97,10 +94,6 @@ function readinessBadgeClasses(row: BenchmarkRow): string {
 
 export default function Benchmarks(): JSX.Element {
   const [page, setPage] = useState<PageState>(initialPage);
-  const benchmarkCommands = useMemo(
-    () => benchmarkCatalogCommands(currentServerOrigin()),
-    [],
-  );
   const query = useQuery({
     queryKey: queryKeys["benchmarks"](page.current),
     queryFn: () =>
@@ -262,32 +255,10 @@ export default function Benchmarks(): JSX.Element {
         </p>
       </header>
 
-      <DocsCallout title="Benchmark catalog guidance" tone="info">
-        <p>
-          This hidden power-user view shows the full benchmark registry,
-          including rows New Batch may disable while data is missing or stale.
-          Ready rows have runnable task configs; Needs publish rows have no
-          runnable tasks yet; Needs republish rows usually have raw task rows
-          that need valid `TaskConfig` backfill.
-        </p>
-        <div className="grid gap-3 lg:grid-cols-3">
-          <CommandSnippet
-            label="Remote catalog"
-            command={benchmarkCommands[0]}
-            helperText="Read the service catalog with a user-owned API token."
-          />
-          <CommandSnippet
-            label="Readiness audit"
-            command={benchmarkCommands[1]}
-            helperText="Operator check for raw, valid, and blocked benchmark rows."
-          />
-          <CommandSnippet
-            label="Config sync dry-run"
-            command={benchmarkCommands[2]}
-            helperText="Preview config/benchmarks.toml changes before writing rows."
-          />
-        </div>
-      </DocsCallout>
+      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
+        <p>Ready benchmarks have runnable tasks. Missing or stale task configurations require operator attention.</p>
+        <HelpButton topic="tasks">Benchmark readiness guide</HelpButton>
+      </div>
 
       <Card>
         <Card.Body className="p-0">{body}</Card.Body>

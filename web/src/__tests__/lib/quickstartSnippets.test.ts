@@ -1,113 +1,38 @@
 import {
-  benchmarkCatalogCommands,
   batchInspectionCommands,
-  cliLoginCommands,
   containsUnsafeSnippetValue,
-  hostedProviderCommands,
-  oracleSmokeBatchCommand,
-  providerSmokeBatchCommand,
   rateCardExampleJson,
   trialDownloadCommands,
   usageCommand,
 } from "../../lib/quickstartSnippets";
 
-describe("quickstartSnippets", () => {
-  it("builds public CLI login commands from the current server origin", () => {
-    expect(cliLoginCommands("https://loom.example.com")).toEqual([
-      "export LOOM_PASSWORD=...",
-      "loom auth login --server https://loom.example.com --username USER --password env:LOOM_PASSWORD",
-      "loom auth whoami",
-    ]);
-  });
-
-  it("preserves route-prefixed server URLs in login commands", () => {
-    expect(cliLoginCommands("https://yylx.world/prod/")).toContain(
-      "loom auth login --server https://yylx.world/prod --username USER --password env:LOOM_PASSWORD",
-    );
-  });
-
-  it("uses env/file based secrets for hosted provider setup", () => {
-    const command = hostedProviderCommands(
-      "https://loom.example.com",
-      "together-prod",
-    ).join("\n");
-
-    expect(command).toContain("export PROVIDER_API_KEY=...");
-    expect(command).toContain("--api-key env:PROVIDER_API_KEY");
-    expect(command).toContain("loom providers test together-prod");
-    expect(command).not.toContain("sk-");
-  });
-
-  it("preserves route-prefixed server URLs in provider setup commands", () => {
-    const command = hostedProviderCommands(
-      "https://yylx.world/dev/",
-      "yibuapi-staging",
-    ).join("\n");
-
-    expect(command).toContain(
-      "loom auth login --server https://yylx.world/dev --username USER --password env:LOOM_PASSWORD",
-    );
-    expect(command).toContain("loom providers test yibuapi-staging");
-  });
-
-  it("builds safe batch and download commands", () => {
-    expect(oracleSmokeBatchCommand()).toContain("--agent oracle");
-    expect(providerSmokeBatchCommand("smoke-openai", "gpt-4o-mini")).toContain(
-      "--provider smoke-openai",
-    );
-    expect(batchInspectionCommands("batch-1")).toContain(
+describe("resource commands", () => {
+  it("uses the selected resource and usage scope", () => {
+    expect(batchInspectionCommands("batch-1")).toEqual([
       "loom eval batch show batch-1",
-    );
+      "loom eval trial list --batch-id batch-1",
+    ]);
     expect(trialDownloadCommands("trial-1", "main/report.json")).toContain(
       "loom eval trial download trial-1 --kind artifact --artifact-key main/report.json --output artifact.bin",
     );
+    expect(usageCommand("2026-06-01", "2026-06-30", "team-1", true)).toBe(
+      "loom eval usage --start 2026-06-01 --end 2026-06-30 --team-id team-1 --include-batches",
+    );
+    expect(usageCommand("2026-06-01", "2026-06-30")).not.toContain("--team-id");
   });
 
-  it("builds secret-safe benchmark catalog commands", () => {
-    const commands = benchmarkCatalogCommands("https://loom.example.com/");
-
-    expect(commands).toEqual([
-      "loom datasets list --remote --server-url https://loom.example.com --token env:LOOM_API_TOKEN",
-      'loom datasets audit --all --db-url "$LOOM_DB_URL"',
-      [
-        "loom datasets sync-config",
-        "  --config config/benchmarks.toml",
-        '  --db-url "$LOOM_DB_URL"',
-        "  --dry-run",
-      ].join(" \\\n"),
-    ]);
-    expect(commands.some((command) => containsUnsafeSnippetValue(command))).toBe(
-      false,
+  it("quotes artifact names containing spaces and shell syntax", () => {
+    expect(trialDownloadCommands("trial-1", "main/my report;$(touch bad).json").at(-1)).toBe(
+      "loom eval trial download trial-1 --kind artifact --artifact-key 'main/my report;$(touch bad).json' --output artifact.bin",
     );
+    expect(batchInspectionCommands("batch'one")[0]).toBe("loom eval batch show 'batch'\"'\"'one'");
   });
 
-  it("preserves route-prefixed server URLs in benchmark catalog commands", () => {
-    expect(benchmarkCatalogCommands("https://yylx.world/dev/")[0]).toBe(
-      "loom datasets list --remote --server-url https://yylx.world/dev --token env:LOOM_API_TOKEN",
-    );
-  });
-
-  it("builds usage and rate-card examples", () => {
-    expect(usageCommand("2026-06-01", "2026-06-30")).toBe(
-      "loom eval usage --start 2026-06-01 --end 2026-06-30",
-    );
-    expect(usageCommand("2026-06-01", "2026-06-30", "team-1")).toBe(
-      "loom eval usage --start 2026-06-01 --end 2026-06-30 --team-id team-1",
-    );
-    expect(JSON.parse(rateCardExampleJson())).toMatchObject({
-      provider: "openai",
-      model: "gpt-4o-mini",
-    });
-  });
-
-  it("flags unsafe snippet examples", () => {
+  it("keeps rate-card references free of credentials", () => {
+    expect(JSON.parse(rateCardExampleJson())).toMatchObject({ provider: "openai", model: "gpt-4o-mini" });
+    expect(containsUnsafeSnippetValue(rateCardExampleJson())).toBe(false);
     expect(containsUnsafeSnippetValue("sk-live-secret")).toBe(true);
     expect(containsUnsafeSnippetValue("Authorization: Bearer abc")).toBe(true);
-    expect(
-      containsUnsafeSnippetValue("https://s3.example/object?X-Amz-Signature=abc"),
-    ).toBe(true);
-    expect(containsUnsafeSnippetValue("--api-key env:PROVIDER_API_KEY")).toBe(
-      false,
-    );
+    expect(containsUnsafeSnippetValue("--api-key env:PROVIDER_API_KEY")).toBe(false);
   });
 });

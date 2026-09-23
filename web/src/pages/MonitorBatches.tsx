@@ -4,8 +4,6 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import Pagination from "../components/Pagination";
@@ -15,7 +13,6 @@ import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { ownershipLabel, ownershipSearchText } from "../lib/ownership";
-import { batchInspectionCommands } from "../lib/quickstartSnippets";
 import { batchStateVariant } from "../lib/statusVariant";
 import { SkeletonRows } from "./MonitorControls";
 import { TERMINAL_BATCH_STATES, compactCostLabel, type BatchRow } from "./monitorPresentation";
@@ -104,15 +101,6 @@ export function BatchesView({
   const COLS = 6;
   return (
     <div className="space-y-3">
-      {items.length > 0 ? (
-        <DocsCallout title="Monitor quick actions" tone="info">
-          <div className="grid gap-3 lg:grid-cols-2">
-            {batchInspectionCommands(items[0].id).map((command) => (
-              <CommandSnippet key={command} label="Batch CLI" command={command} />
-            ))}
-          </div>
-        </DocsCallout>
-      ) : null}
       <Card>
         <Card.Body className="p-0">
           <div className="overflow-x-auto" role="region" aria-label="Monitored batches" tabIndex={0}>

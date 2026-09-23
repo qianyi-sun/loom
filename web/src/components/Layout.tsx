@@ -14,6 +14,9 @@ import NavBar from "./NavBar";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { RouteRecoveryBoundary } from "./RouteRecoveryBoundary";
 import { SkipLink } from "./SkipLink";
+import { HelpProvider } from "./HelpProvider";
+import { HelpButton } from "./HelpButton";
+import { helpTopicForPath } from "../lib/helpContent";
 
 const SESSION_FAILURE_COPY = {
   network: "Loom could not reach the browser session service.",
@@ -22,6 +25,10 @@ const SESSION_FAILURE_COPY = {
 } as const;
 
 export default function Layout(): JSX.Element {
+  return <HelpProvider><LayoutContent /></HelpProvider>;
+}
+
+function LayoutContent(): JSX.Element {
   const {
     isAuthenticated,
     isAdmin,
@@ -38,7 +45,7 @@ export default function Layout(): JSX.Element {
     loc.pathname.startsWith("/auth/setup") ||
     loc.pathname.startsWith("/auth/reset");
   const isPublicRoute =
-    isAuthLogin || isInviteAccept || isPasswordAction;
+    isAuthLogin || isInviteAccept || isPasswordAction || loc.pathname === "/getting-started";
 
   if (sessionStatus === "loading") {
     return (
@@ -98,6 +105,7 @@ export default function Layout(): JSX.Element {
             isAuthLogin ? "max-w-6xl" : "max-w-3xl",
           )}
         >
+          <div className="mb-3 flex justify-end"><HelpButton topic={helpTopicForPath(loc.pathname)} /></div>
           <RouteContext />
           <RouteRecoveryBoundary />
         </main>
@@ -116,6 +124,7 @@ export default function Layout(): JSX.Element {
       />
       <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto">
         <div className="mx-auto max-w-7xl animate-fade-in px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
+          <div className="mb-3 flex justify-end"><HelpButton topic={helpTopicForPath(loc.pathname)} /></div>
           <RouteContext />
           <RouteRecoveryBoundary />
         </div>

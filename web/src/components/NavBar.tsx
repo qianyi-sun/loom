@@ -22,6 +22,7 @@ const NAV_ITEMS = [
   { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
   { to: "/task-sets", label: "Task sets" },
+  { to: "/getting-started", label: "Getting started" },
 ];
 
 const TEAM_ADMIN_NAV_ITEM = { to: "/admin/access", label: "Team access" };

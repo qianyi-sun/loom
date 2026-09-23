@@ -1062,18 +1062,27 @@ controls over the complete timestamp/id-ordered history. Loading marks page
 controls unavailable without removing keyboard focus; an error keeps Previous
 and Retry available; the terminal page is announced explicitly.
 
-Most web workflows now include contextual quickstarts directly on the page. Use
-the copyable snippets in Settings, Team access, Providers, New Batch, Monitor,
-Batch Detail, Trial Detail, Run Library, Usage, Rate cards, Tasks, and
-Benchmarks when you want the CLI/API equivalent for the page you are viewing.
-Home intentionally avoids telling users to run operator import or worker
-commands from the browser; those items appear as operator actions when the
-service reports that platform prerequisites are missing. The examples use safe
-placeholders and `env:`/`file:` secret references so users do not need to switch
-back to this guide for the common path.
+Getting started is available from Home and the main navigation, including before
+sign-in. Choose Web, CLI, or API for a short path through account access, provider
+setup, task selection, and results. Home keeps its readiness summary and recent
+activity; collapse the onboarding card when it is no longer useful.
+
+Help opens a contextual side panel without leaving the current page, changing
+Monitor filters, or clearing a New batch form. Related topics cover results,
+Run Library reuse, Pipelines, and usage; rate-card administration remains
+restricted to platform admins. The panel and Getting started link directly to
+corresponding sections of this repository. Versioned builds pin those links to
+the loaded frontend commit. Local builds without a commit explicitly link to
+`dev` and warn that the documentation may differ.
+
+Resource-specific commands are available on demand: **Inspect with CLI** on a
+batch, **Download with CLI** on a trial, shared artifact download in Run Library,
+and **Export usage query** in Usage. These commands use the displayed resource
+and filters. Sign the CLI into the same server and team before running them.
 
 The CLI uses the same username/password account by default. Use
 `loom auth login --server URL --username USER --password env:LOOM_PASSWORD`,
+add `--team-id TEAM_UUID` when the desired team differs from the account's default,
 then `loom auth whoami` to verify the active server, user, current team, role,
 and scopes. Team owners can still create, rotate, or revoke named API tokens
 from Team access for automation; those tokens are user-owned, scoped, and
@@ -1082,6 +1091,63 @@ credentials only and cannot create batches, direct trials, reruns, clones, or
 artifact reuse jobs. Completed run metadata and safe artifacts are shared
 across teams through the Run Library; ordinary batch, trial, trajectory, ATIF,
 artifact, cancellation, rerun, and provider routes remain current-team scoped.
+
+### Export the current batch configuration
+
+In New batch, complete the form and choose **Export CLI / API** in Release
+review. Export runs the same validation as Submit and includes the current task
+selection, purpose, combinations, provider/model IDs, retry settings, and advanced
+configuration. It does not submit a batch or save a manually entered model. Save
+that model first, or select an existing model, before exporting.
+
+For CLI, download `batch.json` and run the generated command from the same
+folder. Set `LOOM_USERNAME` and `LOOM_PASSWORD` to your approved credentials.
+The login command selects this deployment and explicitly selects the form's
+team with `--team-id`; a denied team switch stops before submission. Team
+selection applies to password sessions, not fixed-team API tokens.
+Use a current CLI version supporting both `loom eval batch create --request-json`
+and `loom auth login --team-id`; older clients need updating. The complete request is passed to
+the normal batch API unchanged, with the usual authentication and server-side
+validation:
+
+```bash
+loom eval batch create --request-json @batch.json
+```
+
+`--request-json` also accepts an inline JSON object. It replaces the ordinary
+batch-creation flags, including `--purpose`; do not combine the two input modes.
+The JSON itself contains `purpose` and `team_id`. Export preserves configuration,
+so review it before sharing it with anyone else.
+
+### Quickstart: submit through the API
+
+Use a user-owned API token that can submit work for the intended team (see
+[accounts and teams](#web-sessions-and-teams)). Set `LOOM_TOKEN` in your shell and
+use the deployment URL, including any path prefix, as `LOOM_SERVER`. Never paste
+raw tokens into saved commands or the browser UI.
+
+First, verify access with a read-only request:
+
+```bash
+curl --fail-with-body "${LOOM_SERVER}/api/v1/batches" \
+  --header "Authorization: Bearer ${LOOM_TOKEN:?Set LOOM_TOKEN first}"
+```
+
+Then prepare the configuration in New batch and use **Export CLI / API → API**.
+The generated request targets the current deployment and uses the validated
+form JSON. Running it creates a batch. Alternatively, use the downloaded
+`batch.json` with the same endpoint:
+
+```bash
+curl --fail-with-body --request POST "${LOOM_SERVER}/api/v1/batches" \
+  --header "Authorization: Bearer ${LOOM_TOKEN:?Set LOOM_TOKEN first}" \
+  --header 'Content-Type: application/json' \
+  --data-binary @batch.json
+```
+
+Open Monitor to follow the batch, then its trial detail for results, artifacts,
+and downloads. An exported request is not proof of provider or execution
+readiness; normal server validation and runtime prerequisites still apply.
 
 ### Default views and diagnostics
 

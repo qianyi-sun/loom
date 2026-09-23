@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
  * Side-by-side comparison of two trials. Useful for A/B'ing model
@@ -17,7 +18,6 @@ import { api } from "../api";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
 import { Input } from "../components/Input";
@@ -164,13 +164,10 @@ export default function TrialCompare(): JSX.Element {
             Compare trials
           </h1>
         </header>
-        <DocsCallout title="Compare checklist" tone="info">
-          <p>
-            Compare trials with the same task when you are reviewing model,
-            agent, or provider changes. Open a trial first so the left column is
-            prefilled, then paste the second trial ID here.
-          </p>
-        </DocsCallout>
+        <p className="text-sm text-slate-600">
+          Compare trials for the same task to assess model, agent, or provider changes.
+        </p>
+        <HelpButton topic="results">Comparing trial results</HelpButton>
         <Card>
           <Card.Body>
             <p className="text-sm text-slate-500">

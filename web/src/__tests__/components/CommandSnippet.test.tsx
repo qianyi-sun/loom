@@ -34,6 +34,18 @@ describe("CommandSnippet", () => {
     expect(await screen.findByText("Copied")).toBeInTheDocument();
   });
 
+  it("reports clipboard failure instead of claiming a copy succeeded", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("Permission denied")) },
+    });
+    render(<CommandSnippet command="loom auth whoami" />);
+    await userEvent.click(screen.getByRole("button", { name: "Copy Command" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not copy");
+    expect(screen.queryByText("Copied")).not.toBeInTheDocument();
+    expect(screen.getByText("loom auth whoami")).toBeInTheDocument();
+  });
+
   it("wraps long commands inside the command block", () => {
     render(
       <CommandSnippet

@@ -29,6 +29,8 @@ export interface ModalProps {
   dismissible?: boolean;
   /** `sm` = 400px, `md` = 560px (default), `lg` = 720px. */
   size?: "sm" | "md" | "lg";
+  /** Use the same accessible boundary for contextual side panels. */
+  placement?: "center" | "right";
 }
 
 const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
@@ -204,6 +206,7 @@ function ModalContent({
   footer,
   dismissible = true,
   size = "md",
+  placement = "center",
   descriptionId,
   layer,
   titleId,
@@ -304,7 +307,10 @@ function ModalContent({
   return (
     <div
       data-loom-modal-overlay="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in"
+      className={cn(
+        "fixed inset-0 z-50 flex animate-fade-in",
+        placement === "right" ? "items-stretch justify-end" : "items-center justify-center p-4",
+      )}
     >
       {dismissible ? (
         <button
@@ -326,11 +332,12 @@ function ModalContent({
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         className={cn(
-          "glass-card relative w-full overflow-hidden animate-slide-up",
+          "glass-card relative flex w-full flex-col overflow-hidden animate-slide-up",
+          placement === "right" ? "h-full rounded-none" : "max-h-[calc(100dvh-2rem)]",
           SIZE_CLASSES[size],
         )}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
           <div className="min-w-0">
             <h2 id={titleId} className="text-base font-semibold text-slate-900">
               {title}
@@ -367,9 +374,9 @@ function ModalContent({
             </button>
           ) : null}
         </div>
-        <div className="px-5 py-4">{children}</div>
+        <div className="min-h-0 overflow-y-auto px-5 py-4">{children}</div>
         {footer ? (
-          <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/50 px-5 py-3">
+          <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200 bg-slate-50/50 px-5 py-3">
             {footer}
           </div>
         ) : null}

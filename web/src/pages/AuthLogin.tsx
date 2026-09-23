@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /** Signed-out onboarding: sign-in, account request, password-reset request (#775). */
 
@@ -9,13 +10,9 @@ import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
-import { cliLoginCommands } from "../lib/quickstartSnippets";
-import { currentServerOrigin } from "../lib/serverOrigin";
 
 const SIGN_IN_FAILURE = new Error(
   "Sign-in failed. Check your username and password, then try again.",
@@ -67,7 +64,6 @@ export default function AuthLogin(): JSX.Element {
 
   const publicTeamItems = publicTeams.data?.items ?? [];
   const hasPublicTeams = publicTeamItems.length > 0;
-  const cliLoginCommand = cliLoginCommands(currentServerOrigin()).join("\n");
 
   return (
     <div className="space-y-8">
@@ -150,18 +146,10 @@ export default function AuthLogin(): JSX.Element {
         </Card>
 
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-1">
-          <DocsCallout
-            title="First run checklist"
-            tone="info"
-            className="md:col-span-2 lg:col-span-1"
-          >
-            <ol className="list-decimal space-y-1 pl-4">
-              <li>Submit a username request for a publicly available team.</li>
-              <li>Wait for an admin to approve it and share a password link.</li>
-              <li>Set your password, then sign in here or from CLI.</li>
-              <li>Create a provider, then launch a one-task smoke batch.</li>
-            </ol>
-          </DocsCallout>
+          <div className="space-y-2 text-sm text-slate-600 md:col-span-2 lg:col-span-1">
+            <p>New to Loom? Request a team account, set your password after approval, then choose an available provider to run your first task.</p>
+            <HelpButton topic="access">Account setup guide</HelpButton>
+          </div>
 
           <Card>
             <Card.Header
@@ -289,7 +277,7 @@ export default function AuthLogin(): JSX.Element {
               description="Use the same approved username and password with the CLI."
             />
             <Card.Body>
-              <CommandSnippet label="CLI login" command={cliLoginCommand} />
+              <HelpButton topic="access">Connect through CLI or API</HelpButton>
             </Card.Body>
           </Card>
         </div>

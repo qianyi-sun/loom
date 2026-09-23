@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
  * /providers/:id — tab shell + Overview (inline) + Settings (inline).
@@ -10,8 +11,6 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
-import DocsCallout from "../components/DocsCallout";
 import LoadingState from "../components/LoadingState";
 import DeleteConnectionModal from "../components/providers/DeleteConnectionModal";
 import ModelsTab from "../components/providers/ModelsTab";
@@ -32,7 +31,6 @@ import {
   providerStatusSummary,
 } from "../lib/providerDisplay";
 import { formatLocalDateTime } from "../lib/dateTime";
-import { providerSmokeBatchCommand } from "../lib/quickstartSnippets";
 
 type TabName = "overview" | "models" | "settings";
 type TestResult = { status: "valid" | "invalid"; last_validation_error?: string | null };
@@ -284,29 +282,7 @@ function OverviewTab({
             )}
           </div>
         )}
-        <DocsCallout title="Provider next steps" tone="info">
-          <p>
-            Use these checks after creating or rotating the connection, before
-            launching a larger benchmark.
-          </p>
-          <div className="grid gap-3 lg:grid-cols-2">
-            <CommandSnippet
-              label="Test provider"
-              command={`loom providers test ${conn.name}`}
-            />
-            <CommandSnippet
-              label="Refresh models"
-              command={`loom providers models ${conn.name} --refresh`}
-            />
-          </div>
-          <CommandSnippet
-            label="One-task provider smoke"
-            command={providerSmokeBatchCommand(
-              conn.name,
-              conn.allowed_models?.[0] ?? "gpt-4o-mini",
-            )}
-          />
-        </DocsCallout>
+        <HelpButton topic="providers">Provider setup guide</HelpButton>
       </Card.Body>
     </Card>
   );

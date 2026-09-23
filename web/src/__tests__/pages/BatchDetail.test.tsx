@@ -288,8 +288,10 @@ describe("BatchDetail run plan", () => {
     renderBatchDetail();
 
     expect(await screen.findByText(/Run plan/i)).toBeInTheDocument();
-    expect(screen.getAllByText("Batch CLI").length).toBeGreaterThan(0);
+    expect(screen.queryByText(`loom eval batch show ${BATCH_ID}`)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Inspect with CLI" }));
     expect(screen.getByText(`loom eval batch show ${BATCH_ID}`)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "close" }));
     expect(
       screen.getByText("HumanEval / all runnable tasks / 164 tasks"),
     ).toBeInTheDocument();

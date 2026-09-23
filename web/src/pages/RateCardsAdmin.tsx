@@ -1,3 +1,4 @@
+import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 /**
  * Rate-cards browse + publish.
@@ -20,7 +21,6 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
 import { DiagnosticPanel } from "../components/DiagnosticPanel";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { Textarea } from "../components/Input";
@@ -193,21 +193,9 @@ export default function RateCardsAdmin(): JSX.Element {
         </p>
       </header>
 
-      <DocsCallout title="Rate-card JSON example" tone="info">
-        <p>
-          Provider connections can set{" "}
-          <code className="rounded bg-white px-1 py-0.5 font-mono text-xs">
-            rate_card_provider
-          </code>{" "}
-          when the provider's billing namespace differs from the connection
-          name. Publish matching provider/model entries before switching a
-          connection to rate-card pricing.
-        </p>
-        <CommandSnippet
-          label="Rate-card entry"
-          command={rateCardExampleJson()}
-        />
-      </DocsCallout>
+      <CommandActions title="Rate-card JSON reference" label="View JSON reference" description="Match the provider billing namespace and model before publishing a rate card.">
+        <CommandSnippet label="Rate-card entry" command={rateCardExampleJson()} />
+      </CommandActions>
 
       <Card
         data-loom-query="rate-cards"

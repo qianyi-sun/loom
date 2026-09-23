@@ -90,8 +90,11 @@ describe("UsageDashboard", () => {
 
     renderWithProviders(<UsageDashboard />, { route: "/usage" });
 
-    expect(await screen.findByText("Usage CLI")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Export usage query" })).toBeInTheDocument();
+    expect(screen.queryByText(/loom eval usage --start/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Export usage query" }));
     expect(screen.getByText(/loom eval usage --start/)).toHaveTextContent("--end");
+    await userEvent.click(screen.getByRole("button", { name: "close" }));
     expect(screen.getByText("Current team")).toBeInTheDocument();
     expect(screen.getByText("Alpha")).toBeInTheDocument();
     expect(
@@ -108,7 +111,7 @@ describe("UsageDashboard", () => {
 
     renderWithProviders(<UsageDashboard />, { route: "/usage" });
 
-    expect(await screen.findByText("Usage CLI")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Export usage query" })).toBeInTheDocument();
     expect(
       await screen.findByRole("option", { name: "Runtime Research" }),
     ).toBeInTheDocument();
@@ -127,6 +130,7 @@ describe("UsageDashboard", () => {
       );
       expect(latestUrl.searchParams.get("team_id")).toBe("team-b");
     });
+    await user.click(screen.getByRole("button", { name: "Export usage query" }));
     expect(screen.getByText(/loom eval usage --start/)).toHaveTextContent(
       "--team-id team-b",
     );

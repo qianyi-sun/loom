@@ -41,13 +41,8 @@ describe("ProvidersList", () => {
     });
     const newBtn = screen.getByRole("link", { name: /new connection/i });
     expect(newBtn).toHaveAttribute("href", "/providers/new");
-    expect(screen.getByText("Hosted API quickstart")).toBeInTheDocument();
-    expect(
-      screen.getByText(/loom auth login --server/i),
-    ).toHaveTextContent(`${window.location.origin}/dev`);
-    expect(screen.getByText(/loom providers create/)).toHaveTextContent(
-      "--api-key env:PROVIDER_API_KEY",
-    );
+    expect(screen.getByText("Provider setup guide")).toBeInTheDocument();
+    expect(screen.queryByText(/loom providers create/)).not.toBeInTheDocument();
   });
 
   it("renders a table row per connection", async () => {

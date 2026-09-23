@@ -221,7 +221,10 @@ Gateway, Postgres, MinIO, or worker routes.
 
 - `loom auth login --server URL --username USER --password env:LOOM_PASSWORD`
   stores the public server URL and browser-session credentials for the approved
-  account in `$XDG_CONFIG_HOME/loom/config.toml`. `loom auth login --token ...`
+  account in `$XDG_CONFIG_HOME/loom/config.toml`. Optional `--team-id UUID`
+  selects an authorized team for that password session via `/api/v1/auth/team`,
+  preserving rotated session/CSRF credentials. It is not valid for bearer login.
+  `loom auth login --token ...`
   remains available for user-owned API tokens used by automation. Legacy
   unowned team tokens may still authenticate for compatibility, but user-facing
   submissions reject them because they cannot provide a submitting user. The
@@ -241,6 +244,11 @@ Gateway, Postgres, MinIO, or worker routes.
   validates agents locally when the local catalog is complete, and otherwise
   resolves the deployed service's `/api/v1/agents` catalog so service-mode
   submissions do not require `loom-launcher` installed in the operator venv.
+  Alternatively, `loom eval batch create --request-json @batch.json` submits a
+  complete API request unchanged, as exported from New batch. This mode replaces
+  the individual creation flags and relies on the normal server validation and
+  team authorization; it does not resolve or replace the supplied provider/model
+  IDs.
 - `loom eval trial download TRIAL_ID --kind bundle|atif|trajectory|artifact` downloads
   through service-proxied `/api/v1/trials/...` routes. The CLI does not print
   raw MinIO/S3 signed URLs; `trial show` prints download commands. `bundle`

@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
@@ -5,7 +6,6 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, type ArtifactSummary, type RunLibraryBatch } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Card } from "../components/Card";
-import DocsCallout from "../components/DocsCallout";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import { ARTIFACT_LABELS } from "../lib/artifactLabels";
@@ -204,13 +204,10 @@ export default function RunLibrary(): JSX.Element {
         </div>
       </div>
 
-      <DocsCallout title="Reuse guide" tone="info">
-        <p>
-          Clone copies the run shape into your current team. Provider
-          credentials are not copied; choose one of your own provider
-          connections on the shared run detail page before queueing the clone.
-        </p>
-      </DocsCallout>
+      <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
+        <p>Clone copies the run configuration. Choose a provider connection from your team; credentials are not copied.</p>
+        <HelpButton topic="reuse">Reuse guide</HelpButton>
+      </div>
 
       <RunLibraryFilters teamOptions={teamOptions} />
 

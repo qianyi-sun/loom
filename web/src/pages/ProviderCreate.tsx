@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 /**
  * /providers/new — create form. Honours ?returnTo for redirects
  * after successful create.
@@ -6,13 +7,10 @@ import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import ProviderForm, {
   type ProviderFormValues,
 } from "../components/providers/ProviderForm";
 import { useCreateConnection } from "../hooks/providers";
-import { hostedProviderCommands } from "../lib/quickstartSnippets";
-import { currentServerOrigin } from "../lib/serverOrigin";
 
 export default function ProviderCreate(): JSX.Element {
   const navigate = useNavigate();
@@ -69,10 +67,7 @@ export default function ProviderCreate(): JSX.Element {
               select a model in New Batch.
             </p>
             <div className="mt-3">
-              <CommandSnippet
-                label="Hosted API CLI"
-                command={hostedProviderCommands(currentServerOrigin()).join("\n")}
-              />
+              <HelpButton topic="providers">Provider setup guide</HelpButton>
             </div>
           </section>
           <section className="rounded-md border border-slate-200 bg-slate-50 p-3">

@@ -1,88 +1,13 @@
-function cleanOrigin(serverOrigin: string): string {
-  const trimmed = serverOrigin.trim().replace(/\/+$/, "");
-  return trimmed || "https://loom.example.com";
-}
+import { shellQuote } from "./shellQuote";
 
-export function cliLoginCommands(serverOrigin: string): string[] {
-  const origin = cleanOrigin(serverOrigin);
-  return [
-    "export LOOM_PASSWORD=...",
-    `loom auth login --server ${origin} --username USER --password env:LOOM_PASSWORD`,
-    "loom auth whoami",
-  ];
-}
-
-export function hostedProviderCommands(
-  serverOrigin: string,
-  providerName = "smoke-openai",
-): string[] {
-  const origin = cleanOrigin(serverOrigin);
-  return [
-    ...cliLoginCommands(origin),
-    "export PROVIDER_API_KEY=...",
-    [
-      "loom providers create",
-      `  --name ${providerName}`,
-      "  --type openai-compatible",
-      "  --base-url https://api.example.com/v1",
-      "  --api-key env:PROVIDER_API_KEY",
-      "  --rate-card-provider openai",
-    ].join(" \\\n"),
-    `loom providers test ${providerName}`,
-    `loom providers models ${providerName} --refresh`,
-    `loom providers models ${providerName}`,
-  ];
-}
-
-export function benchmarkCatalogCommands(serverOrigin: string): string[] {
-  const origin = cleanOrigin(serverOrigin);
-  return [
-    `loom datasets list --remote --server-url ${origin} --token env:LOOM_API_TOKEN`,
-    'loom datasets audit --all --db-url "$LOOM_DB_URL"',
-    [
-      "loom datasets sync-config",
-      "  --config config/benchmarks.toml",
-      '  --db-url "$LOOM_DB_URL"',
-      "  --dry-run",
-    ].join(" \\\n"),
-  ];
-}
-
-export function oracleSmokeBatchCommand(): string {
-  return [
-    "loom eval batch create",
-    "  --purpose evaluation",
-    "  --name-suffix oracle-smoke",
-    "  --benchmark humaneval",
-    "  --subset first_n",
-    "  --n 1",
-    "  --agent oracle",
-    "  --n-per-task 1",
-  ].join(" \\\n");
-}
-
-export function providerSmokeBatchCommand(
-  providerName = "smoke-openai",
-  modelName = "gpt-4o-mini",
-): string {
-  return [
-    "loom eval batch create",
-    "  --purpose evaluation",
-    "  --name-suffix provider-smoke",
-    "  --benchmark humaneval",
-    "  --subset first_n",
-    "  --n 1",
-    "  --agent direct-completion",
-    `  --provider ${providerName}`,
-    `  --model ${modelName}`,
-    "  --n-per-task 1",
-  ].join(" \\\n");
+function argument(value: string): string {
+  return /^[A-Za-z0-9_./:@+-]+$/.test(value) ? value : shellQuote(value);
 }
 
 export function batchInspectionCommands(batchId: string): string[] {
   return [
-    `loom eval batch show ${batchId}`,
-    `loom eval trial list --batch-id ${batchId}`,
+    `loom eval batch show ${argument(batchId)}`,
+    `loom eval trial list --batch-id ${argument(batchId)}`,
   ];
 }
 
@@ -91,13 +16,13 @@ export function trialDownloadCommands(
   artifactKey?: string | null,
 ): string[] {
   const commands = [
-    `loom eval trial show ${trialId}`,
-    `loom eval trial download ${trialId} --kind atif --output atif.json`,
-    `loom eval trial download ${trialId} --kind trajectory --output events.jsonl`,
+    `loom eval trial show ${argument(trialId)}`,
+    `loom eval trial download ${argument(trialId)} --kind atif --output atif.json`,
+    `loom eval trial download ${argument(trialId)} --kind trajectory --output events.jsonl`,
   ];
   if (artifactKey) {
     commands.push(
-      `loom eval trial download ${trialId} --kind artifact --artifact-key ${artifactKey} --output artifact.bin`,
+      `loom eval trial download ${argument(trialId)} --kind artifact --artifact-key ${argument(artifactKey)} --output artifact.bin`,
     );
   }
   return commands;
@@ -110,9 +35,9 @@ export function usageCommand(
   includeBatches = false,
 ): string {
   const trimmedTeamId = teamId?.trim();
-  const teamFlag = trimmedTeamId ? ` --team-id ${trimmedTeamId}` : "";
+  const teamFlag = trimmedTeamId ? ` --team-id ${argument(trimmedTeamId)}` : "";
   const batchesFlag = includeBatches ? " --include-batches" : "";
-  return `loom eval usage --start ${start} --end ${end}${teamFlag}${batchesFlag}`;
+  return `loom eval usage --start ${argument(start)} --end ${argument(end)}${teamFlag}${batchesFlag}`;
 }
 
 export function rateCardExampleJson(): string {

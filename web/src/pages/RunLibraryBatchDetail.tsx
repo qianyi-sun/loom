@@ -1,3 +1,4 @@
+import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
@@ -14,10 +15,8 @@ import { useAuth } from "../auth/useAuth";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
-import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { StatCard } from "../components/StatCard";
@@ -660,17 +659,10 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             </p>
           ) : null}
           {firstSharedArtifact ? (
-            <DocsCallout title="Library CLI downloads" tone="info" headingLevel="h3">
-              <CommandSnippet
-                label="Shared artifact CLI"
-                command={
-                  trialDownloadCommands(
-                    firstSharedArtifact.trial_id ?? "",
-                    firstSharedArtifact.key,
-                  ).find((command) => command.includes("--kind artifact")) ?? ""
-                }
-              />
-            </DocsCallout>
+            <CommandActions title="Shared artifact download" label="Download shared artifact with CLI" commands={[
+              trialDownloadCommands(firstSharedArtifact.trial_id ?? "", firstSharedArtifact.key)
+                .find((command) => command.includes("--kind artifact")) ?? "",
+            ]} />
           ) : null}
           {GROUP_ORDER.map((group) => {
             const artifacts = batch.artifact_inventory[group] ?? [];

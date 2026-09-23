@@ -49,9 +49,12 @@ describe("RateCardsAdmin", () => {
 
     renderWithProviders(<RateCardsAdmin />, { route: "/rate-cards" });
 
-    expect(await screen.findByText("Rate-card JSON example")).toBeInTheDocument();
+    expect(screen.queryByText(/"model": "gpt-4o-mini"/)).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "View JSON reference" }));
+    expect(screen.getByRole("dialog", { name: "Rate-card JSON reference" })).toBeInTheDocument();
     expect(screen.getByText(/"model": "gpt-4o-mini"/)).toBeInTheDocument();
-    expect(screen.getByText(/rate_card_provider/)).toBeInTheDocument();
+    expect(screen.getByText(/provider billing namespace/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "close" }));
     expect(
       screen.getByRole("heading", { name: "Published" }).closest(
         '[data-loom-query="rate-cards"]',

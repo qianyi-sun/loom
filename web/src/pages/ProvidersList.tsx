@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
  * /providers — list of all team provider connections.
@@ -9,12 +10,9 @@ import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../api";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
-import { hostedProviderCommands } from "../lib/quickstartSnippets";
 import { providerStatusSummary } from "../lib/providerDisplay";
-import { currentServerOrigin } from "../lib/serverOrigin";
 
 type Conn = {
   id: string;
@@ -71,11 +69,7 @@ export default function ProvidersList(): JSX.Element {
           >
             + New connection
           </Link>
-          <CommandSnippet
-            label="Hosted API quickstart"
-            command={hostedProviderCommands(currentServerOrigin()).join("\n")}
-            helperText="Use env: or file: secret references; do not paste raw provider keys into saved commands."
-          />
+          <HelpButton topic="providers">Provider setup guide</HelpButton>
         </Card.Body>
       </Card>
     );

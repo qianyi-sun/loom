@@ -1,3 +1,4 @@
+import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 /**
  * Usage dashboard — date-range picker + per-bucket SVG bar chart.
@@ -152,7 +153,7 @@ export default function UsageDashboard(): JSX.Element {
         )}
       </div>
 
-      <CommandSnippet
+      <CommandActions title="Usage CLI" label="Export usage query"><CommandSnippet
         label="Usage CLI"
         command={usageCommand(start, end, teamId, auth.isAdmin)}
         helperText={
@@ -162,7 +163,7 @@ export default function UsageDashboard(): JSX.Element {
               : "Leave the team filter blank to inspect platform-wide usage."
             : `Usage is scoped to ${currentTeamName}.`
         }
-      />
+      /></CommandActions>
 
       {query.isPending ? <LoadingState /> : null}
       {query.isError ? <ErrorState error={query.error} /> : null}

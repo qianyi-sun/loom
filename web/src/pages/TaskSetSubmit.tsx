@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -5,7 +6,6 @@ import { useNavigate } from "react-router-dom";
 import { api, type ApiError, type TaskSetSubmitResponse } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import DocsCallout from "../components/DocsCallout";
 import { taskSetHref } from "../utils/taskSetLinks";
 
 export default function TaskSetSubmit(): JSX.Element {
@@ -154,64 +154,7 @@ export default function TaskSetSubmit(): JSX.Element {
         </Card.Body>
       </Card>
 
-      <DocsCallout title="Manifest YAML schema" tone="info">
-        <p>
-          The manifest file must conform to <code>apiVersion: loom.taskset/v1</code>.
-          Required top-level fields:
-        </p>
-        <pre className="mt-2 overflow-x-auto rounded bg-blue-100/50 p-2 text-xs leading-relaxed">
-{`apiVersion: loom.taskset/v1
-kind: UserTaskSet
-
-metadata:
-  name: my-coding-tasks        # slug identifier
-  display_name: My Coding Tasks
-
-intents:
-  - trajectory_generation      # always allowed
-  - evaluation                 # requires verifier
-
-source:
-  type: hf                     # hf | git | https | jsonl-inline | bundle-upload
-  locator: namespace/dataset
-  revision: 1.2.3             # optional
-  subset: default             # optional
-  split: test                 # optional
-
-instance_mapping:
-  prompt: row.question
-  answer: row.solution
-  task_id: row.id
-
-task_template:
-  task:
-    id: "{{ instance.task_id }}"
-    name: "{{ metadata.display_name }} - {{ instance.task_id }}"
-  environment:
-    os: linux
-    docker_image: ghcr.io/example/coding-task:1.0
-  agent:
-    name: default
-  steps:
-    - artifacts: [solution.py]
-
-verifier:                      # optional; required for evaluation
-  type: pytest                 # pytest | script | exact-match | regex | llm-judge
-  file: verifier/test_solution.py
-
-transform:                     # optional
-  file: transform.py
-
-limits:
-  max_instances: 500
-  timeout_per_task_s: 300`}
-        </pre>
-        <p className="mt-2 text-xs text-slate-500">
-          <code>evaluation</code> intent requires a verifier, included in the task bundle
-          or supplied separately.
-          A manifest without explicit intents defaults to <code>trajectory_generation</code>.
-        </p>
-      </DocsCallout>
+      <HelpButton topic="tasks">Manifest format and task-set submission guide</HelpButton>
     </div>
   );
 }
