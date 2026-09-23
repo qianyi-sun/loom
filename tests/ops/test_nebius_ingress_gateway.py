@@ -4,7 +4,9 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import subprocess
 from datetime import timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -165,3 +167,39 @@ def test_lost_tracking_never_adopts_or_recreates_tls_secret(inputs, missing):
     with pytest.raises(module().IngressError):
         deliver(inputs)
     assert api.creates == 1
+
+
+@pytest.mark.parametrize("case", ["matching", "foreign-cluster", "foreign-namespace", "api-failure"])
+def test_kubectl_transport_checks_identity_before_secret_create(inputs, tmp_path, monkeypatch, case):
+    binding = inputs[1]
+    config = tmp_path / "kubeconfig"
+    config.write_text("private-unused-fixture")
+    config.chmod(0o600)
+    writes = []
+
+    def run(argv, **kwargs):
+        assert argv[:4] == ["/usr/bin/kubectl", "--kubeconfig", str(config), "--request-timeout=30s"]
+        assert kwargs["capture_output"] and kwargs["timeout"] == 40
+        assert kwargs["env"] == {"PATH": "/bin:/usr/bin", "LANG": "C.UTF-8"}
+        if "create" in argv:
+            writes.append(json.loads(kwargs["input"]))
+            return subprocess.CompletedProcess(argv, 0, b"secret/fixture", b"")
+        name = argv[6]
+        uid = binding.kube_system_uid if name == "kube-system" else binding.namespace_uid
+        if case == "foreign-cluster" and name == "kube-system":
+            uid = str(uuid4())
+        if case == "foreign-namespace" and name == binding.namespace:
+            uid = str(uuid4())
+        return subprocess.CompletedProcess(argv, int(case == "api-failure"),
+            json.dumps({"kind": "Namespace", "metadata": {"name": name, "uid": uid}}).encode(), b"private-api-error")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    api = module().KubectlTLSAPI(config, binding=binding, executable=Path("/usr/bin/kubectl"))
+    document = {"metadata": {"namespace": binding.namespace}}
+    if case == "matching":
+        api.create_secret(document)
+        assert writes == [document]
+    else:
+        with pytest.raises(module().IngressError) as error:
+            api.create_secret(document)
+        assert not writes and "private-api-error" not in str(error.value)
