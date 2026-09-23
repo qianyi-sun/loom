@@ -180,6 +180,17 @@ def test_guard_comment_backslash_cannot_hide_task_work() -> None:
         adapt_harbor_test_script(script)
 
 
+@pytest.mark.parametrize("opening", ["cat <<'PAYLOAD'", "cat <<-PAYLOAD", "cat <<PAYLOAD"])
+def test_installer_guard_inside_heredoc_requires_explicit_adaptation(opening: str) -> None:
+    script = (
+        opening + "\n"
+        "if ! command -v curl >/dev/null 2>&1; then\n"
+        "apt-get install -y curl\nfi\nPAYLOAD\n" + SCRIPT
+    )
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(script)
+
+
 @pytest.mark.parametrize("condition", ["true", "false"])
 def test_relocated_guard_preserves_enclosing_branch_semantics(condition: str) -> None:
     script = (
