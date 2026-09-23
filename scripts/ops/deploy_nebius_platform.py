@@ -362,6 +362,25 @@ def verify_cluster_identity(
             raise DeploymentError("integration node provider identity is not Nebius")
 
 
+def verify_ingress_mode(kube: Kubectl, config: dict[str, Any]) -> None:
+    """Ordinary application deployment preserves a previously installed route."""
+    shared = config.get("shared_ingress_enabled", False)
+    public = kube.get("service", "loom-web", config["namespace"])
+    expected_selector = {"app": "loom-shared-ingress" if shared else "loom-web"}
+    if ((shared and not public)
+            or public and public.get("spec", {}).get("selector") != expected_selector):
+        raise DeploymentError("ingress cutover requires its protected installation procedure")
+    if shared:
+        controller = kube.get("deployment", "loom-shared-ingress", config["namespace"])
+        status = controller.get("status", {})
+        replicas = controller.get("spec", {}).get("replicas", 0)
+        if (not replicas
+                or status.get("observedGeneration", 0) != controller.get("metadata", {}).get("generation")
+                or status.get("availableReplicas", 0) < replicas
+                or status.get("updatedReplicas", 0) < replicas):
+            raise DeploymentError("shared ingress controller is not ready")
+
+
 def preflight(
     kube: Kubectl,
     manifest: dict[str, Any],
@@ -370,6 +389,7 @@ def preflight(
     expected_cluster_id: str,
 ) -> dict[str, Any]:
     verify_cluster_identity(kube, config, expected_cluster_id)
+    verify_ingress_mode(kube, config)
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -534,6 +554,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             guard_acquired = True
             evidence["guard_owner"] = guard_owner
             phase("idle-reserved")
+            # A same-candidate ingress cutover may have finished after preflight
+            # but before we acquired the shared rollout guard.
+            verify_ingress_mode(kube, config)
             expected_current = getattr(args, "expected_current_candidate", None)
             if expected_current is not None:
                 current = kube.get("configmap", "loom-platform-config", ns)

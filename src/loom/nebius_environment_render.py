@@ -83,6 +83,7 @@ def _configuration(
     # Builder settings include write authority and are activated only with the
     # shared gateway. They cannot be inherited from the standalone installation.
     config.pop("task_image_builder", None)
+    config.pop("shared_ingress_enabled", None)
     return config
 
 
@@ -108,13 +109,6 @@ def _closed_execution(row: EnvironmentRegistrationV1) -> list[dict[str, Any]]:
 
 def _shared_ingress(row: EnvironmentRegistrationV1, foundation: FoundationBinding) -> dict[str, Any]:
     ingress = _obj("Ingress", "loom-web", row.application_namespace, api="networking.k8s.io/v1")
-    ingress["metadata"]["annotations"] = {
-        "nginx.ingress.kubernetes.io/ssl-redirect": "true",
-        "nginx.ingress.kubernetes.io/force-ssl-redirect": "true",
-        "nginx.ingress.kubernetes.io/proxy-buffering": "off",
-        "nginx.ingress.kubernetes.io/proxy-read-timeout": "3600",
-        "nginx.ingress.kubernetes.io/proxy-body-size": "100m",
-    }
     ingress["spec"] = {
         "ingressClassName": foundation.ingress_class_name,
         # The shared controller owns the default wildcard certificate/key.

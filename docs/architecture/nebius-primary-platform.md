@@ -78,6 +78,61 @@ format. The management request layer below verifies candidates and reserves
 identities, but rendering does not provision resources or establish shared
 admission/write enforcement or installed concurrent-owner execution.
 
+### Shared HTTPS foundation
+
+`loom.nebius_shared_ingress` renders a Traefik shared controller for the existing
+standalone platform namespace. `SharedIngressInstallation` binds an installation
+UUID, the protected foundation, a region-local mirrored digest-pinned controller
+image, and a separate TLS Secret. The controller label must be
+`loom-shared-ingress`; the foundation's ingress namespace must match the current
+public Service namespace. The qualified controller is Traefik 3.7.13. These are
+rendering and disposable-cluster contracts, **not a live installation receipt**.
+
+The public allocation is reused. A standalone configuration may explicitly set
+`shared_ingress_enabled: true`; its existing `loom-web` LoadBalancer keeps its
+allocation and port but selects the shared controller. `loom-web-origin` is an
+internal Service pointing to the unchanged web/Caddy Pods. An exact-host TCP SNI
+route passes the original hostname through to Caddy, including TLS-ALPN certificate
+renewal. Caddy's TLS PVC is not copied, deleted, or replaced. Later standalone
+rollouts retain that protected flag. Managed child configuration strips it and
+cannot render a public LoadBalancer or the origin Service.
+
+Personal/management routes terminate HTTPS at the shared controller using the
+platform-owned wildcard/SAN certificate. The ingress class selects only the
+configured routes; unknown routes have no application fallback. Uploads and
+responses stream without shared-controller body buffering. WebSocket upgrades
+and strict path-prefix matching are covered by the disposable Kubernetes test.
+Request reads and upstream response headers have a
+one-hour timeout; response streaming has no total write timeout. These Traefik
+settings enforce the policy; obsolete nginx annotations have been removed. There is no HTTP
+listener, public dashboard, access-request log or cloud credential in the controller.
+
+This is trusted infrastructure: the standard Kubernetes Ingress provider receives
+cluster-wide **read-only** access to Services, Secrets, Nodes, EndpointSlices,
+Ingresses and IngressClasses. An ingress-class selector does not narrow Secret
+discovery. It receives no Kubernetes mutation authority; ExternalName services
+and cross-provider references from child routes are disabled. The shared TLS key
+is mounted only into the controller, never into personal namespaces. Only trusted
+provisioners write Services and Ingresses; controller defaults are not a general
+annotation-admission policy. Each Pod requests 100m CPU, 128 MiB memory and 64 MiB
+scratch; reserve twice that for rollout surge.
+
+There is no uniform request-byte or global request-concurrency limit in this
+renderer. Traefik's in-flight middleware is per route, not a shared budget; its
+file-configured buffering middleware also buffers responses. Neither supplies the
+required streaming/global-buffer contract. Existing endpoint validators are not
+a universal pre-auth request-size defense: JSON/multipart parsing can happen
+before authorization. Public management activation must first qualify a bounded
+request-receive strategy for these application endpoints. Pod resource limits are
+not a substitute for that remaining request-exhaustion work.
+
+The renderer does not authorize resource adoption, mirror/scan the image, issue
+or renew the certificate, change DNS, or switch the live Service selector. A
+protected installer must first qualify those inputs, ownership, before-state,
+readiness, legacy-host probes and rollback; certificate renewal must also reload
+the controller. Management/personal activation remains closed until that installed
+route is verified. See the [deployment runbook](../runbooks/nebius-deployment.md).
+
 ## Independent management service runtime
 
 `LOOM_SVC_SERVICE_MODE=management` selects the identity and environment-management runtime in

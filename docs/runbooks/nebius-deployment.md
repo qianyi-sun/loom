@@ -79,6 +79,39 @@ DNS/TLS, provisioning IAM, management installation, live Nebius quota and pool
 limits, and installed concurrent-owner acceptance still require qualification.
 Keep this evidence outside the repository.
 
+### Shared HTTPS installation boundary
+
+The shared-controller renderer is `loom.nebius_shared_ingress.render_shared_ingress`.
+Its `SharedIngressInstallation` input uses schema
+`loom.nebius-shared-ingress.v1`, a non-nil `installation_id`, `foundation`,
+digest-pinned native-registry `image`, and a separate `tls_secret_name`. Foundation
+ingress namespace must equal the existing standalone namespace and its controller
+label must be `loom-shared-ingress`. Use a certificate covering both the configured
+child wildcard and the separate management hostname. Private keys stay in the
+platform namespace; do not reuse the standalone Caddy key or publish Secret data.
+
+Rendering does not install or switch traffic. Before enabling the standalone
+`shared_ingress_enabled` flag through the protected Nebius workflow, qualify the
+image and certificate, existing Service UID/allocation/ports, exact resource
+ownership, controller readiness, capacity and legacy-host HTTPS/TLS-ALPN routing.
+Preserve the original selector and protected configuration as rollback evidence.
+The selector change and persisted flag must share the rollout concurrency boundary;
+ordinary rollout rechecks the selected mode after acquiring its guard, before any
+backup or resource mutation. Never remove `loom-web-tls`
+or replace the LoadBalancer to perform this migration. No protected shared-ingress
+install operation is supplied yet; do not use an ad-hoc `kubectl` cutover.
+
+The renderer uses Traefik 3.7.13 features and receives trusted read-only Secret
+discovery across the cluster. Budget 200m CPU, 256 MiB memory and 128 MiB ephemeral
+storage including its rolling surge. Uploads and responses stream directly;
+there is no uniform request-byte or global request-concurrency limit. Existing
+application validation is not a pre-auth request-exhaustion defense. Qualify
+bounded application request reception before public management activation; do
+not treat the removed nginx body-size annotation as enforced. The controller has no certificate
+issuance credentials; renewal and the corresponding safe reload still require
+the protected installation workflow. Disposable routing evidence is not live
+DNS/TLS or installed multi-owner acceptance.
+
 ### Render management manifests
 
 Prepare the protected `loom.nebius-management-deployment.v1` JSON described in
