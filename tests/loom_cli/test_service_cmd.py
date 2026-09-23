@@ -255,15 +255,15 @@ def test_dev_step_jwt_has_one_local_source() -> None:
 def test_up_invokes_docker_compose_up(
     tmp_path: Path,
 ) -> None:
-    """Verify the happy-path invocation chain — `docker compose up -d`
-    runs first; on its failure we bail before alembic + seed."""
+    """Storage comes up first; on postgres failure we bail before alembic."""
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n")
     with patch("loom_cli.service_cmd._ensure_docker_compose_available",
                return_value=0), \
          patch("loom_cli.service_cmd._run") as mock_run, \
          patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=False) as mock_wait:
+               return_value=False) as mock_wait, \
+         patch("loom_cli.service_cmd._alembic_upgrade") as mock_alembic:
         # _run returns CompletedProcess-like; we need .returncode = 0
         from subprocess import CompletedProcess
         mock_run.return_value = CompletedProcess([], 0, "", "")
@@ -273,10 +273,12 @@ def test_up_invokes_docker_compose_up(
         ])
         # postgres didn't go healthy → exit 1, no alembic call
         assert rc == 1
-        # First call should be `docker compose ... up -d`
+        # First call should be `docker compose ... up -d postgres minio`
         first_args = mock_run.call_args_list[0].args[0]
         assert "up" in first_args and "-d" in first_args
+        assert first_args[-2:] == ["postgres", "minio"]
         assert mock_wait.called
+        assert not mock_alembic.called
 
 
 def test_up_builds_mutable_dev_images_before_start_and_migrations(
@@ -284,7 +286,7 @@ def test_up_builds_mutable_dev_images_before_start_and_migrations(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Fresh, cached, and stale ``:dev`` images share one safe contract:
-    Compose checks/builds them before any DB-facing container starts.
+    storage migrates first, then Compose builds before schema-gated start.
     """
     from subprocess import CompletedProcess
 
@@ -298,8 +300,11 @@ def test_up_builds_mutable_dev_images_before_start_and_migrations(
     events: list[str] = []
 
     def _capture_run(argv, *_args, **_kwargs):
-        events.append("up")
-        assert argv[-3:] == ["up", "-d", "--build"]
+        if argv[-2:] == ["postgres", "minio"]:
+            events.append("infra")
+        else:
+            events.append("up")
+            assert "--build" in argv
         return CompletedProcess(argv, 0, "", "")
 
     def _alembic(_db_url: str) -> int:
@@ -329,7 +334,7 @@ def test_up_builds_mutable_dev_images_before_start_and_migrations(
         )
 
     assert rc == 1
-    assert events == ["up", "alembic"]
+    assert events == ["infra", "alembic", "up"]
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
@@ -360,7 +365,7 @@ def test_up_does_not_force_build_for_immutable_images(tmp_path: Path) -> None:
 
     assert rc == 1
     first_args = mock_run.call_args_list[0].args[0]
-    assert first_args[-2:] == ["up", "-d"]
+    assert first_args[-2:] == ["postgres", "minio"]
     assert "--build" not in first_args
 
 

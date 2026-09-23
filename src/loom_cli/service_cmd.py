@@ -390,8 +390,9 @@ def _print_summary(tokens: dict[str, str]) -> None:
         print()
     print(
         "Dockerfile-backed local batches stay queued until the laptop "
-        "task-image-builder publishes a ready native-arch digest. Trial "
-        "workers remain pull-only."
+        "task-image-builder publishes a ready x86_64 digest (linux/amd64; "
+        "Apple Silicon uses Docker Desktop qemu). Trial workers remain "
+        "pull-only."
     )
     print()
     print("Shut down:")
@@ -433,20 +434,13 @@ def _up_local(args: argparse.Namespace) -> int:
             "(DO NOT lose this — rotating it loses all stored provider secrets)"
         )
 
-    mutable_images = _mutable_dev_images(compose_file)
-    up_argv = [*_compose_args(compose_file, env_file), "up", "-d"]
-    if mutable_images:
-        # Fail closed for mutable local images: asking Compose to build before
-        # start is what prevents a new host migration tree from being paired
-        # with stale image code.  Fresh images remain cheap because BuildKit
-        # reuses their cached layers.
-        up_argv.append("--build")
-        print(
-            "→ mutable local dev images detected; checking build cache "
-            "before container start"
-        )
-    print(f"→ docker compose up -d ({compose_file})")
-    r = _run(up_argv, check=False)
+    compose_base = _compose_args(compose_file, env_file)
+
+    # Control Plane / Gateway refuse to boot until Alembic is at head.
+    # Start storage first so auto-migration can run before schema-gated
+    # services are asked to become healthy (#1462).
+    print("→ docker compose up -d postgres minio")
+    r = _run([*compose_base, "up", "-d", "postgres", "minio"], check=False)
     if r.returncode != 0:
         return r.returncode
 
@@ -463,6 +457,23 @@ def _up_local(args: argparse.Namespace) -> int:
     if rc != 0:
         sys.stderr.write("error: alembic upgrade failed.\n")
         return rc
+
+    mutable_images = _mutable_dev_images(compose_file)
+    up_argv = [*compose_base, "up", "-d"]
+    if mutable_images:
+        # Fail closed for mutable local images: asking Compose to build before
+        # start is what prevents a new host migration tree from being paired
+        # with stale image code.  Fresh images remain cheap because BuildKit
+        # reuses their cached layers.
+        up_argv.append("--build")
+        print(
+            "→ mutable local dev images detected; checking build cache "
+            "before container start"
+        )
+    print(f"→ docker compose up -d ({compose_file})")
+    r = _run(up_argv, check=False)
+    if r.returncode != 0:
+        return r.returncode
 
     print("→ seeding team + worker tokens + benchmark fixtures")
     rc, tokens = _seed_test_data(args.db_url)
