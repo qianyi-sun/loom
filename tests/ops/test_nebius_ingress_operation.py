@@ -90,14 +90,20 @@ def test_full_foreign_pod_accounting_is_conservative(inventory, change):
         module().qualify_capacity(**inventory)
 
 
-def test_unscheduled_competing_pod_is_charged_before_ingress(inventory):
+@pytest.mark.parametrize("tolerates", [True, False])
+def test_unscheduled_pod_is_charged_only_if_it_can_compete_for_system_node(inventory, tolerates):
     pod = copy.deepcopy(inventory["pods"][0])
     pod["metadata"].update(name="pending", uid=str(uuid4()))
     pod["spec"].pop("nodeName")
+    if tolerates:
+        pod["spec"]["tolerations"] = [{"key": "loom.nebius/platform", "operator": "Equal", "value": "integration", "effect": "NoSchedule"}]
     pod["status"]["phase"] = "Pending"
     inventory["pods"].append(pod)
-    with pytest.raises(module().OperationError):
-        module().qualify_capacity(**inventory)
+    if tolerates:
+        with pytest.raises(module().OperationError):
+            module().qualify_capacity(**inventory)
+    else:
+        assert module().qualify_capacity(**inventory)["reserved_pods"] == 2
 
 
 def test_completed_foreign_pods_do_not_consume_live_capacity(inventory):
