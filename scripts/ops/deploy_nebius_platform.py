@@ -271,7 +271,12 @@ def install_task_identity_policy(
             "runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
             "seccompProfile": {"type": "RuntimeDefault"},
         }, "containers": [{"name": "execution", "image": "invalid.local/admission-only:unused",
-                           "resources": {}, "securityContext": {
+                           # ResourceQuota also validates dry-run Pods. These
+                           # bounded declarations create no workload or usage.
+                           "resources": {
+                               "requests": {"cpu": "10m", "memory": "16Mi"},
+                               "limits": {"cpu": "10m", "memory": "16Mi"},
+                           }, "securityContext": {
                                "runAsNonRoot": True, "allowPrivilegeEscalation": False,
                                "capabilities": {"drop": ["ALL"]},
                            }}],
@@ -368,7 +373,7 @@ def verify_ingress_mode(kube: Kubectl, config: dict[str, Any]) -> None:
     public = kube.get("service", "loom-web", config["namespace"])
     expected_selector = {"app": "loom-shared-ingress" if shared else "loom-web"}
     if ((shared and not public)
-            or public and public.get("spec", {}).get("selector") != expected_selector):
+            or (public and public.get("spec", {}).get("selector") != expected_selector)):
         raise DeploymentError("ingress cutover requires its protected installation procedure")
     if shared:
         controller = kube.get("deployment", "loom-shared-ingress", config["namespace"])
