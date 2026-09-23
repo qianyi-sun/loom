@@ -6,10 +6,15 @@ This is not an ACME client or a generic DNS administration tool.
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
 import stat
+import tempfile
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Self
@@ -156,3 +161,90 @@ class GoDaddyDNS:
         if current != expected:
             raise DNSChallengeError("DNS challenge changed; cleanup requires reconciliation")
         self._request("DELETE", record_id=expected["recordId"])
+
+
+@contextmanager
+def _journal_lock(root: Path, key: str) -> Iterator[Path]:
+    try:
+        root.mkdir(mode=0o700, parents=False, exist_ok=True)
+        info = root.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise DNSChallengeError("private journal directory required")
+        descriptor = os.open(root / (key + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "r+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise DNSChallengeError("private journal lock required")
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield root / (key + ".json")
+    except OSError:
+        raise DNSChallengeError("challenge journal unavailable or already in use") from None
+
+
+def _save_journal(path: Path, value: dict[str, Any]) -> None:
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=".challenge-", delete=False) as stream:
+            temporary = stream.name
+            stream.write(json.dumps(value, sort_keys=True).encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+
+
+def run_hook(dns: GoDaddyDNS, *, state_dir: Path, action: str, certbot_domain: str,
+             validation: str, wait: Callable[[str, str, str], None]) -> str:
+    """Journal ownership before reporting auth success; never infer write recovery."""
+    if (action not in {"auth", "cleanup"} or not _VALIDATION.fullmatch(validation)
+            or certbot_domain.removeprefix("*.") != dns.certificate_domain):
+        raise DNSChallengeError("certificate hook is outside the protected scope")
+    identity = {"schema": "loom.dns-challenge.v1", "zone": dns.zone,
+                "domain": dns.certificate_domain, "validation": validation}
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    with _journal_lock(state_dir, key) as path:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            journal = None
+        else:
+            journal = _private_json(path)
+            if (any(journal.get(key) != value for key, value in identity.items())
+                    or journal.get("stage") not in {"pending", "created", "deleted"}):
+                raise DNSChallengeError("invalid challenge journal")
+        if journal is not None and journal["stage"] == "pending":
+            raise DNSChallengeError("pending DNS write requires reconciliation; no automatic retry or cleanup")
+        if action == "cleanup" and (journal is None or journal["stage"] == "deleted"):
+            return "cleaned"
+        if journal is not None and journal["stage"] == "deleted":
+            raise DNSChallengeError("cleaned challenge cannot be reused")
+        if journal is None:
+            before = dns.records()
+            if any(row["data"] == validation for row in before):
+                raise DNSChallengeError("preexisting challenge has no ownership journal")
+            journal = {**identity, "stage": "pending", "prepared_at": datetime.now(UTC).isoformat()}
+            _save_journal(path, journal)
+            created = dns.create(validation)
+            if any(row["recordId"] == created["recordId"] for row in before):
+                raise DNSChallengeError("DNS creation reused an existing record identity")
+            journal = {**journal, "stage": "created", "record": created}
+            _save_journal(path, journal)
+        record = dns._record(journal.get("record"))
+        if record["data"] != validation or record["ttl"] != 600:
+            raise DNSChallengeError("journal record does not match its challenge")
+        if action == "cleanup":
+            dns.delete_owned(record)
+            _save_journal(path, {**journal, "stage": "deleted"})
+            return "cleaned"
+        if not any(row == record for row in dns.records()):
+            raise DNSChallengeError("owned DNS challenge is absent or changed")
+        wait(dns.zone, dns.name + "." + dns.zone, validation)
+        return "present"
