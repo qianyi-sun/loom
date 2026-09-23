@@ -178,6 +178,17 @@ def test_adapt_upgrades_old_pytest_only_wrapper(tmp_path: Path) -> None:
     assert b"harbor-offline.sh" in target.read_bytes()
 
 
+def test_adapt_upgrades_known_wrapper_that_discarded_failed_reward(tmp_path: Path) -> None:
+    _write_runtime_inputs(tmp_path)
+    target = tmp_path / "verifier/run.sh"
+    target.parent.mkdir()
+    legacy = Path(__file__).parents[1] / "fixtures/harbor/legacy-offline-verifier.sh"
+    target.write_bytes(legacy.read_bytes())
+    _, stats = adapt_bundle_for_nebius_terminus(tmp_path, _harbor_shaped_config())
+    assert stats.verifier_wrapper_installed
+    assert target.read_bytes() == offline_verifier_run_sh_bytes()
+
+
 def test_adapt_rejects_unknown_custom_verifier(tmp_path: Path) -> None:
     _write_runtime_inputs(tmp_path)
     target = tmp_path / "verifier/run.sh"

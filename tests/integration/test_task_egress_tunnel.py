@@ -13,7 +13,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from loom.db.schema import ServiceExecutionTarget
-from loom.execution_contract import NetworkAccess
+from loom.execution_contract import NEBIUS_CPU_WEB_EXECUTION_CLASS_V1, NetworkAccess
 from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT
 from loom.models.networking import WebAllowlist, WebDestination
 from loom_control_plane.service_execution import enqueue_execution_transition
@@ -68,10 +68,12 @@ async def test_task_tunnel_authenticates_native_identity_and_revokes_active_conn
     monkeypatch.setattr(task_egress, "connect_destination", fixture_dial)
     try:
         async with sessions() as session:
-            trial_id, target = await _seed_ready_trial(session, now=now)
+            trial_id, target = await _seed_ready_trial(
+                session, now=now, execution_class=NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+            )
             lease = await _reserve(session, trial_id=trial_id, target=target, now=now,
                 requirements=_requirements().model_copy(update={"network_access": NetworkAccess.APPROVED_ALLOWLIST, "task_egress": policy}),
-                runtime_contract=_runtime_contract(now=now).model_copy(update={"task_egress": policy, "output_declarations": (TASK_EGRESS_OUTPUT,)}))
+                runtime_contract=_runtime_contract(now=now, execution_class_id=target.execution_class_id).model_copy(update={"task_egress": policy, "output_declarations": (TASK_EGRESS_OUTPUT,)}))
             row = await session.get(ServiceExecutionTarget, target.target_id)
             row.spec_json = {**row.spec_json, "cluster_scope_id": "egress-fixture", "pod_identity_audience": "loom-execution"}
             lease.pod_uid, lease.pod_ip, lease.observed_state = "egress-pod", "10.42.0.50", "running"

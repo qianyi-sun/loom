@@ -31,7 +31,7 @@ from loom.execution_image_admission import (
     verify_execution_image_admission,
 )
 from loom.pipeline.keys import canonical_document
-from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+from loom.service_execution_materialization import build_nebius_runtime_profile
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _KEY_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -304,10 +304,8 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     runtime_binary_sha256 = evidence.get("runtime_binary_sha256")
     if not isinstance(runtime_binary_sha256, str):
         raise ValueError("runtime binary digest is missing")
-    profile = ServiceExecutionRuntimeProfileV1(
-        logical_pool_id="nebius-cpu",
+    profile = build_nebius_runtime_profile(
         candidate_sha=args.candidate_sha,
-        execution_class_id="linux-amd64-cpu-pod-v1",
         task_image_ref=bindings["service"]["image_ref"],
         runtime_image_ref=bindings["execution_runtime"]["image_ref"],
         agent_image_ref=bindings["worker"]["image_ref"] if "worker" in bindings else None,

@@ -971,6 +971,17 @@ def test_task_egress_defaults_remain_disabled(platform_inputs: tuple) -> None:
     assert 'LOOM_GW_TASK_EGRESS_CONFIG_FILE' not in json.dumps(files)
     published = json.loads(files['10-config-network.yaml'][0]['data']['profile.json'])
     assert 'supports_task_web_egress' not in published
+    catalog = json.loads(files['10-config-network.yaml'][0]['data']['catalog.json'])
+    assert 'supports_task_web_egress' not in catalog['execution_class']
+    assert catalog['execution_class']['class_id'] == 'linux-amd64-cpu-pod-v1'
+
+
+def test_task_egress_cannot_reuse_the_immutable_default_class(platform_inputs: tuple) -> None:
+    config, candidate, profile = platform_inputs
+    config['task_egress'] = {'protected_cidrs': ['198.51.100.0/24']}
+    profile['supports_task_web_egress'] = True
+    with pytest.raises(NebiusPlatformError, match='execution class'):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
 def test_task_egress_mounts_explicit_bounded_gateway_policy(platform_inputs: tuple) -> None:
@@ -981,11 +992,18 @@ def test_task_egress_mounts_explicit_bounded_gateway_policy(platform_inputs: tup
         'maximum_connections_per_lease': 3,
     }
     profile['supports_task_web_egress'] = True
+    profile['execution_class_id'] = 'linux-amd64-cpu-web-pod-v1'
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     cm = files['10-config-network.yaml'][0]
     assert json.loads(cm['data']['task-egress.json']) == config['task_egress']
     assert json.loads(cm['data']['environment.json'])['task_egress'] == config['task_egress']
     assert json.loads(cm['data']['profile.json'])['supports_task_web_egress'] is True
+    catalog = json.loads(cm['data']['catalog.json'])
+    assert catalog['execution_class']['class_id'] == profile['execution_class_id']
+    assert catalog['execution_class']['supports_task_web_egress'] is True
+    assert catalog['topology']['execution_class_id'] == profile['execution_class_id']
+    assert all(t['execution_class_id'] == profile['execution_class_id']
+               for t in catalog['topology']['targets'])
     gateway = next(row for row in files['40-services.yaml']
                    if row['kind'] == 'Deployment' and row['metadata']['name'] == 'loom-llm-gateway')
     pod = gateway['spec']['template']['spec']
@@ -1038,7 +1056,11 @@ def test_regional_task_egress_uses_existing_authenticated_broker_route(regional_
     config, candidate, profile = regional_inputs
     config['task_egress'] = {'protected_cidrs': [config['public_gateway_ipv4'] + '/32']}
     profile['supports_task_web_egress'] = True
+    profile['execution_class_id'] = 'linux-amd64-cpu-web-pod-v1'
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    catalog = json.loads(files['10-config-network.yaml'][0]['data']['catalog.json'])
+    assert all(t['execution_class_id'] == profile['execution_class_id']
+               for t in catalog['topology']['targets'])
     caddy = json.loads(files['10-config-network.yaml'][0]['data']['public-tls.json'])
     routes = caddy['apps']['http']['servers']['public']['routes'][0]['handle'][-1]['routes']
     broker = routes[0]

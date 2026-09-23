@@ -8,6 +8,7 @@ reasons become satisfiable without silently rewriting every publish.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -45,10 +46,6 @@ set +e
 bash "$task_dir/verifier/harbor-offline.sh"
 rc=$?
 set -e
-if [ "$rc" -ne 0 ]; then
-    echo "offline Harbor verifier script failed" >&2
-    exit "$rc"
-fi
 reward=$(cat /logs/verifier/reward.txt)
 case "$reward" in
     0) passed=false ;;
@@ -59,7 +56,15 @@ mkdir -p "$(dirname "$LOOM_VERIFIER_OUTPUT")"
 cat > "$LOOM_VERIFIER_OUTPUT" <<JSONEOF
 {"rewards":{"resolved":$reward,"passed":$reward},"checks":[{"name":"harbor_test_sh","passed":$passed,"score":$reward,"message":"exit=$rc"}],"structured":{"exit_code":$rc,"reward":$reward}}
 JSONEOF
+if [ "$rc" -ne 0 ]; then
+    echo "offline Harbor verifier script failed" >&2
+fi
+exit "$rc"
 """
+
+# Exact previous generated wrapper, before failed-exit rewards were retained.
+# Unknown custom scripts must still require an explicit reviewed adaptation.
+_LEGACY_OFFLINE_WRAPPER_SHA256 = "652a23b2adc7c088d149b895e286a1541ef6d1ad0eeeea6252c67c82ece861ae"
 
 _HARBOR_BRIDGE_MARKERS = (
     b"harbor loom bridge",
@@ -104,6 +109,8 @@ def _needs_offline_verifier_wrapper(existing: bytes | None) -> bool:
         return True
     if existing == _OFFLINE_VERIFIER_RUN_SH:
         return False
+    if hashlib.sha256(existing).hexdigest() == _LEGACY_OFFLINE_WRAPPER_SHA256:
+        return True
     if _OFFLINE_MARKER in existing:
         return True
     if any(marker in existing for marker in _HARBOR_BRIDGE_MARKERS):

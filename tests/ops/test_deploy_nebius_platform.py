@@ -114,6 +114,7 @@ def test_native_build_render_preflight_does_not_import_service_dependencies(
     if egress_enabled:
         config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
         profile["supports_task_web_egress"] = True
+        profile["execution_class_id"] = "linux-amd64-cpu-web-pod-v1"
     config["task_resource_requests"] = {"local/measured-task": {
         "task_revision_sha256": "sha256:" + "d" * 64,
         "requests": {"controller": {

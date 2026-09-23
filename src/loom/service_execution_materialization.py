@@ -21,6 +21,7 @@ from pydantic import (
 )
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
+from loom.execution_contract import nebius_cpu_execution_class
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import execution_requirement_diagnostics
 from loom.execution_runtime_contract import (
@@ -156,6 +157,18 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         return payload
 
     @model_validator(mode="after")
+    def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
+        execution_class = nebius_cpu_execution_class(
+            supports_task_web_egress=self.supports_task_web_egress,
+        )
+        if self.execution_class_id != execution_class.class_id:
+            raise ValueError(
+                "runtime profile execution class must match its task egress capability; "
+                "new capabilities require distinct class and target identities"
+            )
+        return self
+
+    @model_validator(mode="after")
     def unique_agent_versions(self) -> ServiceExecutionRuntimeProfileV1:
         keys = [(item.agent_name, item.agent_version) for item in self.agent_runtime_bindings]
         if len(set(keys)) != len(keys):
@@ -170,6 +183,41 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         if _DIGEST_REF.fullmatch(value) is None:
             raise ValueError("runtime profile images must be digest-pinned")
         return value
+
+
+def build_nebius_runtime_profile(
+    *,
+    candidate_sha: str,
+    task_image_ref: str,
+    runtime_image_ref: str,
+    runtime_binary_sha256: str,
+    image_admission: ExecutionImageAdmissionBundleV1,
+    agent_image_ref: str | None = None,
+    controller_resources: ControllerComputeResourcesV1 | None = None,
+    supports_task_web_egress: bool = False,
+    service_lifecycle_ready: bool = False,
+    supports_task_identity: bool = False,
+) -> ServiceExecutionRuntimeProfileV1:
+    """Construct publisher profiles with the class matching explicit capabilities.
+
+    Existing profiles must be loaded and validated, never passed through this
+    builder to silently replace a declared catalog identity.
+    """
+    return ServiceExecutionRuntimeProfileV1(
+        candidate_sha=candidate_sha,
+        execution_class_id=nebius_cpu_execution_class(
+            supports_task_web_egress=supports_task_web_egress,
+        ).class_id,
+        task_image_ref=task_image_ref,
+        runtime_image_ref=runtime_image_ref,
+        runtime_binary_sha256=runtime_binary_sha256,
+        image_admission=image_admission,
+        agent_image_ref=agent_image_ref,
+        controller_resources=controller_resources,
+        supports_task_web_egress=supports_task_web_egress,
+        service_lifecycle_ready=service_lifecycle_ready,
+        supports_task_identity=supports_task_identity,
+    )
 
 
 def load_service_execution_runtime_profile(
