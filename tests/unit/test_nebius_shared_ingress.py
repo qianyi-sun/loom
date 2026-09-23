@@ -95,6 +95,9 @@ def test_shared_controller_preserves_legacy_sni_and_never_allocates_public_resou
         "address": "loom-web-origin." + platform["namespace"] + ".svc.cluster.local:443",
     }]
     assert dynamic["tls"]["stores"]["default"]["defaultCertificate"]["keyFile"] == "/var/run/loom-ingress-tls/tls.key"
+    # Strict SNI consults the selectable certificate map, not the fallback store.
+    assert dynamic["tls"]["certificates"] == [{"certFile": "/var/run/loom-ingress-tls/tls.crt",
+                                                "keyFile": "/var/run/loom-ingress-tls/tls.key"}]
     static = json.loads(config["traefik.json"])
     assert set(static["entryPoints"]) == {"websecure", "health"}
     assert static["entryPoints"]["websecure"]["http"]["tls"] == {}

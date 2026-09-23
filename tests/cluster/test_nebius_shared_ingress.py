@@ -168,6 +168,7 @@ def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, pl
         _run(container, "kubectl", "apply", "-f", "-", payload=yaml.safe_dump_all(prerequisites))
         _run(container, "kubectl", "apply", "--validate=strict", "-f", "-", payload=yaml.safe_dump_all(docs))
         try:
+            _run(container, "kubectl", "rollout", "status", "deployment/loom-shared-ingress", "-n", ns, "--timeout=150s", timeout=165)
             _run(container, "kubectl", "wait", "pods", "--all", "--all-namespaces", "--for=condition=Ready", "--timeout=150s", timeout=165)
         except AssertionError:
             pytest.fail(_run(container, "kubectl", "get", "pods", "-A", "-o", "wide") +
@@ -193,11 +194,14 @@ def test_shared_tls_routes_streams_limits_and_preserves_legacy(ingress_input, pl
         deadline = time.monotonic() + 30
         last = None
         while time.monotonic() < deadline:
-            last = get("alice.dev.example.com", "/api/v1/health")
+            try:
+                last = get("alice.dev.example.com", "/api/v1/health")
+            except (ConnectionRefusedError, ssl.SSLError) as exc:
+                last = type(exc).__name__ + ": " + str(exc)
             if last == (200, b"loom-dev-alice:8090"):
                 break
             time.sleep(0.5)
-        assert last == (200, b"loom-dev-alice:8090")
+        assert last == (200, b"loom-dev-alice:8090"), (last, _run(container, "kubectl", "logs", "-n", ns, "deployment/loom-shared-ingress", "--tail=20"))
         assert get("bob.dev.example.com", "/api") == (200, b"loom-dev-bob:8090")
         assert get("alice.dev.example.com", "/apiary") == (200, b"loom-dev-alice:8080")
         assert get("bob.dev.example.com") == (200, b"loom-dev-bob:8080")
