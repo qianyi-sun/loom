@@ -258,10 +258,18 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
 
         if not current_spec(spec["template"]["spec"]):
             raise IngressError("controller image or TLS generation differs")
-        secret = api.get_secret(binding.namespace, tls_receipt["secret_name"])
-        if (not secret or secret["metadata"]["uid"] != tls_receipt["secret_uid"]
-                or secret.get("immutable") is not True or secret["metadata"].get("deletionTimestamp") is not None):
-            raise IngressError("delivered TLS Secret identity differs")
+        def check_secret() -> None:
+            secret = api.get_secret(binding.namespace, tls_receipt["secret_name"])
+            meta = (secret or {}).get("metadata", {})
+            if (not secret or meta.get("uid") != tls_receipt["secret_uid"]
+                    or meta.get("name") != tls_receipt["secret_name"] or meta.get("namespace") != binding.namespace
+                    or secret.get("immutable") is not True or secret.get("type") != "kubernetes.io/tls"
+                    or meta.get("deletionTimestamp") is not None or meta.get("ownerReferences")
+                    or meta.get("labels", {}).get("loom.openai.com/ingress-installation") != binding.installation_id
+                    or meta.get("annotations", {}).get("loom.openai.com/certificate-generation") != tls_receipt["certificate_generation"]):
+                raise IngressError("delivered TLS Secret identity differs")
+
+        check_secret()
         owned_sets = {
             row["metadata"]["uid"] for row in api.list_controller_replicasets(binding.namespace)
             if row["metadata"].get("deletionTimestamp") is None and any(
@@ -295,6 +303,7 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
             (p["metadata"]["uid"], p["metadata"]["resourceVersion"]) for p in pods
         ):
             raise IngressError("controller membership changed during TLS qualification")
+        check_secret()
         api.verify_identity(binding)
         return {"status": "controller_qualified", "deployment_uid": deployment_uid, "generation": generation,
                 "pod_uids": [pod["metadata"]["uid"] for pod in pods],
