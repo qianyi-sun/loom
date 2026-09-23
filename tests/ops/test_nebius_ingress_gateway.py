@@ -121,6 +121,32 @@ def test_unknown_create_reply_is_read_back_without_write_retry(inputs, failure):
     assert api.creates == 1
 
 
+@pytest.mark.parametrize("phase", ["create", "replay"])
+def test_tls_delivery_rechecks_binding_before_reporting_success(inputs, monkeypatch, phase):
+    api, root = inputs[2], inputs[5]
+    if phase == "replay":
+        deliver(inputs)
+    original_get = api.get_secret
+
+    def read_and_invalidate(namespace, name):
+        result = original_get(namespace, name)
+        if result is not None:
+            api.identity_matches = False
+        return result
+
+    monkeypatch.setattr(api, "get_secret", read_and_invalidate)
+    with pytest.raises(module().IngressError):
+        deliver(inputs)
+    assert api.creates == 1
+    receipt = json.loads(next((root / "deliveries").glob("*.json")).read_text())
+    if phase == "create":
+        assert receipt["status"] == "create_intent" and receipt["secret_uid"] is None
+    # An identity restored by an operator can reconcile, never repeat the write.
+    monkeypatch.setattr(api, "get_secret", original_get)
+    api.identity_matches = True
+    assert deliver(inputs)["status"] == "tls_delivered" and api.creates == 1
+
+
 @pytest.mark.parametrize("change", ["expired", "selection", "missing", "identity", "config", "symlink"])
 def test_invalid_certificate_or_binding_blocks_before_kubernetes_write(inputs, change):
     config, _binding, api, _roots, selected, root = inputs
@@ -300,6 +326,34 @@ def test_new_selected_pod_during_tls_probe_prevents_qualification(controller):
         extra["metadata"]["name"] = "unqualified-new-pod"
         extra["metadata"]["uid"] = str(uuid4())
         pods.append(extra)
+        return result
+
+    api.probe_tls = probe
+    with pytest.raises(module().IngressError):
+        module().qualify_controller(**arguments)
+
+
+@pytest.mark.parametrize("change", ["deployment-deleting", "deployment-owner", "deployment-unavailable",
+                                   "replicaset-deleting", "replicaset-owner", "replicaset-recreated"])
+def test_controller_chain_must_remain_owned_and_ready_during_tls_probe(controller, change):
+    arguments, deployment, replicas, _pods, _probes = controller
+    api = arguments["api"]
+    original_probe = api.probe_tls
+
+    def probe(*args):
+        result = original_probe(*args)
+        if change == "deployment-deleting":
+            deployment["metadata"]["deletionTimestamp"] = NOW.isoformat()
+        elif change == "deployment-owner":
+            deployment["metadata"]["labels"] = {}
+        elif change == "deployment-unavailable":
+            deployment["status"]["availableReplicas"] = 0
+        elif change == "replicaset-deleting":
+            replicas[0]["metadata"]["deletionTimestamp"] = NOW.isoformat()
+        elif change == "replicaset-owner":
+            replicas[0]["metadata"]["ownerReferences"] = []
+        else:
+            replicas[0]["metadata"]["uid"] = str(uuid4())
         return result
 
     api.probe_tls = probe
