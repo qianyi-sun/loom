@@ -962,6 +962,7 @@ configuration; omission leaves native building disabled:
   "ephemeral_storage_mib": 16384,
   "max_processes": 512,
   "active_deadline_seconds": 1800,
+  "builder_engine": "buildkit",
   "snapshotter": "overlayfs",
   "compatible_revision_cache": "off",
   "export_cache_mode": "max",
@@ -969,6 +970,62 @@ configuration; omission leaves native building disabled:
   "oci_export_format": "archive"
 }
 ```
+
+`builder_engine` selects the native Job build middle step (`buildkit` default, or
+opt-in `compose` — [#2086](https://github.com/qianyi-sun/loom/issues/2086) /
+shared-cache follow-up [#2092](https://github.com/qianyi-sun/loom/issues/2092)).
+Compose keeps one Job per materialization: rootless dockerd → buildx
+`docker-container` → `docker compose build` (optional BuildKit-local
+`cache_from` / `cache_to` on `/loom/build/cache-*`) →
+`skopeo copy docker-daemon:… oci-archive:…` → existing validate/publish.
+
+**Shared cache (not dockerd data-root):** when `cache_bucket` is set, compose
+reuses the same S3 `task-build-cache` pipeline as BuildKit (`export_cache_mode`,
+`cache_transfer`, `compatible_revision_cache`). The build container still gets
+**no** registry/S3 secrets — only volume paths. Default `docker` driver often
+cannot export `type=local` cache; Jobs create a buildx `docker-container`
+builder and **fail closed** if `cache-out/{index}/index.json` is missing after a
+cached build (Compose may otherwise silently ignore unsupported `cache_*`).
+
+Content digests may differ from pure `buildctl` for the same sources — switching
+engines is a rebuild, not a digest-preserving migration. Before enabling compose
+on any non-dev profile, publish the Loom-owned builder image and pin its digest
+(see below), confirm AppArmor allows rootlesskit userns, and record a two-Job
+cache-hit probe.
+
+#### Compose builder image (`deploy/Dockerfile.task-image-compose-builder`)
+
+Upstream `docker:*-dind-rootless` has dockerd and Compose but **not** skopeo.
+Jobs require skopeo + working `docker buildx` on the build initContainer PATH.
+Build and push an immutable digest, then retarget `COMPOSE_BUILDER_IMAGE` in
+`task_image_renderer.py`:
+
+```bash
+docker build -f deploy/Dockerfile.task-image-compose-builder \
+  -t cr.eu-north1.nebius.cloud/REGISTRY/loom-task-image-compose-builder:candidate .
+# Push, then record the registry digest and replace COMPOSE_BUILDER_IMAGE with
+# cr.eu-north1.nebius.cloud/REGISTRY/loom-task-image-compose-builder@sha256:…
+```
+
+Until that retarget lands, Job renders still pin the upstream dind-rootless
+digest used as the Dockerfile `FROM` (unit tests assert that pin stays aligned).
+Do not flip `builder_engine` to `compose` in production until the published
+image digest is wired and shared-cache probe evidence looks acceptable.
+
+#### Compose enablement validation evidence (record before flipping profiles)
+
+Keep this table filled on the issue/PR before any non-dev platform sets
+`builder_engine: "compose"`. Leave cells as `TBD` until measured.
+
+| Gate | Evidence to record | Status |
+| --- | --- | --- |
+| Unit / render | CI or local: `pytest` on `test_nebius_task_image_renderer`, `test_nebius_platform_render`, `test_production_dockerfiles` (compose + shared-cache cases) | TBD |
+| Loom compose-builder image | Registry ref `cr.eu-north1…/loom-task-image-compose-builder@sha256:…`; confirm `skopeo` + `docker compose` + `docker buildx` on PATH; `COMPOSE_BUILDER_IMAGE` retarget commit SHA | TBD |
+| AppArmor / userns | Node/group proof that rootlesskit userns works on integration-execution (same as compose probe) | TBD |
+| Shared-cache two-Job probe | Same fingerprint: Job 2 prepare `cache_import` **hit** + faster `solve` vs Job 1 cold; Job/Pod names + stage JSON (#2092) | TBD |
+| Option A cold measure | One dockerd **per mat Job** (not shared-dockerd formal20). Record timings vs BuildKit OverlayFS | TBD |
+| Digest caveat acknowledged | Compose digests may differ from BuildKit for the same `materialization_key` | TBD |
+| Profile flip | Which platform JSON / profile first enables compose; change ticket / config PR | TBD (blocked on rows above) |
 
 `snapshotter` selects the BuildKit OCI worker snapshotter (`overlayfs` or
 `native`). It defaults to `overlayfs` (the measured Nebius improvement over the
@@ -1012,8 +1069,10 @@ Prepare, BuildKit, and publish containers emit one JSON object per line with
 `cleanup`, `publish`, or `cache_export`, plus `event` (`start` / `end` / `hit` /
 `miss`) and `duration_ms` on timed `end` events. `solve` includes writing the
 OCI output (`--output type=oci`); `oci_export` records resulting bytes (archive
-size or directory file-byte sum). Grep Job logs for `loom_task_image_stage`
-when comparing cold builds.
+size or directory file-byte sum). Compose Jobs additionally emit `dockerd`
+(daemon start) and tag `solve` with `"builder_engine":"compose"`; they never emit
+BuildKit `cache_import` / `cache_export` / `cleanup`. Grep Job logs for
+`loom_task_image_stage` when comparing cold builds.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.

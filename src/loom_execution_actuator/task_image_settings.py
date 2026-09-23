@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
     from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -33,17 +33,33 @@ class NativeTaskImageSettings(BaseModel):
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     max_concurrent: int = Field(default=1, ge=1, le=16)
+    # buildkit (default) or compose (opt-in, one Job per mat — see #2086 / #2092).
+    builder_engine: Literal["buildkit", "compose"] = "buildkit"
     # OverlayFS is the measured Nebius default; set "native" to roll back.
+    # Compose Jobs do not run buildkitd; snapshotter is BuildKit-daemonless only.
     snapshotter: Literal["overlayfs", "native"] = "overlayfs"
-    # When "same_task", prepare may import BuildKit cache from a prior ready
+    # When "same_task", prepare may import BuildKit-local cache from a prior ready
     # revision of the same task_id+cpu_arch. Results still use this mat key.
+    # Applies to both buildkit and compose (shared S3 task-build-cache — #2092).
     compatible_revision_cache: Literal["off", "same_task"] = "off"
-    # BuildKit local export mode; keep max until Nebius timing compares say otherwise.
+    # BuildKit local export mode; compose maps this to cache_to mode=.
     export_cache_mode: Literal["max", "min"] = "max"
     # Incremental content-addressed blobs (default) or whole-archive tar rollback.
     cache_transfer: Literal["tar", "blobs"] = "blobs"
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
+    # Compose v1 only produces oci-archive via skopeo.
     oci_export_format: Literal["archive", "directory"] = "archive"
+
+    @model_validator(mode="after")
+    def _compose_rejects_unused_knobs(self) -> NativeTaskImageSettings:
+        if self.builder_engine != "compose":
+            return self
+        # Compose does not run buildkitd; snapshotter would only mislead operators.
+        if self.snapshotter != "overlayfs":
+            raise ValueError("compose builder does not use BuildKit snapshotter")
+        if self.oci_export_format != "archive":
+            raise ValueError("compose builder v1 only supports oci_export_format=archive")
+        return self
 
     def job_config(self) -> TaskImageJobConfig:
         from loom_execution_actuator.task_image_renderer import TaskImageJobConfig
@@ -51,11 +67,11 @@ class NativeTaskImageSettings(BaseModel):
         return TaskImageJobConfig(**{key: getattr(self, key) for key in (
             "service_image", "source_secret_name", "cache_secret_name", "registry_secret_name", "registry_auth_kind",
             "cpu_millis", "memory_mib", "ephemeral_storage_mib", "max_processes", "active_deadline_seconds",
-            "snapshotter", "export_cache_mode", "oci_export_format",
+            "builder_engine", "snapshotter", "export_cache_mode", "oci_export_format",
         )})
 
     def runtime_configuration(self) -> dict[str, Any]:
         return {key: getattr(self, key) for key in (
             "storage_endpoint", "storage_region", "source_bucket", "cache_bucket", "registry_repository",
-            "cache_transfer", "oci_export_format",
+            "builder_engine", "cache_transfer", "oci_export_format",
         )}

@@ -461,6 +461,7 @@ class NativeTaskImageController:
         attempt.native_build = {
             "target_id": self.target.target_id, "namespace": self.settings.namespace,
             "job_name": job["metadata"]["name"], "job_uid": None, "state": "reserved",
+            "builder_engine": self.settings.builder_engine,
             "resources": {"vcpu_millis": self.settings.cpu_millis, "memory_mib": self.settings.memory_mib,
                           "storage_mib": self.settings.ephemeral_storage_mib},
             "max_processes": self.settings.max_processes, "reserved_at": now.isoformat(),
