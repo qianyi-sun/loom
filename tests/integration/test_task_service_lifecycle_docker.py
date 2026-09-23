@@ -116,6 +116,84 @@ async def test_service_survives_consistent_snapshot_and_private_verifier(service
     assert (await agent.exec("test ! -e /proc/$(cat /tmp/service.pid)")).return_code == 0
 
 
+@pytest.mark.parametrize("agent_kills_listener", [True, False])
+async def test_startup_only_readiness_grades_actual_post_agent_process_state(
+    service_sandboxes, tmp_path, monkeypatch, agent_kills_listener,
+):
+    import json
+    from uuid import uuid4
+
+    from loom import service_execution_sandbox_task as module
+    from loom.models.task import TaskConfig
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    agent, verifier = service_sandboxes
+    task, trial, _ = _inputs()
+    ready = (
+        "python -c 'import socket; "
+        'socket.create_connection(("127.0.0.1", 8080), timeout=1).close()\''
+    )
+    raw = task.model_dump(mode="json")
+    raw["environment"]["service_lifecycle"] = {
+        "startup_command": ["/bin/sh", "-c", "python -m http.server 8080 --bind 127.0.0.1 "
+                            ">/tmp/listener.log 2>&1 </dev/null & echo $! > /tmp/listener.pid"],
+        "readiness": {"command": ready, "interval_sec": 0.05, "retries": 40},
+        "readiness_scope": "startup_only",
+    }
+    raw["verifier"]["args"]["script_path"] = "verifier/run.sh"
+    task = TaskConfig.model_validate(raw)
+    workspace = tmp_path / "workspace"
+    (workspace / "verifier").mkdir(parents=True)
+    (workspace / "instruction.md").write_text("Find and terminate the process using port 8080.")
+    (workspace / "verifier/run.sh").write_text("""python - <<'PY'
+import json, os, socket
+with socket.socket() as client:
+    client.settimeout(1)
+    occupied = client.connect_ex(('127.0.0.1', 8080)) == 0
+os.makedirs(os.path.dirname(os.environ['LOOM_VERIFIER_OUTPUT']), exist_ok=True)
+with open(os.environ['LOOM_VERIFIER_OUTPUT'], 'w') as report:
+    json.dump({'rewards': {'passed': int(not occupied)}}, report)
+PY
+""")
+
+    def connect(role, _task):
+        name = "agent" if role == "task-sandbox" else "verifier"
+        return ServiceSandboxDriver(
+            tmp_path / name / "sandbox.sock", capabilities=agent.capabilities,
+            network_policy=NoNetwork(),
+        )
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def act(**kwargs):
+        driver = kwargs["driver"]
+        assert (await driver.exec(ready)).return_code == 0, "startup must establish the listener"
+        assert (await driver.exec("test ! -e /app/verifier/run.sh")).return_code == 0
+        if agent_kills_listener:
+            assert (await driver.exec("kill $(cat /tmp/listener.pid)")).return_code == 0
+            for _ in range(50):
+                if (await driver.exec(ready)).return_code != 0:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("agent did not stop the listener")
+
+    monkeypatch.setattr(module, "sandbox_driver", connect)
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", act)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    await module.run_agent(workspace, task, trial)
+    # Snapshot handoff must not kill an agent-surviving listener or restart a
+    # listener the agent killed; either would change the verifier's answer.
+    assert ((await verifier.exec(ready)).return_code == 0) is not agent_kills_listener
+    await module.run_verifier(workspace, task, trial)
+    report = json.loads((workspace / ".loom/verifier/output.json").read_text())
+    assert report["rewards"]["passed"] == int(agent_kills_listener)
+    assert (await agent.exec("test ! -e /proc/$(cat /tmp/listener.pid)")).return_code == 0
+
+
 @pytest.mark.parametrize("termination", ["signal", "deadline"])
 async def test_real_sigterm_unwinds_verifier_and_stops_retained_service(service_sandboxes, tmp_path, termination):
     import os

@@ -215,8 +215,9 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
                         finally:
                             if lifecycle is not None and handoff_allowed:
-                                async with asyncio.timeout(lifecycle.readiness_timeout_sec):
-                                    await driver.run_healthcheck(lifecycle.readiness)
+                                if lifecycle.readiness_scope == "startup_and_handoff":
+                                    async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                                        await driver.run_healthcheck(lifecycle.readiness)
                                 await driver.pause_processes()
                             else:
                                 await driver.stop_processes()
