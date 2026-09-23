@@ -21,7 +21,6 @@ const NAV_ITEMS = [
   { to: "/pipelines", label: "Pipelines" },
   { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
-  { to: "/task-sets", label: "Task sets" },
   { to: "/getting-started", label: "Getting started" },
 ];
 
