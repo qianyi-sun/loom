@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -152,6 +153,32 @@ def test_stage_checks_actual_create_not_just_the_dry_run(staging):
         implementation.stage_controller(**args)
 
 
+@pytest.mark.parametrize("change", ["owner", "rbac", "host-network", "pod-security"])
+def test_server_defaulting_cannot_change_requested_authority(staging, monkeypatch, change):
+    implementation, args = module(), staging
+    api = args["api"]
+    original = api.default_resource
+
+    def defaults(desired):
+        result = original(desired)
+        if change == "owner":
+            result["metadata"]["labels"]["loom.nebius/ingress-installation-id"] = str(uuid4())
+        elif change == "rbac" and result["kind"] == "ClusterRole":
+            result["rules"].append({"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]})
+        elif result["kind"] == "Deployment":
+            pod = result["spec"]["template"]["spec"]
+            if change == "host-network":
+                pod["hostNetwork"] = True
+            elif change == "pod-security":
+                pod["containers"][0]["securityContext"]["privileged"] = True
+        return result
+
+    monkeypatch.setattr(api, "default_resource", defaults)
+    with pytest.raises(implementation.StageError):
+        implementation.stage_controller(**args)
+    assert not api.creates
+
+
 def test_stage_keeps_intent_if_namespace_identity_changes_after_create(staging):
     implementation, args = module(), staging
     api = args["api"]
@@ -172,3 +199,44 @@ def test_changed_render_cannot_reinterpret_recorded_stage(staging):
     with pytest.raises(implementation.StageError):
         implementation.stage_controller(**args)
     assert len(args["api"].creates) == 8
+
+
+@pytest.mark.parametrize("change", [None, "verb", "namespace", "name", "operation"])
+def test_staging_transport_accepts_only_the_fixed_render_with_operation_identity(staging, tmp_path, monkeypatch, change):
+    implementation, args = module(), staging
+    kubeconfig = tmp_path / "kubeconfig"
+    kubeconfig.write_text("private fixture")
+    kubeconfig.chmod(0o600)
+    api = implementation.KubectlStageAPI(kubeconfig, binding=args["binding"], executable=Path("/usr/bin/kubectl"),
+                                         installation=args["installation"])
+    desired = next(d for d in render_shared_ingress(args["installation"]) if d["kind"] == "ClusterRole")
+    desired["metadata"]["annotations"] = {"loom.nebius/ingress-stage-id": str(uuid4())}
+    if change == "verb":
+        desired["rules"][0]["verbs"].append("delete")
+    elif change == "namespace":
+        desired["metadata"]["namespace"] = "foreign"
+    elif change == "name":
+        desired["metadata"]["name"] = "foreign"
+    elif change == "operation":
+        desired["metadata"]["annotations"]["loom.nebius/ingress-stage-id"] = "not-an-identity"
+    commands = []
+    monkeypatch.setattr(api, "verify_identity", lambda binding: None)
+
+    def run(argv, *, payload=None):
+        commands.append((argv, payload))
+        return json.dumps(desired).encode() if "--dry-run=server" in argv else b"created"
+
+    monkeypatch.setattr(api, "_run", run)
+    if change is None:
+        assert api.default_resource(desired) == desired
+        api.create_resource(desired)
+        assert [command for command, _ in commands] == [
+            ["create", "--dry-run=server", "-f", "-", "-o", "json"],
+            ["create", "-f", "-", "-o", "name"],
+        ]
+        assert all(json.loads(payload) == desired for _, payload in commands)
+    else:
+        for action in (api.default_resource, api.create_resource, api.get_resource):
+            with pytest.raises(implementation.StageError):
+                action(desired)
+        assert not commands
