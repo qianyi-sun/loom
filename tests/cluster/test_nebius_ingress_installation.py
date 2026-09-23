@@ -3,15 +3,25 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import ssl
 import subprocess
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 from scripts.ops.nebius_certificates import _bind_installation
-from scripts.ops.nebius_ingress_gateway import IngressError, KubectlTLSAPI, TLSBinding, deliver_tls
+from scripts.ops.nebius_ingress_gateway import (
+    IngressError,
+    KubectlControllerAPI,
+    KubectlTLSAPI,
+    TLSBinding,
+    deliver_tls,
+)
 
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.cluster.test_nebius_shared_ingress import PYTHON
+from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s, _wait_for_pod
 from tests.ops.test_nebius_certificates import NOW, installation, material, publish
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
@@ -19,7 +29,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(150)
-def test_immutable_tls_delivery_replays_and_rotates_without_replacing_old_secret(tmp_path):
+def test_immutable_tls_delivery_replays_and_rotates_without_replacing_old_secret(tmp_path, monkeypatch):
     from kubernetes import client
 
     container = _start_k3s(ephemeral_storage_floor="2Gi")
@@ -60,6 +70,41 @@ def test_immutable_tls_delivery_replays_and_rotates_without_replacing_old_secret
         assert deliver_tls(config, binding=binding, api=api, roots=roots, now=NOW) == first
         old = core.read_namespaced_secret(first["secret_name"], namespace)
         assert old.immutable and old.metadata.uid == first["secret_uid"]
+        core.create_namespaced_service_account(namespace, client.V1ServiceAccount(
+            metadata=client.V1ObjectMeta(name="tls-fixture"), automount_service_account_token=False))
+        server = '''import http.server, ssl
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain("/tls/tls.crt", "/tls/tls.key")
+server = http.server.HTTPServer(("0.0.0.0", 8443), http.server.BaseHTTPRequestHandler)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server.serve_forever()
+'''
+        core.create_namespaced_pod(namespace, client.V1Pod(
+            metadata=client.V1ObjectMeta(name="ingress"),
+            spec=client.V1PodSpec(
+                restart_policy="Never", service_account_name="tls-fixture", automount_service_account_token=False,
+                volumes=[client.V1Volume(name="tls", secret=client.V1SecretVolumeSource(secret_name=first["secret_name"]))],
+                containers=[client.V1Container(
+                    name="tls", image=PYTHON, command=["python", "-c", server],
+                    volume_mounts=[client.V1VolumeMount(name="tls", mount_path="/tls", read_only=True)],
+                    readiness_probe=client.V1Probe(tcp_socket=client.V1TCPSocketAction(port=8443), period_seconds=1),
+                )],
+            ),
+        ))
+        ready = _wait_for_pod(core, namespace, "ingress")
+        raw = container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"])
+        assert raw.exit_code == 0
+        kubeconfig.write_text(raw.output.decode().replace(
+            "https://127.0.0.1:6443", f"https://127.0.0.1:{container.get_exposed_port(6443)}"))
+        executable = shutil.which("kubectl")
+        assert executable is not None, "disposable TLS transport test requires kubectl"
+        probe = KubectlControllerAPI(kubeconfig, binding=binding, executable=Path(executable))
+        context = ssl.create_default_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode())
+        with monkeypatch.context() as trusted:
+            trusted.setattr(ssl, "create_default_context", lambda: context)
+            assert probe.probe_tls(namespace, "ingress", ready.metadata.uid, binding.management_host) == first["fingerprint_sha256"]
+            with pytest.raises(IngressError, match="identity differs"):
+                probe.probe_tls(namespace, "ingress", str(uuid4()), binding.management_host)
         with pytest.raises(client.ApiException) as error:
             core.patch_namespaced_secret(first["secret_name"], namespace, {"data": {"tls.key": "Zm9yZWlnbg=="}})
         assert error.value.status == 422
