@@ -91,10 +91,10 @@ class TaskImageJobConfig:
         if self.oci_export_format not in {"archive", "directory"}:
             raise ValueError("task-image oci_export_format must be archive or directory")
         if self.builder_engine == "compose":
-            if self.cache_secret_name is not None:
-                raise ValueError("compose builder cannot mount BuildKit S3 cache secrets")
             if self.oci_export_format != "archive":
                 raise ValueError("compose builder v1 only supports oci_export_format=archive")
+            if self.snapshotter != "overlayfs":
+                raise ValueError("compose builder does not use BuildKit snapshotter")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -250,16 +250,18 @@ def _compose_build_script(
     *,
     platform: str,
     max_processes: int,
+    cache_enabled: bool,
     build_timeout_seconds: int,
     build_args: dict[str, str] | None = None,
     build_target: str | None = None,
+    export_cache_mode: Literal["max", "min"] = "max",
 ) -> str:
-    """One rootless dockerd per Job; Compose build → skopeo OCI archive (#2086)."""
+    """One rootless dockerd per Job; Compose+buildx → skopeo OCI archive (#2086/#2092)."""
     lines = [
         "set -eu",
         f"ulimit -u {max_processes}",
         "mkdir -p /run/user/1000 /scratch/tmp /scratch/runtime /scratch/docker-config "
-        "/scratch/docker-data /scratch/docker-exec /loom/build/oci",
+        "/scratch/docker-data /scratch/docker-exec /loom/build/oci /loom/build/cache-out",
         "chmod 700 /run/user/1000",
         "export XDG_RUNTIME_DIR=/run/user/1000",
         "export TMPDIR=/scratch/tmp",
@@ -270,6 +272,7 @@ def _compose_build_script(
         "command -v rootlesskit >/dev/null",
         "command -v skopeo >/dev/null",
         "docker compose version >/dev/null",
+        "docker buildx version >/dev/null",
         "trap 'test -z \"${daemon_pid:-}\" || kill \"$daemon_pid\" 2>/dev/null || true' EXIT",
         'echo \'{"loom_task_image_stage":"dockerd","event":"start"}\'',
         "dockerd_started=$(date +%s)",
@@ -297,6 +300,11 @@ def _compose_build_script(
             'echo \'{"loom_task_image_stage":"dockerd","event":"end",'
             '"duration_ms":\'"$(( (dockerd_ended - dockerd_started) * 1000 ))"\'}\''
         ),
+        # Default docker driver often cannot cache_to type=local; use buildx
+        # docker-container so S3-backed local cache export is real (#2092).
+        "docker buildx rm -f loom-compose >/dev/null 2>&1 || true",
+        "docker buildx create --name loom-compose --driver docker-container --use",
+        "docker buildx inspect --bootstrap >/dev/null",
     ]
     for index, component in enumerate(components):
         context = PurePosixPath(_BUILD, "context", component.context_path).as_posix()
@@ -306,6 +314,8 @@ def _compose_build_script(
         image_tag = f"loom-compose-build/{index}:local"
         output = f"{_BUILD}/{component.oci_output_path}"
         compose_file = f"/scratch/compose-{index}.yml"
+        cache_in = f"{_BUILD}/cache-in/{index}"
+        cache_out = f"{_BUILD}/cache-out/{index}"
         build_block = [
             "    build:",
             f"      context: {context}",
@@ -319,7 +329,8 @@ def _compose_build_script(
                 build_block.append("      args:")
                 for key, value in sorted(build_args.items()):
                     build_block.append(f"        {key}: {json.dumps(value)}")
-        compose_yaml = "\n".join(
+        # Cache stanza is completed in shell so cache_from is omitted on miss.
+        compose_head = "\n".join(
             [
                 "services:",
                 "  task:",
@@ -335,19 +346,39 @@ def _compose_build_script(
                     '"builder_engine":"compose"}\''
                 ),
                 "solve_started=$(date +%s)",
+                f"mkdir -p {shlex.quote(cache_out)}",
                 f"cat > {shlex.quote(compose_file)} <<'LOOM_COMPOSE_EOF'",
-                compose_yaml,
-                "LOOM_COMPOSE_EOF",
+                compose_head,
+            ]
+        )
+        if cache_enabled:
+            lines.extend(
+                [
+                    "LOOM_COMPOSE_EOF",
+                    # Append cache_* under build: (same indent as context/dockerfile).
+                    f"if [ -f {shlex.quote(cache_in + '/index.json')} ]; then",
+                    f"  printf '%s\\n' '      cache_from:' "
+                    f"'        - type=local,src={cache_in}' >> {shlex.quote(compose_file)}",
+                    "fi",
+                    f"printf '%s\\n' '      cache_to:' "
+                    f"'        - type=local,dest={cache_out},mode={export_cache_mode}' "
+                    f">> {shlex.quote(compose_file)}",
+                ]
+            )
+        else:
+            lines.append("LOOM_COMPOSE_EOF")
+        lines.extend(
+            [
                 "set +e",
                 (
                     f"timeout -s TERM -k 10 {build_timeout_seconds} "
-                    f"docker compose -f {shlex.quote(compose_file)} --progress plain build"
+                    f"docker compose -f {shlex.quote(compose_file)} "
+                    "--progress plain --builder loom-compose build --load"
                 ),
                 "rc=$?",
                 "set -e",
                 "solve_ended=$(date +%s)",
                 "if [ \"$rc\" -ne 0 ]; then",
-                # Shell: echo '{"…","exit":'"$rc"',"duration_ms":'"$((…))"'}'
                 (
                     f'  echo \'{{"loom_task_image_stage":"solve","event":"end",'
                     f'"component_index":{index},"failed":true,"exit":\'"$rc"\''
@@ -359,6 +390,24 @@ def _compose_build_script(
                     f'echo \'{{"loom_task_image_stage":"solve","event":"end",'
                     f'"component_index":{index},"duration_ms":\'"$(( (solve_ended - solve_started) * 1000 ))"\'}}\''
                 ),
+            ]
+        )
+        if cache_enabled:
+            # Fail closed: Compose may silently ignore unsupported cache_to.
+            lines.extend(
+                [
+                    f"if [ ! -f {shlex.quote(cache_out + '/index.json')} ]; then",
+                    (
+                        '  echo \'{"loom_task_image_stage":"solve","event":"end",'
+                        f'"component_index":{index},"failed":true,'
+                        '"reason":"cache_export_missing"}\' >&2'
+                    ),
+                    "  exit 1",
+                    "fi",
+                ]
+            )
+        lines.extend(
+            [
                 (
                     f'echo \'{{"loom_task_image_stage":"oci_export","event":"start",'
                     f'"component_index":{index}}}\''
@@ -380,6 +429,7 @@ def _compose_build_script(
                 f"docker image rm -f {shlex.quote(image_tag)} >/dev/null 2>&1 || true",
             ]
         )
+    lines.append("docker buildx rm -f loom-compose >/dev/null 2>&1 || true")
     lines.append("docker builder prune -af >/dev/null 2>&1 || true")
     return "\n".join(lines) + "\n"
 
@@ -474,8 +524,9 @@ def render_task_image_job(
             {"name": f"{phase_name}-tmp", "mountPath": "/tmp"},
         ]
         roles = ["source"] if phase_name == "prepare" else ["registry"]
-        # BuildKit S3 cache only; compose engine never mounts it (settings reject).
-        if config.cache_secret_name is not None and config.builder_engine == "buildkit":
+        # Shared S3 task-build-cache for buildkit and compose (#2092); build
+        # container never mounts these secrets — only prepare/publish do.
+        if config.cache_secret_name is not None:
             roles.append("cache")
         mounts.extend(
             {"name": role, "mountPath": f"{_CREDENTIALS}/{role}", "readOnly": True}
@@ -519,9 +570,11 @@ def render_task_image_job(
             checked,
             platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
             max_processes=config.max_processes,
+            cache_enabled=config.cache_secret_name is not None,
             build_timeout_seconds=build_timeout_seconds,
             build_args=build_args,
             build_target=build_target,
+            export_cache_mode=config.export_cache_mode,
         )
         builder_image = config.compose_image
         builder_env = [
@@ -623,8 +676,6 @@ def render_task_image_job(
         ("registry", config.registry_secret_name),
     ):
         if secret_name is not None:
-            if role == "cache" and compose:
-                continue
             keys = (
                 (
                     ("credentials.json",)
