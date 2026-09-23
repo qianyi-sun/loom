@@ -305,6 +305,26 @@ def test_new_selected_pod_during_tls_probe_prevents_qualification(controller):
         module().qualify_controller(**arguments)
 
 
+@pytest.mark.parametrize("change", ["uid", "owner"])
+def test_secret_identity_must_remain_owned_during_tls_probe(controller, change):
+    arguments, _deployment, _replicas, _pods, _probes = controller
+    api = arguments["api"]
+    original_probe = api.probe_tls
+
+    def probe(*args):
+        result = original_probe(*args)
+        metadata = api.secrets[arguments["tls_receipt"]["secret_name"]]["metadata"]
+        if change == "uid":
+            metadata["uid"] = str(uuid4())
+        else:
+            metadata["labels"] = {}
+        return result
+
+    api.probe_tls = probe
+    with pytest.raises(module().IngressError):
+        module().qualify_controller(**arguments)
+
+
 @pytest.mark.parametrize("wrong_certificate", [False, True])
 def test_real_tls_probe_uses_verified_hostname_and_stops_forwarder(inputs, tmp_path, monkeypatch, wrong_certificate):
     import hashlib
