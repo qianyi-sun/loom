@@ -117,6 +117,95 @@ class KubectlTLSAPI:
                   payload=json.dumps(document).encode())
 
 
+class ControllerAPI(TLSAPI, Protocol):
+    def get_deployment(self, namespace: str, name: str) -> dict[str, Any] | None: ...
+    def list_controller_pods(self, namespace: str) -> list[dict[str, Any]]: ...
+    def list_controller_replicasets(self, namespace: str) -> list[dict[str, Any]]: ...
+    def get_pod(self, namespace: str, name: str) -> dict[str, Any] | None: ...
+    def probe_tls(self, namespace: str, name: str, uid: str, server_name: str) -> str:
+        """Authenticate the exact Pod's TLS using system trust; return leaf SHA256."""
+        ...
+
+
+def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_uid: str,
+                       image: str, tls_receipt: dict[str, Any]) -> dict[str, Any]:
+    """One read-only observation, not a readiness retry or a public cutover.
+
+    A caller may poll this observation within a bounded rollout deadline. Every
+    selected Pod must be current and serve the delivered certificate; replicas
+    from an old generation, including terminating Pods, prevent qualification.
+    """
+    try:
+        if (str(UUID(deployment_uid)) != deployment_uid
+                or not re.fullmatch(r"cr\.[a-z0-9-]+\.nebius\.cloud/[A-Za-z0-9_./-]+@sha256:[0-9a-f]{64}", image)
+                or tls_receipt["binding"] != asdict(binding) or tls_receipt["status"] != "tls_delivered"):
+            raise IngressError("controller qualification binding differs")
+        api.verify_identity(binding)
+        deployment = api.get_deployment(binding.namespace, "loom-shared-ingress")
+        if deployment is None:
+            raise IngressError("controller is absent")
+        metadata, spec, status = deployment["metadata"], deployment["spec"], deployment.get("status", {})
+        generation = metadata["generation"]
+        if (metadata["uid"] != deployment_uid or metadata["namespace"] != binding.namespace
+                or metadata.get("deletionTimestamp") is not None
+                or metadata.get("labels", {}).get("loom.nebius/ingress-installation-id") != binding.installation_id
+                or type(generation) is not int or generation < 1 or spec.get("replicas") != 1
+                or status.get("observedGeneration") != generation
+                or any(status.get(field) != 1 for field in ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas"))
+                or spec.get("selector") != {"matchLabels": {"app": "loom-shared-ingress"}}):
+            raise IngressError("controller generation is not fully available")
+
+        def current_spec(value: dict[str, Any]) -> bool:
+            containers = value.get("containers", [])
+            tls_volumes = [v for v in value.get("volumes", []) if v.get("name") == "tls"]
+            return (len(containers) == 1 and containers[0].get("image") == image
+                    and len(tls_volumes) == 1
+                    and tls_volumes[0].get("secret", {}).get("secretName") == tls_receipt["secret_name"])
+
+        if not current_spec(spec["template"]["spec"]):
+            raise IngressError("controller image or TLS generation differs")
+        secret = api.get_secret(binding.namespace, tls_receipt["secret_name"])
+        if (not secret or secret["metadata"]["uid"] != tls_receipt["secret_uid"]
+                or secret.get("immutable") is not True or secret["metadata"].get("deletionTimestamp") is not None):
+            raise IngressError("delivered TLS Secret identity differs")
+        owned_sets = {
+            row["metadata"]["uid"] for row in api.list_controller_replicasets(binding.namespace)
+            if row["metadata"].get("deletionTimestamp") is None and any(
+                owner.get("controller") is True and owner.get("kind") == "Deployment" and owner.get("uid") == deployment_uid
+                for owner in row["metadata"].get("ownerReferences", [])
+            )
+        }
+        pods = api.list_controller_pods(binding.namespace)
+        if len(pods) != 1:
+            raise IngressError("controller has absent or mixed-generation Pods")
+        for pod in pods:
+            meta, state = pod["metadata"], pod.get("status", {})
+            if (meta["namespace"] != binding.namespace or meta.get("deletionTimestamp") is not None
+                    or not meta.get("resourceVersion") or meta.get("labels", {}).get("app") != "loom-shared-ingress"
+                    or not current_spec(pod["spec"]) or state.get("phase") != "Running"
+                    or not any(c.get("type") == "Ready" and c.get("status") == "True" for c in state.get("conditions", []))
+                    or not any(o.get("controller") is True and o.get("kind") == "ReplicaSet" and o.get("uid") in owned_sets
+                               for o in meta.get("ownerReferences", []))):
+                raise IngressError("controller Pod is not current and ready")
+            if api.probe_tls(binding.namespace, meta["name"], meta["uid"], binding.management_host) != tls_receipt["fingerprint_sha256"]:
+                raise IngressError("controller Pod serves a different certificate")
+            observed = api.get_pod(binding.namespace, meta["name"])
+            if (not observed or observed["metadata"].get("uid") != meta["uid"]
+                    or observed["metadata"].get("resourceVersion") != meta["resourceVersion"]):
+                raise IngressError("controller Pod changed during TLS qualification")
+        current = api.get_deployment(binding.namespace, "loom-shared-ingress")
+        if not current or current["metadata"]["uid"] != deployment_uid or current["metadata"]["generation"] != generation:
+            raise IngressError("controller changed during TLS qualification")
+        api.verify_identity(binding)
+        return {"status": "controller_qualified", "deployment_uid": deployment_uid, "generation": generation,
+                "pod_uids": [pod["metadata"]["uid"] for pod in pods],
+                "fingerprint_sha256": tls_receipt["fingerprint_sha256"], "secret_uid": tls_receipt["secret_uid"]}
+    except IngressError:
+        raise
+    except Exception:
+        raise IngressError("controller qualification unavailable") from None
+
+
 def _verify_secret(observed: dict[str, Any], desired: dict[str, Any], recorded_uid: str | None) -> str:
     try:
         metadata = observed["metadata"]

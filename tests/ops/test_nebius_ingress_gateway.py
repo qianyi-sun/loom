@@ -214,7 +214,8 @@ def controller(inputs):
     spec = {"containers": [{"name": "main", "image": image}],
             "volumes": [{"name": "tls", "secret": {"secretName": receipt["secret_name"]}}]}
     deployment = {"metadata": {"name": "loom-shared-ingress", "namespace": binding.namespace,
-                                "uid": deployment_uid, "generation": 3},
+                                "uid": deployment_uid, "generation": 3,
+                                "labels": {"loom.nebius/ingress-installation-id": binding.installation_id}},
                   "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "loom-shared-ingress"}},
                            "template": {"spec": copy.deepcopy(spec)}},
                   "status": {"observedGeneration": 3, "replicas": 1, "updatedReplicas": 1,
@@ -222,6 +223,7 @@ def controller(inputs):
     replicas = [{"metadata": {"uid": rs_uid, "ownerReferences": [
         {"kind": "Deployment", "uid": deployment_uid, "controller": True}]}}]
     pods = [{"metadata": {"name": "ingress-current", "namespace": binding.namespace, "uid": pod_uid,
+                         "resourceVersion": "pod-v1",
                          "labels": {"app": "loom-shared-ingress"}, "ownerReferences": [
                              {"kind": "ReplicaSet", "uid": rs_uid, "controller": True}]},
              "spec": copy.deepcopy(spec), "status": {"phase": "Running", "conditions": [
@@ -245,7 +247,7 @@ def controller(inputs):
 
 
 def test_controller_qualification_proves_the_current_pod_certificate(controller):
-    arguments, deployment, replicas, pods, probes = controller
+    arguments, deployment, _replicas, pods, probes = controller
     result = module().qualify_controller(**arguments)
     assert result["status"] == "controller_qualified"
     assert result["deployment_uid"] == deployment["metadata"]["uid"]
