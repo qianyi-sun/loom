@@ -18,7 +18,10 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
-from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1
+from loom.execution_contract import (
+    NEBIUS_CPU_EXECUTION_CLASS_V1,
+    NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+)
 from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     TaskExecutionResourceRequestsV1,
@@ -1357,6 +1360,17 @@ def _build_platform(
         raise NebiusPlatformError(
             "task egress configuration and runtime profile readiness must agree"
         )
+    execution_class = (
+        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 if profile.get("supports_task_web_egress", False)
+        else NEBIUS_CPU_EXECUTION_CLASS_V1
+    )
+    # Management-only rendering also reuses these templates with a minimal
+    # non-execution profile. Keep its existing CPU default; egress is explicit.
+    if profile.get("execution_class_id", NEBIUS_CPU_EXECUTION_CLASS_V1.class_id) != execution_class.class_id:
+        raise NebiusPlatformError(
+            "runtime profile execution class must match its task egress capability; "
+            "new capabilities require distinct class and target identities"
+        )
     if profile.get("supports_task_identity", False) and not validate_identity_policy(config):
         raise NebiusPlatformError(
             "task identity readiness requires a qualified policy; execution namespaces remain restricted"
@@ -1403,7 +1417,7 @@ def _build_platform(
         "schema_version": "loom.execution-target.v1",
         "target_id": config["target_id"],
         "logical_pool_id": "nebius-cpu",
-        "execution_class_id": "linux-amd64-cpu-pod-v1",
+        "execution_class_id": execution_class.class_id,
         "cluster_scope_id": config["cluster_scope_id"],
         "environment": config["environment"],
         "provider": "nebius",
@@ -1417,11 +1431,11 @@ def _build_platform(
         "health_stale_after_seconds": 90,
     }
     catalog = {
-        "execution_class": NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json"),
+        "execution_class": execution_class.model_dump(mode="json"),
         "topology": {
             "schema_version": "loom.execution-topology.v1",
             "logical_pool_id": "nebius-cpu",
-            "execution_class_id": "linux-amd64-cpu-pod-v1",
+            "execution_class_id": execution_class.class_id,
             "placement_policy": "environment-local-health-first",
             "targets": [target],
         },

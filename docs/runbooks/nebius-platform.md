@@ -149,6 +149,12 @@ retries reuse the same completed Jobs.
 Task web egress is disabled unless the published runtime profile has
 `supports_task_web_egress: true` and the protected environment configuration
 contains a `task_egress` object. The renderer rejects either setting alone.
+The profile must also select `execution_class_id: linux-amd64-cpu-web-pod-v1`.
+The existing `linux-amd64-cpu-pod-v1` class remains unchanged. Catalog classes
+and target bindings are immutable: enabling web egress on an existing deployment
+requires separately qualified new target IDs, including regional targets.
+Drain and disable the old targets through the operator API before switching;
+never overwrite catalog rows or reuse their IDs with new capabilities.
 The object uses the Gateway schema: a required nonempty `protected_cidrs` list
 and optional `maximum_connections` (1–256, default 64) and
 `maximum_connections_per_lease` (1–32, default 8). Inventory this deployment's

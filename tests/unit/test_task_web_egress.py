@@ -88,12 +88,18 @@ async def test_command_receives_proxy_environment_without_changing_model_gateway
 
 
 def test_class_capability_must_explicitly_admit_web_egress() -> None:
-    from loom.execution_contract import NEBIUS_CPU_EXECUTION_CLASS_V1, evaluate_execution_admission
+    from loom.execution_contract import (
+        NEBIUS_CPU_EXECUTION_CLASS_V1,
+        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+        evaluate_execution_admission,
+    )
 
     task, _, _ = _inputs()
     task = task.model_copy(update={"environment": task.environment.model_copy(update={"baseline_network_policy": policy()})})
     requirements = workload_requirements_from_task(task)
-    legacy = NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(update={"supports_task_web_egress": False})
+    legacy = NEBIUS_CPU_EXECUTION_CLASS_V1
     assert "supports_task_web_egress" not in legacy.model_dump(mode="json")
     assert "task_web_egress_unsupported" in {reason.code for reason in evaluate_execution_admission(requirements, legacy).reasons}
-    assert evaluate_execution_admission(requirements, NEBIUS_CPU_EXECUTION_CLASS_V1).compatible
+    decision = evaluate_execution_admission(requirements, NEBIUS_CPU_WEB_EXECUTION_CLASS_V1)
+    assert decision.compatible
+    assert decision.execution_class_id != legacy.class_id
