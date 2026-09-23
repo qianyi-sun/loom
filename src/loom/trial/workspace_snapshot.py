@@ -14,6 +14,7 @@ import asyncio
 import os
 import shlex
 import tarfile
+from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -42,7 +43,7 @@ async def handoff_workspace_snapshot(
         archive = Path(temp) / "workspace.tar"
         await _export_workspace_archive(agent_driver, workdir, archive)
         await asyncio.to_thread(_strip_private_entries, archive, policy)
-        await asyncio.to_thread(_validate_workspace_archive, archive, policy)
+        await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=workdir)
         await _import_workspace_archive(verifier_driver, archive, workdir, policy=policy)
 
 
@@ -178,9 +179,9 @@ async def _prepare_workspace_import(
     archive, destination and inventory before removing anything. Native sandboxes
     use their declared identity; only the legacy driver boundary requests root.
     """
-    await asyncio.to_thread(_validate_workspace_archive, archive, policy)
     if dst.anchor != "/" or len(dst.parts) < 2 or ".." in dst.parts:
         raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
+    await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=dst)
     checks = [f"test ! -L {shlex.quote(str(path))}" for path in (*reversed(dst.parents), dst)]
     quoted = shlex.quote(str(dst))
     checks.append(f"(test ! -e {quoted} || test -d {quoted})")
@@ -220,13 +221,20 @@ async def _remove_workspace_entries(driver: Driver, command: str, *, user: str |
 def _validate_workspace_archive(
     archive: Path,
     policy: WorkspaceStagingPolicy,
+    *,
+    root: PurePosixPath | None = None,
 ) -> None:
     """Fail closed unless every archive entry is safe to overlay.
 
     Validation rejects ambiguous duplicate entries, traversal/absolute paths,
     every private path or link target, special files, hardlinks without a
     regular in-archive target, and entries nested below an archived symlink.
+    Absolute symlink targets require a declared root and must stay inside it.
+    Targets are checked without changing the archived strings.
     """
+
+    if root is not None and (root.anchor != "/" or len(root.parts) < 2 or ".." in root.parts):
+        raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
 
     try:
         with tarfile.open(archive, mode="r:*") as tf:
@@ -235,7 +243,7 @@ def _validate_workspace_archive(
         raise WorkspaceSnapshotError("agent workspace archive is unreadable") from exc
 
     paths: dict[PurePosixPath, tarfile.TarInfo] = {}
-    symlink_targets: dict[PurePosixPath, PurePosixPath] = {}
+    symlink_targets: dict[PurePosixPath, str] = {}
     hardlink_targets: dict[PurePosixPath, PurePosixPath] = {}
     for member in members:
         path = _member_path(member.name)
@@ -253,12 +261,7 @@ def _validate_workspace_archive(
             )
         paths[path] = member
         if member.issym():
-            target = _resolve_relative_target(path.parent, member.linkname)
-            if _is_private(policy, target):
-                raise WorkspaceSnapshotError(
-                    f"workspace symlink {path} targets private path: {target}",
-                )
-            symlink_targets[path] = target
+            symlink_targets[path] = member.linkname
         elif member.islnk():
             target = _hardlink_target(member.linkname)
             if _is_private(policy, target):
@@ -276,7 +279,7 @@ def _validate_workspace_archive(
                 )
 
     for path in symlink_targets:
-        _resolve_symlink_chain(path, symlink_targets, policy)
+        _resolve_symlink_chain(path, symlink_targets, policy, root=root)
 
     for path, target in hardlink_targets.items():
         seen = {path}
@@ -332,23 +335,19 @@ def _member_path(raw: str) -> PurePosixPath:
     return PurePosixPath(*parts)
 
 
-def _resolve_relative_target(base: PurePosixPath, raw: str) -> PurePosixPath:
+def _symlink_components(
+    raw: str, root: PurePosixPath | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """Map absolute targets into the root without collapsing parent components."""
     target = PurePosixPath(raw)
-    if not raw or target.is_absolute():
+    if not raw or (target.is_absolute() and (root is None or target.anchor != "/")):
         raise WorkspaceSnapshotError(f"workspace symlink has unsafe target: {raw}")
-    stack = list(base.parts)
-    for part in target.parts:
-        if part in {"", "."}:
-            continue
-        if part == "..":
-            if not stack:
-                raise WorkspaceSnapshotError(
-                    f"workspace symlink target escapes workdir: {raw}",
-                )
-            stack.pop()
-        else:
-            stack.append(part)
-    return PurePosixPath(*stack)
+    if target.is_absolute():
+        assert root is not None
+        if not target.is_relative_to(root):
+            raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {raw}")
+        return True, target.relative_to(root).parts
+    return False, target.parts
 
 
 def _hardlink_target(raw: str) -> PurePosixPath:
@@ -360,27 +359,46 @@ def _hardlink_target(raw: str) -> PurePosixPath:
 
 def _resolve_symlink_chain(
     start: PurePosixPath,
-    links: dict[PurePosixPath, PurePosixPath],
+    links: dict[PurePosixPath, str],
     policy: WorkspaceStagingPolicy,
+    *,
+    root: PurePosixPath | None,
 ) -> PurePosixPath:
-    current = links[start]
-    seen = {start}
-    while True:
-        prefix = next(
-            (parent for parent in (current, *current.parents) if parent in links),
-            None,
-        )
-        if prefix is None:
-            return current
-        if prefix in seen:
-            raise WorkspaceSnapshotError(f"workspace symlink cycle includes {start}")
-        seen.add(prefix)
-        suffix = current.relative_to(prefix)
-        current = links[prefix] / suffix
+    """Follow components in filesystem order, including links preceding ``..``.
+
+    Bound expansion at Linux's 40-link limit, allowing a noncyclic link to be
+    visited again after a parent component. Check each intermediate path so
+    entering private state or leaving the root cannot be hidden by ``..``.
+    """
+    absolute, parts = _symlink_components(links[start], root)
+    stack = [] if absolute else list(start.parent.parts)
+    pending = deque(parts)
+    expansions = 1
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            if not stack:
+                raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {start}")
+            stack.pop()
+            continue
+        current = PurePosixPath(*stack, part)
         if _is_private(policy, current):
             raise WorkspaceSnapshotError(
-                f"workspace symlink {start} resolves to private path: {current}",
+                f"workspace symlink {start} targets private path: {current}",
             )
+        if current in links:
+            expansions += 1
+            if expansions > 40:
+                raise WorkspaceSnapshotError(
+                    f"workspace symlink cycle or chain exceeds 40 links: {start}",
+                )
+            absolute, parts = _symlink_components(links[current], root)
+            if absolute:
+                stack.clear()
+            pending.extendleft(reversed(parts))
+        else:
+            stack.append(part)
+    return PurePosixPath(*stack)
 
 
 def _is_private(policy: WorkspaceStagingPolicy, path: PurePosixPath) -> bool:

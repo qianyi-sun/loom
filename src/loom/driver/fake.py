@@ -227,7 +227,7 @@ class FakeDriver:
                 _workspace_deletions,
             )
 
-            _validate_workspace_archive(src, policy)
+            _validate_workspace_archive(src, policy, root=dst)
             entries: set[PurePosixPath] = set()
             for path in self.filesystem:
                 if path.is_relative_to(dst):
