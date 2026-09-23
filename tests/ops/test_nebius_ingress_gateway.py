@@ -382,6 +382,74 @@ def test_tls_switch_is_one_exact_identity_conditioned_patch(inputs, controller, 
     assert deployment == before
 
 
+@pytest.mark.parametrize("failure", [None, "before", "after"])
+def test_journaled_controller_switch_recovers_without_repeating_unknown_write(inputs, controller, failure):
+    arguments, deployment, _replicas, _pods, _probes = controller
+    config, binding, api, _roots, _selected, root = inputs
+    deployment["metadata"].update(name="loom-shared-ingress", resourceVersion="before")
+    chain, key, roots = material()
+    publish(root, chain, key, roots)
+    receipt = module().deliver_tls(config, binding=binding, api=api, roots=roots, now=NOW)
+    calls = []
+
+    def switch(observed, name):
+        journal = json.loads((root / "controller-switches" / (binding.installation_id + ".json")).read_text())
+        assert journal["status"] == "switch_intent"
+        assert journal["before_resource_version"] == "before"
+        calls.append(name)
+        if failure == "before":
+            raise TimeoutError("private write details")
+        deployment["spec"]["template"]["spec"]["volumes"][0]["secret"]["secretName"] = name
+        deployment["metadata"].update(resourceVersion="after", generation=4)
+        if failure == "after":
+            raise TimeoutError("private write details")
+
+    api.switch_controller_tls = switch
+    kwargs = {"binding": binding, "api": api, "deployment_uid": arguments["deployment_uid"],
+              "tls_receipt": receipt, "roots": roots, "now": NOW}
+    for _ in range(2):
+        if failure == "before":
+            with pytest.raises(module().IngressError) as error:
+                module().switch_controller_certificate(config, **kwargs)
+            assert "private write" not in str(error.value)
+        else:
+            result = module().switch_controller_certificate(config, **kwargs)
+            assert result["status"] == "controller_switch_observed"
+            assert result["secret_uid"] == receipt["secret_uid"]
+            assert result["generation"] == 4
+    assert calls == [receipt["secret_name"]]
+    assert len(api.secrets) == 2  # Retain the prior generation.
+    deployment["spec"]["replicas"] = 2
+    with pytest.raises(module().IngressError):
+        module().switch_controller_certificate(config, **kwargs)
+    assert calls == [receipt["secret_name"]]
+
+
+@pytest.mark.parametrize("change", ["uid", "owner", "secret", "receipt", "expired"])
+def test_journaled_controller_switch_refuses_unbound_inputs_before_write(inputs, controller, change):
+    arguments, deployment, _replicas, _pods, _probes = controller
+    config, binding, api, _roots, _selected, root = inputs
+    deployment["metadata"].update(name="loom-shared-ingress", resourceVersion="before")
+    chain, key, roots = material()
+    publish(root, chain, key, roots)
+    receipt = module().deliver_tls(config, binding=binding, api=api, roots=roots, now=NOW)
+    if change == "uid":
+        deployment["metadata"]["uid"] = str(uuid4())
+    elif change == "owner":
+        deployment["metadata"]["labels"] = {}
+    elif change == "secret":
+        api.secrets[receipt["secret_name"]]["metadata"]["uid"] = str(uuid4())
+    elif change == "receipt":
+        receipt["fingerprint_sha256"] = "0" * 64
+    calls = []
+    api.switch_controller_tls = lambda *args: calls.append(args)
+    with pytest.raises(module().IngressError):
+        module().switch_controller_certificate(config, binding=binding, api=api,
+            deployment_uid=arguments["deployment_uid"], tls_receipt=receipt, roots=roots,
+            now=NOW + timedelta(days=80) if change == "expired" else NOW)
+    assert not calls
+
+
 @pytest.mark.parametrize("wrong_certificate", [False, True])
 def test_real_tls_probe_uses_verified_hostname_and_stops_forwarder(inputs, tmp_path, monkeypatch, wrong_certificate):
     import hashlib
