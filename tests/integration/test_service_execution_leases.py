@@ -694,6 +694,37 @@ async def _reserve(
     )
 
 
+async def test_default_catalog_upgrade_preserves_existing_class_identity(postgres_url: str) -> None:
+    """A deployment must not add capabilities under the already persisted V1 ID."""
+    from loom.execution_contract import ExecutionClassV1
+
+    legacy = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
+    legacy.pop("supports_task_web_egress", None)
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session, session.begin():
+            await persist_execution_catalog(
+                session, execution_class=ExecutionClassV1.model_validate(legacy), targets=(),
+            )
+            stored = await session.get(ServiceExecutionClass, "linux-amd64-cpu-pod-v1")
+            assert stored is not None
+            original_digest = stored.spec_sha256
+            await persist_execution_catalog(
+                session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1, targets=(),
+            )
+            assert stored.spec_json == legacy
+            assert stored.spec_sha256 == original_digest
+            # Different capabilities still require a different immutable ID.
+            with pytest.raises(ServiceExecutionConflict, match="different content"):
+                await persist_execution_catalog(
+                    session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(
+                        update={"supports_task_web_egress": True}), targets=(),
+                )
+    finally:
+        await engine.dispose()
+
+
 async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(
     postgres_url: str,
 ) -> None:
