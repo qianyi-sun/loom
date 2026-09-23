@@ -196,6 +196,11 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
         current = api.get_deployment(binding.namespace, "loom-shared-ingress")
         if not current or current["metadata"]["uid"] != deployment_uid or current["metadata"]["generation"] != generation:
             raise IngressError("controller changed during TLS qualification")
+        final_pods = api.list_controller_pods(binding.namespace)
+        if sorted((p["metadata"]["uid"], p["metadata"]["resourceVersion"]) for p in final_pods) != sorted(
+            (p["metadata"]["uid"], p["metadata"]["resourceVersion"]) for p in pods
+        ):
+            raise IngressError("controller membership changed during TLS qualification")
         api.verify_identity(binding)
         return {"status": "controller_qualified", "deployment_uid": deployment_uid, "generation": generation,
                 "pod_uids": [pod["metadata"]["uid"] for pod in pods],
