@@ -6,11 +6,17 @@ import { expect, test } from "./fixtures/guardedTest";
 async function expectNoSeriousAxeViolations(
   page: Page,
 ): Promise<void> {
+  // Read final composited colors after the dialog entrance animation.
+  await expect.poll(() => page.getByRole("dialog").evaluate((element) => {
+    let opacity = 1;
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      opacity *= Number(getComputedStyle(node).opacity);
+    }
+    return opacity;
+  })).toBe(1);
   const results = await new AxeBuilder({ page })
-    // The modal backdrop intentionally changes composited colors; contrast is
-    // owned by the route-level #777 checks, while this check covers dialog
-    // semantics and interaction-specific serious/critical rules.
-    .disableRules(["color-contrast"])
+    // Check the active dialog, not the inert page darkened by its backdrop.
+    .include("[role=dialog]")
     .analyze();
   const serious = results.violations.filter(
     (violation) =>

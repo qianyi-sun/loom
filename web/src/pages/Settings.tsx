@@ -76,9 +76,9 @@ function TeamMembers({
             <tr key={member.user_id}>
               <td className="px-4 py-3">
                 <div className="font-medium text-slate-900">
-                  {member.display_name ?? member.email}
+                  {member.display_name ?? member.username ?? member.email}
                 </div>
-                <div className="text-xs text-slate-500">{member.email}</div>
+                {member.email ? <div className="text-xs text-slate-500">{member.email}</div> : null}
               </td>
               <td className="px-4 py-3 text-slate-700">{roleLabel(member.role)}</td>
               <td className="px-4 py-3 text-slate-600">

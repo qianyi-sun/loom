@@ -83,6 +83,28 @@ describe("Settings", () => {
     vi.restoreAllMocks();
   });
 
+  it("names username-only members and exposes page sections without skipped headings", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) return jsonResponse(ownerMe);
+      if (url.endsWith("/api/v1/teams/team-a")) return jsonResponse({
+        ...teamDetail,
+        user_members: [{
+          user_id: "username-only", username: "researcher", email: null,
+          display_name: null, role: "member", joined_at: "2026-09-23T00:00:00Z",
+        }],
+      });
+      if (url.endsWith("/api/v1/tokens")) return jsonResponse({ items: [] });
+      return jsonResponse({ detail: `unhandled ${url}` }, 404);
+    });
+    renderWithProviders(<Settings />, { route: "/settings" });
+    const members = await screen.findByRole("table", { name: "Team members" });
+    expect(within(members).getByRole("cell", { name: "researcher" })).toBeInTheDocument();
+    expect(screen.getAllByRole("heading").map((heading) => heading.tagName)).toEqual([
+      "H1", "H2", "H2", "H2", "H2",
+    ]);
+  });
+
   it("redirects signed-out visitors to /auth/login", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);

@@ -1073,7 +1073,8 @@ class TeamMember(TypedDict):
 @with_config(ConfigDict(extra="allow"))
 class TeamUserMember(TypedDict):
     user_id: str
-    email: str
+    username: str
+    email: str | None
     display_name: str | None
     role: str
     joined_at: str

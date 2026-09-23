@@ -194,6 +194,7 @@ async def test_get_own_team_with_quota_and_members(
         {
             "user_id": body["user_members"][0]["user_id"],
             "email": "member@example.com",
+            "username": "member",
             "display_name": None,
             "role": "member",
             "joined_at": body["user_members"][0]["joined_at"],
@@ -201,11 +202,39 @@ async def test_get_own_team_with_quota_and_members(
         {
             "user_id": body["user_members"][1]["user_id"],
             "email": "owner@example.com",
+            "username": "owner",
             "display_name": "Owner Example",
             "role": "owner",
             "joined_at": body["user_members"][1]["joined_at"],
         },
     ]
+
+
+async def test_team_accepts_username_only_members(
+    teams_setup: tuple[FastAPI, str, str, UUID, UUID],
+    postgres_url: str,
+) -> None:
+    """Username-based accounts legitimately have no email or display name."""
+    from sqlalchemy import update
+
+    app, raw, team_id, _, _ = teams_setup
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(
+            update(User).where(User.username == "member").values(email=None),
+        )
+    engine.dispose()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as client:
+        response = await client.get(
+            f"/api/v1/teams/{team_id}",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert response.status_code == 200, response.text
+    member = next(m for m in response.json()["user_members"] if m["email"] is None)
+    assert member["display_name"] is None
+    assert member["username"] == "member"
 
 
 async def test_team_b_has_no_quota(

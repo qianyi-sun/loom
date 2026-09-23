@@ -15,6 +15,7 @@ export interface DocsCalloutProps {
   children: ReactNode;
   tone?: DocsCalloutTone;
   className?: string;
+  headingLevel?: "h2" | "h3" | "h4";
 }
 
 export default function DocsCallout({
@@ -22,6 +23,7 @@ export default function DocsCallout({
   children,
   tone = "neutral",
   className,
+  headingLevel: Heading = "h2",
 }: DocsCalloutProps): JSX.Element {
   return (
     <section
@@ -31,7 +33,7 @@ export default function DocsCallout({
         className,
       )}
     >
-      <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
+      <Heading className="text-sm font-semibold text-slate-900">{title}</Heading>
       <div className="space-y-2 text-sm leading-relaxed">{children}</div>
     </section>
   );
