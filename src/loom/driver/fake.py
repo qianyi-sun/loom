@@ -19,7 +19,7 @@ import tarfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from loom.driver.base import (
     MAX_EXEC_STREAM_BYTES,
@@ -36,6 +36,9 @@ from loom.models.exec import ExecResult
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.networking import NetworkPolicy, Public
 from loom.models.types import OS
+
+if TYPE_CHECKING:
+    from loom.trial.workspace import WorkspaceStagingPolicy
 
 ExecHandler = Callable[
     [str, str | int | None, PurePosixPath | None, Mapping[str, str] | None],
@@ -212,10 +215,28 @@ class FakeDriver:
         self,
         src: Path,
         dst: PurePosixPath,
+        *,
+        policy: WorkspaceStagingPolicy | None = None,
     ) -> None:
         """Restore regular files from a pre-validated test archive."""
 
         self._require_running()
+        if policy is not None:
+            from loom.trial.workspace_snapshot import (
+                _validate_workspace_archive,
+                _workspace_deletions,
+            )
+
+            _validate_workspace_archive(src, policy)
+            entries: set[PurePosixPath] = set()
+            for path in self.filesystem:
+                if path.is_relative_to(dst):
+                    relative = path.relative_to(dst)
+                    entries.update((relative, *relative.parents))
+            deletions = _workspace_deletions(src, entries, policy)
+            for path in list(self.filesystem):
+                if any(path.is_relative_to(dst / root) for root in deletions):
+                    del self.filesystem[path]
         hardlinks: list[tuple[PurePosixPath, PurePosixPath]] = []
         with tarfile.open(src, mode="r:*") as tf:
             for member in tf.getmembers():

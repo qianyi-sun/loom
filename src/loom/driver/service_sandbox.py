@@ -16,7 +16,7 @@ import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
@@ -32,6 +32,9 @@ from loom.models.exec import ExecResult
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.networking import NetworkPolicy
 from loom.models.types import OS
+
+if TYPE_CHECKING:
+    from loom.trial.workspace import WorkspaceStagingPolicy
 
 _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
                    "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
@@ -283,9 +286,15 @@ class ServiceSandboxDriver:
         finally:
             await self.exec(f"rm -f {archive}")
 
-    async def import_workspace_archive(self, src: Path, dst: PurePosixPath) -> None:
+    async def import_workspace_archive(
+        self, src: Path, dst: PurePosixPath, *, policy: WorkspaceStagingPolicy | None = None,
+    ) -> None:
         # workspace_snapshot validates/strips the archive in the trusted agent
         # before invoking this hook. The sandbox never chooses verifier inputs.
+        if policy is not None:
+            from loom.trial.workspace_snapshot import _prepare_workspace_import
+
+            await _prepare_workspace_import(self, src, dst, policy)
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         destination, archive = shlex.quote(str(dst)), shlex.quote(str(remote))
         try:

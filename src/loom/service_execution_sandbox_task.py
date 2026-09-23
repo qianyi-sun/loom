@@ -316,7 +316,7 @@ async def _run_verifier(
         archive = workspace / ".loom/workspace.tar"
         # The archive was validated by the agent phase before durable capture;
         # it stays in the private controller workspace between phases.
-        await _import_workspace_archive(driver, archive, task.environment.workdir)
+        await _import_workspace_archive(driver, archive, task.environment.workdir, policy=_POLICY)
         if task.environment.mutable_paths:
             await import_mutable_paths(
                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
