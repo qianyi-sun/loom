@@ -8,11 +8,13 @@ from pathlib import Path
 
 import pytest
 from scripts.ops import prepare_nebius_runtime_profile as prepare
+from tests.unit.test_nebius_platform_render import ROOT, platform_inputs  # noqa: F401
 
 from loom.execution_image_admission import (
     ImageAdmissionKeyring,
     verify_execution_image_admission,
 )
+from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 
 SHA = "7" * 40
@@ -230,7 +232,9 @@ def test_prepare_optional_worker_preserves_admitted_agent_image(tmp_path: Path) 
 
 
 @pytest.mark.parametrize('enabled', [False, True])
-def test_prepare_preserves_explicit_runtime_readiness(tmp_path: Path, enabled: bool) -> None:
+def test_prepare_readiness_round_trips_through_renderer(
+    tmp_path: Path, enabled: bool, request: pytest.FixtureRequest,
+) -> None:
     args = _inputs(tmp_path)
     capabilities = ('supports_task_web_egress', 'service_lifecycle_ready', 'supports_task_identity')
     for name in capabilities:
@@ -242,3 +246,23 @@ def test_prepare_preserves_explicit_runtime_readiness(tmp_path: Path, enabled: b
             assert profile[name] is True
         else:
             assert name not in profile
+    config, candidate, _ = request.getfixturevalue("platform_inputs")
+    candidate["candidate_sha"] = SHA
+    candidate["images"]["service"]["image_ref"] = profile["task_image_ref"]
+    candidate["images"]["execution_runtime"]["image_ref"] = profile["runtime_image_ref"]
+    if enabled:
+        config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
+        config["task_identity_policy"] = {
+            "mode": "private-root-v1", "target_id": config["target_id"],
+            "execution_namespace": config["execution_namespace"],
+        }
+    files = build_platform(config, candidate, profile, json.loads(args.output_keyring.read_text()), repo_root=ROOT)
+    data = files["10-config-network.yaml"][0]["data"]
+    published = ServiceExecutionRuntimeProfileV1.model_validate_json(data["profile.json"])
+    expected = "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+    assert published.execution_class_id == expected
+    catalog = json.loads(data["catalog.json"])
+    assert catalog["execution_class"]["class_id"] == expected
+    assert catalog["execution_class"].get("supports_task_web_egress", False) is enabled
+    assert catalog["topology"]["execution_class_id"] == expected
+    assert all(row["execution_class_id"] == expected for row in catalog["topology"]["targets"])

@@ -49,8 +49,10 @@ from loom.db.schema import (
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
+    NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
     CapacityEvidenceKind,
     ExecutionAdapterKind,
+    ExecutionClassV1,
     ExecutionRouteCandidateV1,
     ExecutionRoutingDecisionV1,
     ExecutionRoutingReason,
@@ -240,7 +242,10 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
             )
             await session.execute(
                 delete(ServiceExecutionClass).where(
-                    ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id
+                    ServiceExecutionClass.id.in_((
+                        NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+                        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1.class_id,
+                    ))
                 )
             )
             await session.execute(
@@ -395,6 +400,7 @@ def _requirements(
 
 def _runtime_contract(
     *,
+    execution_class_id: str = NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
     execution_role: str = "attempt",
     verifier_execution: str = "in_attempt",
     now: datetime | None = None,
@@ -411,7 +417,7 @@ def _runtime_contract(
         task_revision_sha256="sha256:" + "2" * 64,
         command_identity_sha256="sha256:" + "3" * 64,
         execution_role=execution_role,
-        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        execution_class_id=execution_class_id,
         composition="init_payload",
         task_image_ref=task_image_ref,
         runtime_image_ref=runtime_image_ref,
@@ -533,12 +539,15 @@ async def _seed_ready_trial(
     *,
     now: datetime,
     task_id: str | None = None,
+    execution_class: ExecutionClassV1 = NEBIUS_CPU_EXECUTION_CLASS_V1,
 ) -> tuple[UUID, ExecutionTargetV1]:
     suffix = uuid4().hex[:12]
     team_id = uuid4()
     trial_id = uuid4()
     task_id = task_id or f"service-execution/{suffix}"
-    target = _target(suffix)
+    target = _target(suffix).model_copy(
+        update={"execution_class_id": execution_class.class_id},
+    )
     session.add_all(
         (
             Team(id=team_id, name=f"service-execution-{suffix}"),
@@ -560,7 +569,7 @@ async def _seed_ready_trial(
     )
     await persist_execution_catalog(
         session,
-        execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1,
+        execution_class=execution_class,
         targets=(target,),
     )
     await set_execution_target_health(
@@ -683,15 +692,48 @@ async def _reserve(
         session,
         request_id=request_id or uuid4(),
         trial_id=trial_id,
-        execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+        execution_class_id=target.execution_class_id,
         target_id=target.target_id,
         requirements=requirements or _requirements(),
-        runtime_contract=runtime_contract or _runtime_contract(now=now),
+        runtime_contract=runtime_contract or _runtime_contract(
+            now=now, execution_class_id=target.execution_class_id,
+        ),
         image_admission_keyring=IMAGE_ADMISSION_KEYRING,
         parent_lease_id=parent_lease_id,
         deadline_at=now + timedelta(seconds=deadline_seconds),
         now=now,
     )
+
+
+async def test_default_catalog_upgrade_preserves_existing_class_identity(postgres_url: str) -> None:
+    """A deployment must not add capabilities under the already persisted V1 ID."""
+    from loom.execution_contract import ExecutionClassV1
+
+    legacy = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
+    legacy.pop("supports_task_web_egress", None)
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session, session.begin():
+            await persist_execution_catalog(
+                session, execution_class=ExecutionClassV1.model_validate(legacy), targets=(),
+            )
+            stored = await session.get(ServiceExecutionClass, "linux-amd64-cpu-pod-v1")
+            assert stored is not None
+            original_digest = stored.spec_sha256
+            await persist_execution_catalog(
+                session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1, targets=(),
+            )
+            assert stored.spec_json == legacy
+            assert stored.spec_sha256 == original_digest
+            # Different capabilities still require a different immutable ID.
+            with pytest.raises(ServiceExecutionConflict, match="different content"):
+                await persist_execution_catalog(
+                    session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(
+                        update={"supports_task_web_egress": True}), targets=(),
+                )
+    finally:
+        await engine.dispose()
 
 
 async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(

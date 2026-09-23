@@ -651,7 +651,6 @@ NEBIUS_CPU_EXECUTION_CLASS_V1 = ExecutionClassV1(
             NetworkAccess.APPROVED_ALLOWLIST,
         }
     ),
-    supports_task_web_egress=True,
     maximum_sidecars=8,
     supports_separate_verifier=True,
     supports_custom_dns=False,
@@ -665,3 +664,18 @@ NEBIUS_CPU_EXECUTION_CLASS_V1 = ExecutionClassV1(
     permits_nested_containers=False,
     permits_host_devices=False,
 )
+
+# Execution classes and target bindings are immutable catalog identities.
+# A newly qualified capability must never change the already installed CPU V1.
+NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 = NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(update={
+    "class_id": "linux-amd64-cpu-web-pod-v1",
+    "supports_task_web_egress": True,
+})
+
+
+def nebius_cpu_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
+    """Select an immutable CPU catalog identity from explicit runtime readiness."""
+    return (
+        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
+        else NEBIUS_CPU_EXECUTION_CLASS_V1
+    )

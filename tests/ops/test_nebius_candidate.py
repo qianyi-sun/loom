@@ -13,6 +13,10 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from scripts.ops import nebius_candidate as candidate
+from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+
+from loom.nebius_platform_render import build_platform
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 
 
 def test_tooling_step_ignores_unrelated_apt_sources() -> None:
@@ -129,7 +133,9 @@ def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path, enabled: bool) -> None:
+def test_cli_create_plain_candidate_and_check_shape(
+    tmp_path: Path, enabled: bool, request: pytest.FixtureRequest,
+) -> None:
     document, private, keyring = inputs(tmp_path)
     record, trust = tmp_path / "build.json", tmp_path / "trust.json"
     record.write_text(json.dumps(document))
@@ -159,6 +165,9 @@ def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path, enabled: boo
     )
     assert create.returncode == 0, create.stderr
     profile = json.loads((output / "runtime-profile.json").read_text())
+    assert profile["execution_class_id"] == (
+        "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+    )
     for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
         if enabled:
             assert profile[capability] is True
@@ -176,6 +185,23 @@ def test_cli_create_plain_candidate_and_check_shape(tmp_path: Path, enabled: boo
     assert "source_tree" not in manifest
     assert all(set(row) == {"image_ref"} for row in manifest["images"].values())
     assert "tb90_task" not in manifest["images"]
+    config, _, _ = request.getfixturevalue("platform_inputs")
+    if enabled:
+        config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
+        config["task_identity_policy"] = {
+            "mode": "private-root-v1", "target_id": config["target_id"],
+            "execution_namespace": config["execution_namespace"],
+        }
+    files = build_platform(config, manifest, profile, json.loads(keyring), repo_root=candidate.ROOT)
+    data = files["10-config-network.yaml"][0]["data"]
+    published = ServiceExecutionRuntimeProfileV1.model_validate_json(data["profile.json"])
+    expected = "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+    assert published.execution_class_id == expected
+    catalog = json.loads(data["catalog.json"])
+    assert catalog["execution_class"]["class_id"] == expected
+    assert catalog["execution_class"].get("supports_task_web_egress", False) is enabled
+    assert catalog["topology"]["execution_class_id"] == expected
+    assert all(row["execution_class_id"] == expected for row in catalog["topology"]["targets"])
     manifest["images"]["web"]["image_ref"] = "image:mutable"
     (output / "candidate.json").write_text(json.dumps(manifest))
     result = subprocess.run(verify, capture_output=True, text=True, env=environment)
@@ -430,6 +456,9 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
     else:
         manifest = json.loads((output / "candidate.json").read_text())
         profile = json.loads((output / "runtime-profile.json").read_text())
+        assert profile["execution_class_id"] == (
+            "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
+        )
         assert "worker" not in manifest["images"]
         assert "tb90_task" not in manifest["images"]
         assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
