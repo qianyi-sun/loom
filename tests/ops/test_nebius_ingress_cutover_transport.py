@@ -7,7 +7,6 @@ import json
 from uuid import uuid4
 
 import pytest
-
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from tests.ops.test_nebius_ingress_cutover import API
 

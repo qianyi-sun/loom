@@ -41,15 +41,81 @@ class CutoverAPI(Protocol):
 
 
 class KubectlCutoverAPI(KubectlControllerAPI):
+    """Fixed transport only; the orchestrator supplies readiness/public probes."""
+
     def __init__(self, kubeconfig: Path, *, binding: TLSBinding, executable: Path, candidate: str):
         super().__init__(kubeconfig, binding=binding, executable=executable)
+        if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+            raise CutoverError("invalid cutover candidate")
         self.candidate = candidate
 
     def patch(self, before: dict[str, Any], after: dict[str, Any]) -> None:
-        raise NotImplementedError
+        try:
+            kind = before["kind"]
+            if kind not in {"Service", "ConfigMap"}:
+                raise CutoverError("resource outside cutover authority")
+            name = "loom-web" if kind == "Service" else "loom-platform-config"
+            _identity(before, kind=kind, name=name, namespace=self.binding.namespace)
+            desired = copy.deepcopy(before)
+            owner = after["metadata"]["annotations"][MARKER]
+            if str(UUID(owner)) != owner or UUID(owner).int == 0:
+                raise CutoverError("invalid cutover operation identity")
+            desired["metadata"].setdefault("annotations", {})[MARKER] = owner
+            if kind == "Service":
+                if before["spec"]["type"] != "LoadBalancer" or before["spec"]["selector"] != {"app": "loom-web"}:
+                    raise CutoverError("public selector is not standalone")
+                desired["spec"]["selector"] = {"app": "loom-shared-ingress"}
+                field, value = "/spec/selector", desired["spec"]["selector"]
+            else:
+                if json.loads(before["data"]["profile.json"])["candidate_sha"] != self.candidate:
+                    raise CutoverError("configuration candidate differs")
+                environment = json.loads(before["data"]["environment.json"])
+                if environment.get("shared_ingress_enabled", False) is not False:
+                    raise CutoverError("public configuration is not standalone")
+                wanted = {**environment, "shared_ingress_enabled": True}
+                value = after["data"]["environment.json"]
+                if json.loads(value) != wanted:
+                    raise CutoverError("cutover may change only the ingress mode")
+                desired["data"]["environment.json"] = value
+                field = "/data/environment.json"
+            if after != desired:
+                raise CutoverError("cutover contains an unauthorized field change")
+            meta = before["metadata"]
+            patch = [
+                {"op": "test", "path": "/metadata/uid", "value": meta["uid"]},
+                {"op": "test", "path": "/metadata/resourceVersion", "value": meta["resourceVersion"]},
+                {"op": "test", "path": "/spec" if kind == "Service" else "/data",
+                 "value": before["spec" if kind == "Service" else "data"]},
+                {"op": "replace", "path": field, "value": value},
+                {"op": "add", "path": "/metadata/annotations", "value": desired["metadata"]["annotations"]},
+            ]
+            self.verify_identity(self.binding)
+            self._run(["patch", kind, name, "-n", self.binding.namespace,
+                       "--type=json", "--patch-file=/dev/stdin", "-o", "name"], payload=json.dumps(patch).encode())
+        except CutoverError:
+            raise
+        except Exception:
+            raise CutoverError("cutover patch unavailable; reconcile before any further write") from None
 
     def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]:
-        raise NotImplementedError
+        allowed = {"acquire": {"acquired", "skipped_busy", "skipped_locked"},
+                   "observe": {"open", "held", "skipped_locked"}, "release": {"released"}}
+        try:
+            if (action not in allowed or candidate != self.candidate
+                    or str(UUID(owner)) != owner or UUID(owner).int == 0):
+                raise CutoverError("guard command outside cutover authority")
+            self.verify_identity(self.binding)
+            result = json.loads(self._run([
+                "exec", "-n", self.binding.namespace, "deployment/loom-control-plane", "--",
+                "python", "-m", "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
+            ]))
+            if result.get("status") not in allowed[action]:
+                raise CutoverError("guard operation did not produce an authorized receipt")
+            return {"status": result["status"]}
+        except CutoverError:
+            raise
+        except Exception:
+            raise CutoverError("guard outcome unavailable; preserve operation journal") from None
 
 
 def _stable(value: dict[str, Any]) -> dict[str, Any]:
