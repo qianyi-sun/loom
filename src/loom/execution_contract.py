@@ -671,3 +671,11 @@ NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 = NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(upd
     "class_id": "linux-amd64-cpu-web-pod-v1",
     "supports_task_web_egress": True,
 })
+
+
+def nebius_cpu_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
+    """Select an immutable CPU catalog identity from explicit runtime readiness."""
+    return (
+        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
+        else NEBIUS_CPU_EXECUTION_CLASS_V1
+    )

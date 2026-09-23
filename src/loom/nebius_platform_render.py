@@ -20,7 +20,7 @@ import yaml  # type: ignore[import-untyped]
 
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
-    NEBIUS_CPU_WEB_EXECUTION_CLASS_V1,
+    nebius_cpu_execution_class,
 )
 from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
@@ -1360,9 +1360,8 @@ def _build_platform(
         raise NebiusPlatformError(
             "task egress configuration and runtime profile readiness must agree"
         )
-    execution_class = (
-        NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 if profile.get("supports_task_web_egress", False)
-        else NEBIUS_CPU_EXECUTION_CLASS_V1
+    execution_class = nebius_cpu_execution_class(
+        supports_task_web_egress=profile.get("supports_task_web_egress", False),
     )
     # Management-only rendering also reuses these templates with a minimal
     # non-execution profile. Keep its existing CPU default; egress is explicit.

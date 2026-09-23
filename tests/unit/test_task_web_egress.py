@@ -31,7 +31,10 @@ def test_egress_policy_bound_to_plan_and_runtime_capability() -> None:
     kwargs["task"] = task
     with pytest.raises(ValueError, match="task_egress_runtime_unavailable"):
         compile_service_execution_plan(**kwargs)
-    kwargs["profile"] = profile.model_copy(update={"supports_task_web_egress": True})
+    kwargs["profile"] = profile.model_copy(update={
+        "supports_task_web_egress": True,
+        "execution_class_id": "linux-amd64-cpu-web-pod-v1",
+    })
     plan = compile_service_execution_plan(**kwargs)
     requirements = workload_requirements_from_task(task)
     assert plan.task_egress == requirements.task_egress == policy()

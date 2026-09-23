@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from scripts.ops import prepare_nebius_runtime_profile as prepare
+from tests.unit.test_nebius_platform_render import ROOT, platform_inputs  # noqa: F401
 
 from loom.execution_image_admission import (
     ImageAdmissionKeyring,
@@ -15,7 +16,6 @@ from loom.execution_image_admission import (
 )
 from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
-from tests.unit.test_nebius_platform_render import ROOT, platform_inputs  # noqa: F401
 
 SHA = "7" * 40
 REGISTRY = "cr.eu-north1.nebius.cloud/e00example"
@@ -233,7 +233,7 @@ def test_prepare_optional_worker_preserves_admitted_agent_image(tmp_path: Path) 
 
 @pytest.mark.parametrize('enabled', [False, True])
 def test_prepare_readiness_round_trips_through_renderer(
-    tmp_path: Path, enabled: bool, platform_inputs: tuple,
+    tmp_path: Path, enabled: bool, request: pytest.FixtureRequest,
 ) -> None:
     args = _inputs(tmp_path)
     capabilities = ('supports_task_web_egress', 'service_lifecycle_ready', 'supports_task_identity')
@@ -246,7 +246,7 @@ def test_prepare_readiness_round_trips_through_renderer(
             assert profile[name] is True
         else:
             assert name not in profile
-    config, candidate, _ = platform_inputs
+    config, candidate, _ = request.getfixturevalue("platform_inputs")
     candidate["candidate_sha"] = SHA
     candidate["images"]["service"]["image_ref"] = profile["task_image_ref"]
     candidate["images"]["execution_runtime"]["image_ref"] = profile["runtime_image_ref"]
