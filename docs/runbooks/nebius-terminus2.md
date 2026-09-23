@@ -324,6 +324,11 @@ Python version, exact dependency pins and package-index selection. Recognized
 fixed-commit Git dependencies and explicit verifier asset downloads are prepared
 at image build time. Assets are copied into the verifier workspace at the
 original script location; test assertions and reward branches are unchanged.
+If the original script emits a valid reward and then exits nonzero, the wrapper
+records that reward and original exit code before returning the same failure.
+This preserves outcome metadata without turning setup or verifier failures into
+successful execution. Missing or invalid rewards remain errors.
+
 Task-specific setup, pytest arguments, reward logic and the complete private
 `tests/` tree are preserved. Unsupported bootstrap forms, custom verifier
 adapters or image shapes fail with an adaptation error; configuration admission
