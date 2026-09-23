@@ -17,10 +17,89 @@ if __package__ in {None, ""}:
 from scripts.ops.deploy_nebius_platform import (  # noqa: E402
     DeploymentError,
     Kubectl,
+    job_failed,
     verify_cluster_identity,
 )
 
 RESOURCE_KEYS = ("cpu", "memory", "ephemeral-storage", "pods")
+_BOOTSTRAP_ERRORS = {"ConfigurationRequestError", "MigrationError", "ValueError", "KeyError",
+                     "FileNotFoundError", "TimeoutError", "OperationalError", "ProgrammingError",
+                     "IntegrityError", "InsufficientPrivilege", "UndefinedTable", "UniqueViolation"}
+_OPERATIONS = {"/admin/service-execution/catalog": "catalog",
+               "/admin/execution-price-snapshots": "price-snapshot",
+               "/admin/execution-capacity/status": "capacity-status",
+               "/admin/execution-admission/status": "admission-status"}
+_OPERATION_PREFIXES = {"/admin/execution-target-price-bindings/": "target-price-binding",
+                       "/admin/execution-capacity-policies/": "capacity-policy",
+                       "/admin/execution-admission-policies/": "admission-policy"}
+
+
+def _bootstrap_diagnostic(raw: str, phase: str) -> dict[str, Any]:
+    """Project existing bootstrap JSON; never forward free text or payloads."""
+    for line in reversed(raw[-16_384:].splitlines()[-50:]):
+        try:
+            value = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(value, dict) or value.get("phase") != phase or "error_type" not in value:
+            continue
+        error = value["error_type"]
+        result: dict[str, Any] = {"phase": phase, "error_type": error
+                                 if isinstance(error, str) and error in _BOOTSTRAP_ERRORS else "OtherError"}
+        if error == "ConfigurationRequestError":
+            if value.get("method") in ("GET", "POST", "PUT"):
+                result["method"] = value["method"]
+            if type(value.get("http_status")) is int and 400 <= value["http_status"] <= 599:
+                result["http_status"] = value["http_status"]
+            route = value.get("route")
+            if isinstance(route, str):
+                operation = _OPERATIONS.get(route)
+                if operation is None:
+                    operation = next((name for prefix, name in _OPERATION_PREFIXES.items()
+                                      if route.startswith(prefix)), None)
+                if operation is not None:
+                    result["operation"] = operation
+        # Do not export arbitrary reason/SQL/traceback/error-class strings.
+        return result
+    return {"status": "unavailable"}
+
+
+def _failed_bootstrap_jobs(kube: Kubectl, pods: list[dict[str, Any]], namespace: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    candidates = sorted(pods, key=lambda p: p["metadata"].get("creationTimestamp", ""), reverse=True)
+    inspected = 0
+    for pod in candidates:
+        metadata = pod["metadata"]
+        if metadata.get("namespace") != namespace or pod.get("status", {}).get("phase") != "Failed":
+            continue
+        owner = next((owner for owner in metadata.get("ownerReferences", [])
+                      if owner.get("kind") == "Job" and owner.get("controller") is True
+                      and re.fullmatch(r"loom-platform-(?:configure|migrate)-[0-9a-f]{12}", owner.get("name", ""))), None)
+        if owner is None or not isinstance(owner.get("uid"), str) or not owner["uid"]:
+            continue
+        phase = "configure" if owner["name"].startswith("loom-platform-configure-") else "database"
+        container = next((c for c in pod.get("spec", {}).get("containers", [])
+                          if c.get("name") == owner["name"] and c.get("command") == [
+                              "python", "-m", "loom.nebius_platform_bootstrap", phase,
+                          ]), None)
+        if container is None:
+            continue
+        # Bound API/log requests even if every retained candidate is stale.
+        if inspected == 3:
+            break
+        inspected += 1
+        job = kube.get("job", owner["name"], namespace)
+        if job.get("metadata", {}).get("uid") != owner.get("uid") or not job_failed(job):
+            continue
+        try:
+            raw = kube.run("logs", metadata["name"], "-n", namespace, "-c", container["name"],
+                           "--tail=50", "--limit-bytes=16384", timeout=40)
+            diagnostic = _bootstrap_diagnostic(raw, phase)
+        except Exception:
+            diagnostic = {"status": "unavailable"}
+        result.append({"namespace": namespace, "job": owner["name"], "job_uid": owner["uid"],
+                       "pod": metadata["name"], "pod_uid": metadata["uid"], "diagnostic": diagnostic})
+    return result
 
 
 def _fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
@@ -77,6 +156,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "status": "observed", "observed_at": datetime.now(UTC).isoformat(),
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
+        "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
         "public_host": config["public_host"],
         "configured_execution_node_group_id": config["execution_node_group_id"],
         "nodes": [{**_identity(item), "role": item["metadata"].get("labels", {}).get("loom.nebius/node-role"),

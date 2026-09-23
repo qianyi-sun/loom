@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 from scripts.ops import nebius_management_preflight as preflight
-
 from tests.ops.test_nebius_management_preflight import Cluster
 
 
@@ -22,6 +22,7 @@ class FailedBootstrap(Cluster):
             ]}]}, "status": {"phase": "Failed"},
         })
         self.job_uid = "job-uid"
+        self.failed = True
         self.raw = 'private arbitrary output\n' + json.dumps({
             "phase": "configure", "error_type": "ConfigurationRequestError", "method": "POST",
             "route": "/admin/service-execution/catalog", "http_status": 409,
@@ -32,13 +33,15 @@ class FailedBootstrap(Cluster):
         if kind == "job":
             self.calls.append(("get", kind, name, namespace))
             assert name == self.job
-            return {"metadata": {"name": name, "namespace": namespace, "uid": self.job_uid}}
+            return {"metadata": {"name": name, "namespace": namespace, "uid": self.job_uid},
+                    "status": {"conditions": [{"type": "Failed" if self.failed else "Complete", "status": "True"}]}}
         return super().get(kind, name, namespace)
 
     def run(self, *args, **kwargs):
         if args[0] == "logs":
             self.calls.append(args)
-            assert args == ("logs", self.pod, "-n", "loom-nebius-platform", "-c", self.job,
+            assert args[1].startswith(self.job + "-")
+            assert args == ("logs", args[1], "-n", "loom-nebius-platform", "-c", self.job,
                             "--tail=50", "--limit-bytes=16384")
             return self.raw
         return super().run(*args, **kwargs)
@@ -95,3 +98,40 @@ def test_unknown_fields_are_not_a_covert_payload_export():
                               "reason": "private-reason"})
     result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
     assert result["failed_bootstrap_jobs"][0]["diagnostic"] == {"phase": "configure", "error_type": "OtherError"}
+
+
+def test_completed_job_and_missing_owner_uid_are_not_inspected():
+    for mutation in ("completed", "missing_uid"):
+        cluster = FailedBootstrap()
+        if mutation == "completed":
+            cluster.failed = False
+        else:
+            cluster.lists["pods"][-1]["metadata"]["ownerReferences"][0].pop("uid")
+            cluster.job_uid = None
+        result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+        assert result["failed_bootstrap_jobs"] == []
+        assert not any(command[0] == "logs" for command in cluster.calls)
+
+
+def test_retained_failures_have_bounded_log_calls():
+    cluster = FailedBootstrap()
+    for index in range(8):
+        pod = deepcopy(cluster.lists["pods"][-1])
+        pod["metadata"].update(name=cluster.job + f"-pod{index}", uid=f"pod-uid-{index}")
+        cluster.lists["pods"].append(pod)
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert len(result["failed_bootstrap_jobs"]) == 3
+    assert len([c for c in cluster.calls if c[0] == "logs"]) == 3
+
+
+def test_log_read_failure_does_not_export_error_or_hide_inventory():
+    class Unreadable(FailedBootstrap):
+        def run(self, *args, **kwargs):
+            if args[0] == "logs":
+                raise RuntimeError("private-remote-diagnostic")
+            return super().run(*args, **kwargs)
+
+    result = preflight.inspect(Unreadable(), namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert result["status"] == "observed"
+    assert result["failed_bootstrap_jobs"][0]["diagnostic"] == {"status": "unavailable"}
+    assert "private-" not in json.dumps(result)
