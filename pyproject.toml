@@ -66,6 +66,7 @@ modal = [
 cluster = [
   "kubernetes>=28.1,<32.0",
   "nebius>=0.6,<0.7",
+  "dnspython>=2.8,<3.0",
 ]
 # Production/staging rollout runner tooling. These are first-party sibling
 # packages used by catalog provisioning and benchmark release gates; keep this
@@ -90,6 +91,7 @@ vllm = [
 # in PR-C1b). This PR's code (config_builder + watcher) has no
 # Envoy/gRPC imports — they live in the gRPC server module only.
 dev = [
+  "dnspython>=2.8,<3.0",
   "hypothesis>=6.100,<7.0",
   "kubernetes>=28.1,<32.0",
   "mypy>=1.10,<2.0",

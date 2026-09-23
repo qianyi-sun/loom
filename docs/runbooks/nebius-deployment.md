@@ -122,6 +122,50 @@ issuance credentials; renewal and the corresponding safe reload still require
 the protected installation workflow. Disposable routing evidence is not live
 DNS/TLS or installed multi-owner acceptance.
 
+### Certificate DNS-01 hooks
+
+`scripts/ops/nebius_dns_challenge.py` implements the narrow GoDaddy **v3 bearer
+PAT** provider boundary for Certbot manual authentication/cleanup hooks. Install
+the locked `cluster` extra for `httpx` and `dnspython`. The hook does not implement
+ACME, install certificates, change Kubernetes, or expose a public management
+endpoint. Its presence is not permission to perform an ad-hoc ingress cutover.
+The protected issuance/renewal caller still needs a pinned ACME client, private
+account/certificate recovery, SAN/expiry checks and safe certificate reload.
+
+The caller supplies `auth` or `cleanup`, `--zone`, `--certificate-domain`,
+`--credential-file` and `--state-dir`; Certbot supplies `CERTBOT_DOMAIN` and
+`CERTBOT_VALIDATION`. The certificate domain must be an exact child of the
+selected zone, and the hook accepts only that domain (or its wildcard). It
+derives the one `_acme-challenge` TXT name; it never replaces a recordset or
+modifies A, CNAME, NS or other records. Existing standalone Caddy TLS remains
+independent.
+
+The owner-only regular credential file contains `token` and ISO-date
+`expires_on`; mode 0600 and a nonexpired token are required. Provision and renew
+the PAT through the existing protected operator route, never in ingress or a
+personal namespace. File paths and secret values are not emitted in hook output.
+Keep the journal directory private (0700); its 0600 files must persist across
+renewals and interrupted operations. Use one shared protected journal and the
+installation workflow's exclusion boundary, not copies on parallel hosts.
+
+Authentication durably records intent and the bounded scoped record-ID inventory
+before POST (including the parent entry on first journal creation), and persists
+the returned record ID before reporting success. It checks the exact TXT value directly against
+every discovered authoritative IPv4 DNS address; recursive resolver or provider
+API success alone is insufficient. Aliased/delegated challenge routes are
+rejected. Propagation waits at most ten minutes. Failure preserves the journal
+and created TXT for retry or exact cleanup. No uncertain POST is retried.
+
+A `pending` journal means the provider write outcome is uncertain. Stop and
+reconcile its private intent with the provider's exact record inventory; do not
+erase the journal, guess an ID or blindly repeat authentication. Cleanup reads
+the recorded ID back and requires matching name/type/value/TTL before deleting
+only that record. Other TXT values are preserved. An absent recorded ID completes
+cleanup idempotently. GoDaddy supplies no conditional delete in this API: the
+protected caller must exclude competing management of its recorded challenge
+IDs between readback and DELETE. Arbitrary external DNS administration is not
+made transactional by these hooks.
+
 ### Render management manifests
 
 Management HTTP requests default to a 1 MiB body limit, eight in-flight requests
