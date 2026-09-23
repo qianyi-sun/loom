@@ -65,6 +65,14 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             }, "automountServiceAccountToken": False},
         ])
         assert result.exit_code == 0, result.output.decode()
+        # Match the deployed execution quota: even admission-only dry runs
+        # must declare the resource requests enforced by this namespace.
+        config, candidate, profile = platform_inputs
+        files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+        quota = deepcopy(next(doc for doc in files["60-execution.yaml"] if doc["kind"] == "ResourceQuota"))
+        quota["metadata"]["namespace"] = namespace
+        result = apply([quota])
+        assert result.exit_code == 0, result.output.decode()
         pod = _pod(namespace)
         assert apply([pod], dry_run=True).exit_code != 0  # Existing default refuses root.
         policies = identity_policy_documents(namespace, "disposable-k3s")
