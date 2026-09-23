@@ -255,16 +255,47 @@ def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_
             stream.sendall(b"GET /api/socket HTTP/1.1\r\nHost: alice.dev.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
             data = b""
             while b"hello" not in data:
-                data += stream.recv(4096)
+                chunk = stream.recv(4096)
+                assert chunk, "WebSocket closed before sending its frame"
+                data += chunk
             assert b"101 Switching Protocols" in data
             assert b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" in data
-        denial = "import urllib.request; urllib.request.urlopen('http://loom-service.loom-dev-alice:8090', timeout=2)"
-        result = container.exec(["kubectl", "exec", "-n", "loom-dev-bob", "loom-service", "--", "python", "-c", denial])
-        assert result.exit_code != 0
-        assert b"timed out" in result.output
+        probe = '''import sys, urllib.error, urllib.request
+try:
+    print(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())
+except urllib.error.URLError as exc:
+    if isinstance(exc.reason, (TimeoutError, ConnectionRefusedError)):
+        print("NETWORK_DENIED")
+        sys.exit(42)
+    raise
+'''
+        alice_ip = _run(container, "kubectl", "get", "pod", "loom-service", "-n", "loom-dev-alice",
+                        "-o", "jsonpath={.status.podIP}").strip()
+        for target in ("loom-service.loom-dev-alice", alice_ip):
+            url = f"http://{target}:8090"
+            # Prove both Service and direct Pod paths work from an allowed peer.
+            assert _run(container, "kubectl", "exec", "-n", "loom-dev-alice", "loom-web", "--",
+                        "python", "-c", probe, url).strip() == "loom-dev-alice:8090"
+            deadline = time.monotonic() + 45
+            while True:
+                result = container.exec(["kubectl", "exec", "-n", "loom-dev-bob", "loom-service", "--",
+                                         "python", "-c", probe, url])
+                # Kube-router REJECTs with ICMP port-unreachable; other CNIs may
+                # silently drop. DNS failures and generic command errors do not count.
+                if result.exit_code == 42 and b"NETWORK_DENIED" in result.output:
+                    break
+                assert time.monotonic() < deadline, result.output.decode()
+                time.sleep(0.5)
+            # Denial is not evidence if the service itself stopped responding.
+            assert _run(container, "kubectl", "exec", "-n", "loom-dev-alice", "loom-web", "--",
+                        "python", "-c", probe, url).strip() == "loom-dev-alice:8090"
+        assert get("alice.dev.example.com", "/api") == (200, b"loom-dev-alice:8090")
     except Exception as exc:
+        exc.add_note(_run(container, "iptables-save", "-c", "-t", "filter"))
+        exc.add_note(_run(container, "kubectl", "get", "pods", "-A", "-o", "wide"))
         exc.add_note(_run(container, "kubectl", "logs", "-n", ns, "deployment/loom-shared-ingress", "--tail=60"))
         exc.add_note(_run(container, "kubectl", "get", "services,endpointslices", "-n", ns, "-o", "wide"))
+        exc.add_note(_run(container, "kubectl", "get", "networkpolicies", "-n", "loom-dev-alice", "-o", "yaml"))
         probe = container.exec(["kubectl", "exec", "-n", ns, "deployment/loom-shared-ingress", "--",
                                 "wget", "-T", "3", "-O", "-", "--no-check-certificate",
                                 "https://loom-web-origin." + ns + ".svc.cluster.local"])
