@@ -174,3 +174,18 @@ def test_failed_live_capacity_or_identity_check_prevents_any_write(args):
     with pytest.raises(module().CutoverError):
         module().cutover(**args)
     assert args["api"].writes == []
+
+
+def test_old_installed_guard_without_observation_support_is_rejected_before_pause(args):
+    api = args["api"]
+    guard = api.guard
+
+    def old_guard(action, owner, candidate):
+        if action == "observe":
+            raise RuntimeError("unknown installed CLI action")
+        return guard(action, owner, candidate)
+
+    api.guard = old_guard
+    with pytest.raises(module().CutoverError):
+        module().cutover(**args)
+    assert api.writes == [] and api.owner is None

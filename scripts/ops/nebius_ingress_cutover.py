@@ -214,6 +214,11 @@ def cutover(*, api: CutoverAPI, state_dir: Path, installation_id: str, candidate
                 return {"status": phase, **identity}
             if phase == "prepared":
                 read_matches("service_before", "config_before")
+                # Prove the installed candidate supports recovery observation
+                # before acquiring a pause an older CLI cannot reconcile.
+                if observe() != "open":
+                    save("skipped_locked")
+                    return {"status": "skipped_locked", **identity}
                 save("acquire_intent")
                 try:
                     result = api.guard("acquire", record["owner"], candidate)
