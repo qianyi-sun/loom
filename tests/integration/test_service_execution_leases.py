@@ -3669,16 +3669,25 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 current = await session.get(ServiceExecutionLease, lease.id)
                 assert current is not None and current.finalized_at is None
                 if late_cancellation == "already_deleted":
+                    # Reproduce the durable state written by the older controller.
+                    current.desired_state = current.observed_state = "deleted"
+                    current.cleanup_state = "complete"
+                    current.deleted_at = now + timedelta(seconds=4)
+                elif late_cancellation == "delete_event":
                     await record_execution_event(
-                        session,
-                        lease_id=current.id,
-                        generation=2,
+                        session, lease_id=current.id, generation=2,
                         ordinal=current.last_event_ordinal + 1,
-                        event_kind="deleted",
-                        payload={},
+                        event_kind="deleted", payload={},
                         observed_at=now + timedelta(seconds=4),
                     )
                 await session.commit()
+            if late_cancellation == "before_deleted":
+                pending_materializer = ServiceExecutionMaterializer(
+                    session_factory=sessions, source_store=store, source_bucket="artifacts",
+                    canonical_store=canonical_store, artifacts_bucket="artifacts",
+                    trajectories_bucket="trajectories",
+                )
+                assert await pending_materializer.claim_one() is None
             actuator = ExecutionActuator(
                 sessions=sessions,
                 kubernetes=_FakeKubernetesJobApi(),
@@ -3691,7 +3700,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
                 assert current is not None
-                assert current.finalized_at is not None
+                assert (current.finalized_at is None) == (late_cancellation == "already_deleted")
                 assert current.desired_state == current.observed_state == "deleted"
                 assert current.cleanup_state == "complete"
                 assert current.generation == 2
@@ -3700,22 +3709,25 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
-            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
-            assert trial.result is not None
-            assert trial.result["aggregate_reward"] == aggregate_reward
-            assert trial.result["reward"] == rewards
-            assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
-                result_document
-            ).model_dump(mode="json")
-            projected_result = dict(trial.result)
+            if late_cancellation != "already_deleted":
+                assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
+                assert trial.result is not None
+                assert trial.result["aggregate_reward"] == aggregate_reward
+                assert trial.result["reward"] == rewards
+                assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                    result_document
+                ).model_dump(mode="json")
+                projected_result = dict(trial.result)
             assert not await finalize_committed_service_execution(
                 session, lease_id=current.id, observed_at=now + timedelta(seconds=5)
             )
-            assert trial.result == projected_result
+            if late_cancellation != "already_deleted":
+                assert trial.result == projected_result
             current.desired_state = "deleted"
             current.observed_state = "deleted"
             current.cleanup_state = "complete"
-            current.deleted_at = now + timedelta(seconds=5)
+            if current.deleted_at is None:
+                current.deleted_at = now + timedelta(seconds=5)
             await session.commit()
 
         materializer = ServiceExecutionMaterializer(
@@ -3727,7 +3739,11 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             trajectories_bucket="trajectories",
             source_retention_seconds=0,
         )
-        assert await materializer.run_once()
+        if late_cancellation == "already_deleted":
+            assert not await materializer.run_once(lease_id=uuid4())
+            assert await materializer.run_once(lease_id=lease.id)
+        else:
+            assert await materializer.run_once()
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             trial = await session.get(Trial, trial_id)
@@ -3735,6 +3751,16 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current.materialization_state == "pending"
             assert current.materialization_error_code == "transient_materialization_error"
             assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
+            assert trial.result is not None
+            assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                result_document
+            ).model_dump(mode="json")
+            projected_result = dict(trial.result)
+            if late_cancellation == "already_deleted":
+                assert current.finalized_at is None
+                assert current.deleted_at == now + timedelta(seconds=4)
+                assert current.desired_state == current.observed_state == "deleted"
+
             current.materialization_next_attempt_at = now
             await session.commit()
         materializer = ServiceExecutionMaterializer(
@@ -3908,7 +3934,7 @@ async def test_timeout_preserves_zero_verifier_reward_through_canonical_cleanup(
     )
 
 
-@pytest.mark.parametrize("late_cancellation", ["before_deleted", "already_deleted"])
+@pytest.mark.parametrize("late_cancellation", ["before_deleted", "delete_event", "already_deleted"])
 @pytest.mark.parametrize("runtime_status", ["succeeded", "timed_out"])
 async def test_late_cancellation_preserves_committed_result_through_archival(
     postgres_url: str, late_cancellation: str, runtime_status: str,
