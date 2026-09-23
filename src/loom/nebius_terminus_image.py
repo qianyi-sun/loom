@@ -26,6 +26,72 @@ _UV_SOURCE = re.compile(
     r'(?:source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bin/env)'
     r'|export PATH="\$HOME/\.local/bin:\$PATH")\s*\Z'
 )
+_BOOTSTRAP_GUARD = re.compile(
+    r"if ! command -v (curl|uv) (?:>/dev/null 2>&1|&> /dev/null); then\Z"
+)
+
+
+def _apt_bootstrap_packages(command: str) -> tuple[str, ...] | None:
+    apt = re.fullmatch(
+        r"(?:apt-get update(?: -qq)?\s*&&\s*)?"
+        r"(?:DEBIAN_FRONTEND=noninteractive\s+)?apt-get install (.+)",
+        command,
+    )
+    if apt is None:
+        return None
+    # Only conventional apt metadata cleanup is relocated with the installer.
+    package_args = re.sub(r"\s*&&\s*rm -rf /var/lib/apt/lists/\*\s*$", "", apt[1])
+    words = shlex.split(package_args)
+    names = tuple(
+        word for word in words if word not in {"-y", "-qq", "--no-install-recommends"}
+    )
+    if "-y" not in words or not names or any(not _PACKAGE.fullmatch(name) for name in names):
+        raise ValueError("nebius-terminus: unsupported apt bootstrap")
+    return names
+
+
+def _unwrap_installer_guards(lines: list[str]) -> list[str]:
+    """Unwrap only complete installer-only missing-curl/uv guards.
+
+    All body commands must match before removing either control-flow boundary.
+    Nested branches, task setup, and conditional installation of other packages
+    cannot be made unconditional by image preparation.
+    """
+    output: list[str] = []
+    position = 0
+    while position < len(lines):
+        line = lines[position]
+        position += 1
+        guard = _BOOTSTRAP_GUARD.fullmatch(line.strip())
+        if guard is None:
+            output.append(line)
+            continue
+        body: list[str] = []
+        while position < len(lines) and lines[position].strip() != "fi":
+            body.append(lines[position])
+            position += 1
+        if position == len(lines):
+            raise ValueError("nebius-terminus: unterminated bootstrap guard")
+        position += 1
+        commands = [
+            re.sub(r"\\\r?\n", " ", item).strip()
+            for item in body if item.strip() and not item.lstrip().startswith("#")
+        ]
+        if commands and _apt_bootstrap_packages(commands[0]) == ("curl",):
+            commands.pop(0)
+            has_curl = True
+        else:
+            has_curl = False
+        valid = (
+            has_curl and not commands if guard[1] == "curl" else
+            len(commands) == 2
+            and _UV_INSTALL.fullmatch(commands[0]) is not None
+            and _UV_SOURCE.fullmatch(commands[1]) is not None
+        )
+        if not valid:
+            raise ValueError("nebius-terminus: unsupported bootstrap guard body")
+        output.extend(body)
+    return output
 
 
 @dataclass(frozen=True)
@@ -83,7 +149,7 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         executable = "/opt/verifier/bin/python -m pytest" if module else "/opt/verifier/bin/pytest"
         return executable + " " + shlex.join(arguments) + "\n"
 
-    for line in logical_lines:
+    for line in _unwrap_installer_guards(logical_lines):
         command = re.sub(r"\\\r?\n", " ", line).strip()
         if not command or command.startswith("#"):
             output.append(line)
@@ -95,27 +161,9 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             continue
         if re.fullmatch(r"apt-get update(?: -qq)?", command):
             continue
-        apt = re.fullmatch(
-            r"(?:apt-get update(?: -qq)?\s*&&\s*)?"
-            r"(?:DEBIAN_FRONTEND=noninteractive\s+)?apt-get install (.+)",
-            command,
-        )
-        if apt:
-            # Relocate only the conventional apt metadata cleanup. It is
-            # already performed after build-time dependency installation;
-            # arbitrary chained commands still fail the package recognizer.
-            package_args = re.sub(r"\s*&&\s*rm -rf /var/lib/apt/lists/\*\s*$", "", apt[1])
-            words = shlex.split(package_args)
-            names = [
-                word for word in words if word not in {"-y", "-qq", "--no-install-recommends"}
-            ]
-            if (
-                "-y" not in words
-                or not names
-                or any(not _PACKAGE.fullmatch(name) for name in names)
-            ):
-                raise ValueError("nebius-terminus: unsupported apt bootstrap")
-            packages.extend(names)
+        apt_packages = _apt_bootstrap_packages(command)
+        if apt_packages is not None:
+            packages.extend(apt_packages)
             continue
         if _UV_INSTALL.fullmatch(command):
             installer_count += 1
