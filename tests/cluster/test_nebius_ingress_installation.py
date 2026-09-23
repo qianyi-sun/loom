@@ -24,6 +24,7 @@ from scripts.ops.nebius_ingress_gateway import (
     TLSBinding,
     deliver_tls,
     qualify_controller,
+    switch_controller_certificate,
 )
 
 from loom.nebius_shared_ingress import SharedIngressInstallation, render_shared_ingress
@@ -287,8 +288,10 @@ def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secre
         chain, key, next_roots = material()
         publish(root, chain, key, next_roots)
         second = deliver_tls(config, binding=binding, api=api, roots=next_roots, now=certificate_material.NOW)
-        current = api.get_deployment(namespace, "loom-shared-ingress")
-        api.switch_controller_tls(current, second["secret_name"])
+        switch = switch_controller_certificate(config, binding=binding, api=api, tls_receipt=second,
+            deployment_uid=deployment["metadata"]["uid"], roots=next_roots, now=certificate_material.NOW)
+        assert switch_controller_certificate(config, binding=binding, api=api, tls_receipt=second,
+            deployment_uid=deployment["metadata"]["uid"], roots=next_roots, now=certificate_material.NOW) == switch
         _run(container, "kubectl", "rollout", "status", "deployment/loom-shared-ingress", "-n", namespace,
              "--timeout=90s", timeout=100)
         second_proof = qualified(second, next_roots)

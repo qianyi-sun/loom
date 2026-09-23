@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -131,6 +132,10 @@ class ControllerAPI(TLSAPI, Protocol):
     def probe_tls(self, namespace: str, name: str, uid: str, server_name: str) -> str:
         """Authenticate the exact Pod's TLS using system trust; return leaf SHA256."""
         ...
+
+
+class ControllerWriteAPI(ControllerAPI, Protocol):
+    def switch_controller_tls(self, observed: dict[str, Any], secret_name: str) -> None: ...
 
 
 def _forward_port(process: subprocess.Popen[bytes], *, timeout: float = 10) -> int:
@@ -373,6 +378,120 @@ def _verify_secret(observed: dict[str, Any], desired: dict[str, Any], recorded_u
         raise IngressError("TLS Secret ownership, identity or material differs") from None
 
 
+def _tls_secret_document(binding: TLSBinding, generation: str, name: str,
+                         chain: bytes, key: bytes) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "immutable": True,
+        "metadata": {"name": name, "namespace": binding.namespace,
+                     "labels": {"app.kubernetes.io/name": "loom-shared-ingress",
+                                "loom.openai.com/ingress-installation": binding.installation_id},
+                     "annotations": {"loom.openai.com/certificate-generation": generation}},
+        "data": {"tls.crt": base64.b64encode(chain).decode(), "tls.key": base64.b64encode(key).decode()},
+    }
+
+
+def switch_controller_certificate(config: dict[str, Any], *, binding: TLSBinding, api: ControllerWriteAPI,
+                                  deployment_uid: str, tls_receipt: dict[str, Any], now: datetime | None = None,
+                                  roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
+    """Journal one certificate switch; read back unknown writes without retries.
+
+    This records an observed specification, NOT ready Pods or public readiness.
+    The caller must separately qualify_controller before any public cutover.
+    A pending switch blocks a newer generation until its outcome is reconciled.
+    """
+    try:
+        root = Path(config["state_dir"])
+        with certificates._locked_state(root):
+            if (certificates.load_installation(root / "installation.json") != config
+                    or config["installation_id"] != binding.certificate_installation_id
+                    or config["child_domain"] != binding.child_domain or config["management_host"] != binding.management_host
+                    or str(UUID(deployment_uid)) != deployment_uid or UUID(deployment_uid).int == 0
+                    or tls_receipt["binding"] != asdict(binding) or tls_receipt["status"] != "tls_delivered"):
+                raise IngressError("controller switch installation binding differs")
+            selected = certificates._selected(root)
+            if selected is None or selected["generation"] != tls_receipt["certificate_generation"]:
+                raise IngressError("controller switch certificate selection differs")
+            generation = selected["generation"]
+            directory = root / "generations" / generation
+            for parent in (directory.parent, directory, root / "deliveries"):
+                certificates._private_directory(parent)
+            chain = certificates._private_read(directory / "fullchain.pem")
+            key = certificates._private_read(directory / "privkey.pem", limit=16384)
+            report = certificates.validate_certificate(chain, key, child_domain=binding.child_domain,
+                                                       management_host=binding.management_host, now=now, roots=roots)
+            stored = json.loads(certificates._private_read(root / "deliveries" / (binding.installation_id + "-" + generation + ".json")))
+            if (stored != tls_receipt or hashlib.sha256(chain).hexdigest() != generation
+                    or any(selected[k] != v for k, v in report.items())
+                    or tls_receipt["fingerprint_sha256"] != report["fingerprint_sha256"]):
+                raise IngressError("controller switch delivery receipt differs")
+            api.verify_identity(binding)
+            secret = api.get_secret(binding.namespace, tls_receipt["secret_name"])
+            if secret is None:
+                raise IngressError("controller switch TLS Secret absent")
+            _verify_secret(secret, _tls_secret_document(binding, generation, tls_receipt["secret_name"], chain, key),
+                           tls_receipt["secret_uid"])
+
+            def observe() -> dict[str, Any]:
+                current = api.get_deployment(binding.namespace, "loom-shared-ingress")
+                meta = (current or {}).get("metadata", {})
+                if (current is None or meta.get("uid") != deployment_uid or meta.get("namespace") != binding.namespace
+                        or meta.get("name") != "loom-shared-ingress" or meta.get("deletionTimestamp") is not None
+                        or meta.get("labels", {}).get("loom.nebius/ingress-installation-id") != binding.installation_id
+                        or not isinstance(meta.get("resourceVersion"), str) or not meta["resourceVersion"]
+                        or type(meta.get("generation")) is not int or meta["generation"] < 1):
+                    raise IngressError("controller switch identity differs")
+                return current
+
+            current = observe()
+            journal_dir = root / "controller-switches"
+            certificates._private_directory(journal_dir)
+            path = journal_dir / (binding.installation_id + ".json")
+            record = None
+            if path.exists() or path.is_symlink():
+                record = json.loads(certificates._private_read(path, limit=1024 * 1024))
+                if (not isinstance(record, dict) or record["schema"] != "loom.nebius-controller-switch.v1"
+                        or record["binding"] != asdict(binding) or record["deployment_uid"] != deployment_uid
+                        or record["status"] not in {"switch_intent", "controller_switch_observed"}
+                        or type(record["before_generation"]) is not int or record["before_generation"] < 1):
+                    raise IngressError("controller switch journal differs")
+                if record["tls_receipt"] != tls_receipt:
+                    if (record["status"] != "controller_switch_observed" or current["spec"] != record["after_spec"]
+                            or current["metadata"]["generation"] != record["before_generation"] + 1):
+                        raise IngressError("previous controller switch unresolved")
+                    record = None
+            if record is None:
+                after_spec = copy.deepcopy(current["spec"])
+                volumes = [v for v in after_spec["template"]["spec"]["volumes"] if v.get("name") == "tls"]
+                if len(volumes) != 1 or volumes[0]["secret"]["secretName"] == tls_receipt["secret_name"]:
+                    raise IngressError("untracked or invalid controller TLS generation")
+                volumes[0]["secret"]["secretName"] = tls_receipt["secret_name"]
+                record = {"schema": "loom.nebius-controller-switch.v1", "binding": asdict(binding),
+                          "deployment_uid": deployment_uid, "tls_receipt": tls_receipt,
+                          "before_resource_version": current["metadata"]["resourceVersion"],
+                          "before_generation": current["metadata"]["generation"], "before_spec": current["spec"],
+                          "after_spec": after_spec, "status": "switch_intent"}
+                certificates._atomic_json(path, record)
+                try:
+                    api.switch_controller_tls(current, tls_receipt["secret_name"])
+                except Exception:
+                    pass  # Only exact readback, never another write, resolves the outcome.
+                current = observe()
+            if (current["spec"] != record["after_spec"]
+                    or current["metadata"]["generation"] != record["before_generation"] + 1):
+                raise IngressError("controller switch outcome unresolved; preserve journal")
+            api.verify_identity(binding)
+            if record["status"] != "controller_switch_observed":
+                record["status"] = "controller_switch_observed"
+                certificates._atomic_json(path, record)
+            return {"status": "controller_switch_observed", "deployment_uid": deployment_uid,
+                    "generation": current["metadata"]["generation"], "secret_uid": tls_receipt["secret_uid"],
+                    "fingerprint_sha256": tls_receipt["fingerprint_sha256"]}
+    except IngressError:
+        raise
+    except Exception:
+        raise IngressError("private controller switch unavailable; preserve journal") from None
+
+
 def deliver_tls(config: dict[str, Any], *, binding: TLSBinding, api: TLSAPI,
                 now: datetime | None = None, roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
     """Deliver one selected generation; retain all old Secrets and recovery state.
@@ -404,14 +523,7 @@ def deliver_tls(config: dict[str, Any], *, binding: TLSBinding, api: TLSAPI,
             if hashlib.sha256(chain).hexdigest() != generation or any(selected[k] != v for k, v in report.items()):
                 raise IngressError("selected certificate differs from freshly validated generation")
             name = "loom-ingress-tls-" + hashlib.sha256((binding.installation_id + ":" + generation).encode()).hexdigest()[:40]
-            desired = {
-                "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls", "immutable": True,
-                "metadata": {"name": name, "namespace": binding.namespace,
-                             "labels": {"app.kubernetes.io/name": "loom-shared-ingress",
-                                        "loom.openai.com/ingress-installation": binding.installation_id},
-                             "annotations": {"loom.openai.com/certificate-generation": generation}},
-                "data": {"tls.crt": base64.b64encode(chain).decode(), "tls.key": base64.b64encode(key).decode()},
-            }
+            desired = _tls_secret_document(binding, generation, name, chain, key)
             api.verify_identity(binding)
             deliveries = root / "deliveries"
             certificates._private_directory(deliveries)
