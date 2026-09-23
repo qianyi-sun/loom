@@ -131,3 +131,14 @@ async def test_handoff_preserves_access_default_acls_and_child_inheritance(acl_d
             assert b"user:12345:r-x" in after.stdout
     assert (await verifier.exec("getfacl -cpn /workspace/tests/secret")).stdout == private_before.stdout
     assert (await verifier.exec("cat /workspace/tests/secret")).stdout == b"trusted"
+
+
+@pytest.mark.parametrize("root", ["/workspace/link", "/workspace/link/sub"])
+async def test_acl_probe_rejects_symlink_root(acl_drivers, root):
+    from loom.trial.workspace_acls import require_acl_support
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+    agent, _ = acl_drivers
+    assert (await agent.exec("mkdir /data/sub && ln -s /data /workspace/link")).return_code == 0
+    with pytest.raises(WorkspaceSnapshotError, match="ACL"):
+        await require_acl_support(agent, PurePosixPath(root))
