@@ -150,6 +150,7 @@ import json, os, socket
 with socket.socket() as client:
     client.settimeout(1)
     occupied = client.connect_ex(('127.0.0.1', 8080)) == 0
+os.makedirs(os.path.dirname(os.environ['LOOM_VERIFIER_OUTPUT']), exist_ok=True)
 with open(os.environ['LOOM_VERIFIER_OUTPUT'], 'w') as report:
     json.dump({'rewards': {'passed': int(not occupied)}}, report)
 PY

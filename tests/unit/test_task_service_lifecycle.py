@@ -64,7 +64,7 @@ def test_startup_only_readiness_requires_initializer_and_preserves_old_defaults(
         readiness_scope="startup_only",
     )
     assert declared.readiness_scope == "startup_only"
-    with pytest.raises(ValueError, match="startup_only.*startup_command"):
+    with pytest.raises(ValueError, match=r"startup_only.*startup_command"):
         ServiceLifecycleConfig(readiness={"command": "true"}, readiness_scope="startup_only")
 
 
@@ -141,6 +141,7 @@ async def test_service_survives_snapshot_until_private_verifier_finishes(tmp_pat
     else:
         await module.run_agent(tmp_path, task, trial)
         assert events[-1] == "resume"
+        assert events.count("ready") == 2  # Existing declarations check both phases.
         if failure:
             with pytest.raises(RuntimeError, match="verifier failed"):
                 await module.run_verifier(tmp_path, task, trial)

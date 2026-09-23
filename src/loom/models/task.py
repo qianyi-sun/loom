@@ -73,6 +73,9 @@ class ServiceLifecycleConfig(BaseModel):
     startup_timeout_sec: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
     readiness: HealthcheckSpec
     readiness_timeout_sec: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
+    readiness_scope: Literal["startup_and_handoff", "startup_only"] = Field(
+        default="startup_and_handoff", exclude_if=lambda value: value == "startup_and_handoff",
+    )
 
     @field_validator("startup_command")
     @classmethod
@@ -80,6 +83,12 @@ class ServiceLifecycleConfig(BaseModel):
         if any("\x00" in item or len(item) > 4096 for item in value) or (value and not value[0]):
             raise ValueError("service startup requires valid argv")
         return value
+
+    @model_validator(mode="after")
+    def _startup_only_requires_initializer(self) -> ServiceLifecycleConfig:
+        if self.readiness_scope == "startup_only" and not self.startup_command:
+            raise ValueError("startup_only readiness requires startup_command")
+        return self
 
 
 class EnvironmentConfig(BaseModel):

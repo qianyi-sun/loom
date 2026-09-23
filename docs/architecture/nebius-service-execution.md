@@ -746,7 +746,15 @@ Ordinary undeclared tasks continue using their existing mode/link contract.
 An explicit `environment.service_lifecycle` retains task processes through the
 independent verifier. Its optional returning startup argv initializes the
 environment before agent execution; agent-owned services have no initializer.
-Readiness checks have an explicit deadline. On successful or acknowledged
+Readiness checks have an explicit deadline. The default
+`readiness_scope = "startup_and_handoff"` checks readiness after an initializer
+and again after the agent. Tasks whose goal is to stop or reconfigure an
+initially running service may declare `readiness_scope = "startup_only"`, which
+requires an initializer and checks only the initial state. Both scopes retain
+the agent's actual process state for independent verification: a surviving
+listener stays alive, and a stopped listener is not restarted. Platform cleanup
+must not turn a failed attempt to stop a service into a passing verifier result.
+On successful or acknowledged
 deadline handoff, the native task PID 1 suspends descendants, snapshots workspace
 and declared directories, then resumes those same process identities. Processes
 already stopped remain stopped. The verifier container can reach the retained
