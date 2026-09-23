@@ -6,7 +6,7 @@ import importlib
 import json
 import subprocess
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -511,8 +511,11 @@ def test_real_tls_probe_uses_verified_hostname_and_stops_forwarder(inputs, tmp_p
 
     from cryptography import x509
     from cryptography.hazmat.primitives import serialization
+    from tests.ops import test_nebius_certificates as factory
 
     binding = inputs[1]
+    # OpenSSL uses the real clock; fixed-date material eventually expires.
+    monkeypatch.setattr(factory, "NOW", datetime.now(UTC))
     chain, key, roots = material(names=("*.dev.example.test", "foreign.example.test") if wrong_certificate else (
         "*.dev.example.test", "management.example.test"))
     certificate, private = tmp_path / "server.crt", tmp_path / "server.key"

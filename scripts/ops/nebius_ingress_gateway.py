@@ -280,20 +280,6 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
                 or tls_receipt["binding"] != asdict(binding) or tls_receipt["status"] != "tls_delivered"):
             raise IngressError("controller qualification binding differs")
         api.verify_identity(binding)
-        deployment = api.get_deployment(binding.namespace, "loom-shared-ingress")
-        if deployment is None:
-            raise IngressError("controller is absent")
-        metadata, spec, status = deployment["metadata"], deployment["spec"], deployment.get("status", {})
-        generation = metadata["generation"]
-        if (metadata["uid"] != deployment_uid or metadata["namespace"] != binding.namespace
-                or metadata.get("deletionTimestamp") is not None
-                or metadata.get("labels", {}).get("loom.nebius/ingress-installation-id") != binding.installation_id
-                or type(generation) is not int or generation < 1 or spec.get("replicas") != 1
-                or status.get("observedGeneration") != generation
-                or any(status.get(field) != 1 for field in ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas"))
-                or spec.get("selector") != {"matchLabels": {"app": "loom-shared-ingress"}}):
-            raise IngressError("controller generation is not fully available")
-
         def current_spec(value: dict[str, Any]) -> bool:
             containers = value.get("containers", [])
             tls_volumes = [v for v in value.get("volumes", []) if v.get("name") == "tls"]
@@ -301,8 +287,25 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
                     and len(tls_volumes) == 1
                     and tls_volumes[0].get("secret", {}).get("secretName") == tls_receipt["secret_name"])
 
-        if not current_spec(spec["template"]["spec"]):
-            raise IngressError("controller image or TLS generation differs")
+        def check_deployment() -> int:
+            deployment = api.get_deployment(binding.namespace, "loom-shared-ingress")
+            if deployment is None:
+                raise IngressError("controller is absent")
+            metadata, spec, status = deployment["metadata"], deployment["spec"], deployment.get("status", {})
+            generation = metadata["generation"]
+            if (metadata["uid"] != deployment_uid or metadata["namespace"] != binding.namespace
+                    or metadata.get("deletionTimestamp") is not None
+                    or metadata.get("labels", {}).get("loom.nebius/ingress-installation-id") != binding.installation_id
+                    or type(generation) is not int or generation < 1 or spec.get("replicas") != 1
+                    or status.get("observedGeneration") != generation
+                    or any(status.get(field) != 1 for field in ("replicas", "updatedReplicas", "readyReplicas", "availableReplicas"))
+                    or spec.get("selector") != {"matchLabels": {"app": "loom-shared-ingress"}}):
+                raise IngressError("controller generation is not fully available")
+            if not current_spec(spec["template"]["spec"]):
+                raise IngressError("controller image or TLS generation differs")
+            return generation
+
+        generation = check_deployment()
         def check_secret() -> None:
             secret = api.get_secret(binding.namespace, tls_receipt["secret_name"])
             meta = (secret or {}).get("metadata", {})
@@ -315,13 +318,16 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
                 raise IngressError("delivered TLS Secret identity differs")
 
         check_secret()
-        owned_sets = {
-            row["metadata"]["uid"] for row in api.list_controller_replicasets(binding.namespace)
-            if row["metadata"].get("deletionTimestamp") is None and any(
-                owner.get("controller") is True and owner.get("kind") == "Deployment" and owner.get("uid") == deployment_uid
-                for owner in row["metadata"].get("ownerReferences", [])
-            )
-        }
+        def owned_replicasets() -> set[str]:
+            return {
+                row["metadata"]["uid"] for row in api.list_controller_replicasets(binding.namespace)
+                if row["metadata"].get("deletionTimestamp") is None and any(
+                    owner.get("controller") is True and owner.get("kind") == "Deployment" and owner.get("uid") == deployment_uid
+                    for owner in row["metadata"].get("ownerReferences", [])
+                )
+            }
+
+        owned_sets = owned_replicasets()
         pods = api.list_controller_pods(binding.namespace)
         if len(pods) != 1:
             raise IngressError("controller has absent or mixed-generation Pods")
@@ -340,9 +346,12 @@ def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_ui
             if (not observed or observed["metadata"].get("uid") != meta["uid"]
                     or observed["metadata"].get("resourceVersion") != meta["resourceVersion"]):
                 raise IngressError("controller Pod changed during TLS qualification")
-        current = api.get_deployment(binding.namespace, "loom-shared-ingress")
-        if not current or current["metadata"]["uid"] != deployment_uid or current["metadata"]["generation"] != generation:
+        if check_deployment() != generation:
             raise IngressError("controller changed during TLS qualification")
+        final_sets = owned_replicasets()
+        if any(not any(o.get("controller") is True and o.get("kind") == "ReplicaSet" and o.get("uid") in final_sets
+                       for o in pod["metadata"].get("ownerReferences", [])) for pod in pods):
+            raise IngressError("controller ReplicaSet ownership changed during TLS qualification")
         final_pods = api.list_controller_pods(binding.namespace)
         if sorted((p["metadata"]["uid"], p["metadata"]["resourceVersion"]) for p in final_pods) != sorted(
             (p["metadata"]["uid"], p["metadata"]["resourceVersion"]) for p in pods
@@ -554,6 +563,7 @@ def deliver_tls(config: dict[str, Any], *, binding: TLSBinding, api: TLSAPI,
             if observed is None:
                 raise IngressError("TLS create outcome unresolved; preserve intent and reconcile")
             uid = _verify_secret(observed, desired, receipt["secret_uid"])
+            api.verify_identity(binding)
             result = {**identity, "status": "tls_delivered", "secret_uid": uid}
             if result != receipt:
                 certificates._atomic_json(receipt_path, result)
