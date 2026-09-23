@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import resource
 import shlex
+import subprocess
 from dataclasses import replace
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
@@ -496,3 +500,75 @@ def test_native_selector_rejects_conflicting_target_constraints(inputs, constrai
     inputs["target"] = replace(inputs["target"], node_selector={constraint: value})
     with pytest.raises(ValueError, match="architecture conflicts"):
         render_task_image_job(**inputs)
+
+
+@pytest.mark.parametrize("export_format", ["archive", "directory"])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_generated_build_script_is_valid_posix_shell(inputs, export_format, cache_enabled) -> None:
+    inputs["config"] = replace(
+        inputs["config"], oci_export_format=export_format,
+        cache_secret_name="cache-access" if cache_enabled else None,
+    )
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    result = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("export_format", ["archive", "directory"])
+@pytest.mark.parametrize(("build_exit", "expected_exit"), [(0, 0), (42, 1), (124, 124)])
+def test_generated_build_script_preserves_outcomes_and_valid_stage_json(
+    inputs, tmp_path: Path, export_format: str, build_exit: int, expected_exit: int,
+) -> None:
+    # Execute the generated shell with a controlled external build command.
+    # Redirect its two container-local directories into this test's own tree.
+    # Keep the caller's process ceiling instead of limiting other test workers.
+    process_limit = resource.getrlimit(resource.RLIMIT_NPROC)[0]
+    inputs["config"] = replace(
+        inputs["config"], oci_export_format=export_format,
+        max_processes=process_limit if process_limit > 0 else 1_000_000,
+    )
+    inputs["components"] = inputs["components"][:1]
+    _, job = render_task_image_job(**inputs)
+    script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
+    script = script.replace("/scratch", str(tmp_path / "scratch"))
+    script = script.replace("/loom/build", str(tmp_path / "build"))
+    binary_dir = tmp_path / "bin"
+    binary_dir.mkdir()
+    build = binary_dir / "buildctl-daemonless.sh"
+    build.write_text("""#!/bin/sh
+set -eu
+if [ "$LOOM_TEST_BUILD_EXIT" != 0 ]; then exit "$LOOM_TEST_BUILD_EXIT"; fi
+while [ "$1" != --output ]; do shift; done
+output=$2
+dest=${output#*dest=}
+dest=${dest%%,*}
+case "$output" in
+  *tar=false*) mkdir -p "$dest"; printf payload > "$dest/index.json" ;;
+  *) printf payload > "$dest" ;;
+esac
+""")
+    cleanup = binary_dir / "rootlesskit"
+    cleanup.write_text('#!/bin/sh\nexec "$@"\n')
+    for binary in (build, cleanup):
+        binary.chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, timeout=10,
+        env={**os.environ, "PATH": str(binary_dir) + os.pathsep + os.environ["PATH"],
+             "LOOM_TEST_BUILD_EXIT": str(build_exit)},
+    )
+    assert result.returncode == expected_exit, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    solve_end = next(event for event in events
+                     if event["loom_task_image_stage"] == "solve" and event["event"] == "end")
+    assert isinstance(solve_end["duration_ms"], int) and solve_end["duration_ms"] >= 0
+    if build_exit:
+        assert solve_end["failed"] is True
+        assert solve_end["exit"] == build_exit
+        assert len(events) == 2
+    else:
+        assert "failed" not in solve_end
+        exported = next(event for event in events if event["loom_task_image_stage"] == "oci_export")
+        assert exported["bytes"] == 7
+        assert events[-1]["loom_task_image_stage"] == "cleanup"
+        assert events[-1]["event"] == "end"
