@@ -435,8 +435,7 @@ class NativeTaskImageController:
         try:
             claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
             if (
-                self.settings.builder_engine == "buildkit"
-                and self.settings.compatible_revision_cache == "same_task"
+                self.settings.compatible_revision_cache == "same_task"
                 and self.settings.cache_bucket is not None
             ):
                 donor = await same_task_compatible_cache_key(

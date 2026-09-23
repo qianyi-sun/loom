@@ -33,33 +33,28 @@ class NativeTaskImageSettings(BaseModel):
     max_processes: int = Field(default=512, ge=64, le=4096)
     active_deadline_seconds: int = Field(default=1800, ge=60, le=7200)
     max_concurrent: int = Field(default=1, ge=1, le=16)
-    # buildkit (default) or compose (opt-in, one Job per mat — see #2086).
+    # buildkit (default) or compose (opt-in, one Job per mat — see #2086 / #2092).
     builder_engine: Literal["buildkit", "compose"] = "buildkit"
     # OverlayFS is the measured Nebius default; set "native" to roll back.
+    # Compose Jobs do not run buildkitd; snapshotter is BuildKit-daemonless only.
     snapshotter: Literal["overlayfs", "native"] = "overlayfs"
-    # When "same_task", prepare may import BuildKit cache from a prior ready
+    # When "same_task", prepare may import BuildKit-local cache from a prior ready
     # revision of the same task_id+cpu_arch. Results still use this mat key.
+    # Applies to both buildkit and compose (shared S3 task-build-cache — #2092).
     compatible_revision_cache: Literal["off", "same_task"] = "off"
-    # BuildKit local export mode; keep max until Nebius timing compares say otherwise.
+    # BuildKit local export mode; compose maps this to cache_to mode=.
     export_cache_mode: Literal["max", "min"] = "max"
     # Incremental content-addressed blobs (default) or whole-archive tar rollback.
     cache_transfer: Literal["tar", "blobs"] = "blobs"
     # BuildKit OCI export shape; archive is today's path, directory is measure-gated.
+    # Compose v1 only produces oci-archive via skopeo.
     oci_export_format: Literal["archive", "directory"] = "archive"
 
     @model_validator(mode="after")
-    def _compose_rejects_buildkit_only_knobs(self) -> NativeTaskImageSettings:
+    def _compose_rejects_unused_knobs(self) -> NativeTaskImageSettings:
         if self.builder_engine != "compose":
             return self
-        # Compose v1 does not speak BuildKit local cache or S3 task-build-cache.
-        if self.cache_bucket is not None or self.cache_secret_name is not None:
-            raise ValueError("compose builder cannot use BuildKit S3 cache")
-        if self.compatible_revision_cache != "off":
-            raise ValueError("compose builder does not support compatible_revision_cache")
-        if self.cache_transfer != "blobs":
-            raise ValueError("compose builder does not use cache_transfer")
-        if self.export_cache_mode != "max":
-            raise ValueError("compose builder does not use export_cache_mode")
+        # Compose does not run buildkitd; snapshotter would only mislead operators.
         if self.snapshotter != "overlayfs":
             raise ValueError("compose builder does not use BuildKit snapshotter")
         if self.oci_export_format != "archive":

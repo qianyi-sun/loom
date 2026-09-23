@@ -945,11 +945,8 @@ def _task_image_builder_settings(config: dict[str, Any], *, service_image: str) 
             "task image publication requires a dedicated primary Nebius task-images repository"
         )
     cache = supplied.get("cache_bucket")
-    engine = supplied.get("builder_engine", "buildkit")
-    if engine == "compose" and cache is not None:
-        raise NebiusPlatformError(
-            "compose builder cannot use BuildKit S3 cache (omit cache_bucket)"
-        )
+    # Compose may use the same S3 task-build-cache as BuildKit via
+    # cache_from/cache_to type=local (#2092). Registry cache backends are out of scope.
     if cache is not None:
         _name(cache, "task image cache bucket")
         if cache in {

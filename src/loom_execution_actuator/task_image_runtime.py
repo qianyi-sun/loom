@@ -633,9 +633,7 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
         finally:
             source.close()
         (work / "oci").mkdir(exist_ok=True)
-        # Compose Jobs do not speak BuildKit local / S3 cache (#2086).
-        if claim.get("builder_engine", "buildkit") == "compose":
-            return
+        # Compose reuses the same S3 BuildKit-local cache trees as buildctl (#2092).
         if not (secrets / "cache").is_dir():
             return
         cache = _client(claim, secrets / "cache")
