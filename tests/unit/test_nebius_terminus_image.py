@@ -1,7 +1,7 @@
 """Behavioral boundaries for the bounded Harbor image preparation adapter."""
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 

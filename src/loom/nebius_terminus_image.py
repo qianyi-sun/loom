@@ -90,6 +90,9 @@ def _unwrap_installer_guards(lines: list[str]) -> list[str]:
         )
         if not valid:
             raise ValueError("nebius-terminus: unsupported bootstrap guard body")
+        # Relocating all commands must not leave an enclosing branch or
+        # function with an empty body. A skipped installation also returns 0.
+        output.append(":\n")
         output.extend(body)
     return output
 
@@ -114,6 +117,11 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
     logical_lines: list[str] = []
     pending = ""
     for physical_line in script.splitlines(keepends=True):
+        if not pending and physical_line.lstrip().startswith("#"):
+            # Backslash-newline does not continue a shell comment. Combining
+            # it with the next line could hide executable work in a guard.
+            logical_lines.append(physical_line)
+            continue
         pending += physical_line
         if not physical_line.rstrip("\r\n").endswith("\\"):
             logical_lines.append(pending)

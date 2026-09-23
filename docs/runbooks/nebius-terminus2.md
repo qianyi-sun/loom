@@ -325,11 +325,11 @@ installer forms include apt's `-qq` and pip's `--no-cache-dir` flags, pinned uv
 installation followed by `source "$HOME/.local/bin/env"` or
 `export PATH="$HOME/.local/bin:$PATH"`, and simple missing-command guards for
 curl or uv. A curl guard may install only curl; a uv guard may install curl and
-must contain the complete pinned uv installation and activation. Additional
-task commands, nested branches, or other conditional packages require explicit
-adaptation. The converter does not evaluate arbitrary shell control flow.
-Recognized
-fixed-commit Git dependencies and explicit verifier asset downloads are prepared
+must contain the complete pinned uv installation and activation. Task commands,
+nested branches, or other conditional packages inside that guard require
+explicit adaptation. A removed guard leaves a shell no-op to preserve any
+enclosing branch or function. The converter does not evaluate arbitrary shell
+control flow. Recognized fixed-commit Git dependencies and explicit verifier asset downloads are prepared
 at image build time. Assets are copied into the verifier workspace at the
 original script location; test assertions and reward branches are unchanged.
 If the original script emits a valid reward and then exits nonzero, the wrapper
