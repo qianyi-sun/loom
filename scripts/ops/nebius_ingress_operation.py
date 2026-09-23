@@ -10,9 +10,12 @@ from typing import Any
 from uuid import UUID
 
 from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI
+from scripts.ops.nebius_ingress_cutover import _identity as resource_identity
 from scripts.ops.nebius_ingress_gateway import TLSBinding
+from scripts.ops.nebius_ingress_image import DIGEST
 
 from loom.nebius_environment_contract import FoundationBinding
+from loom.nebius_shared_ingress import SharedIngressInstallation
 from loom_execution_capacity_collector import kubernetes as accounting
 
 
@@ -28,7 +31,48 @@ class LiveIngressAPI(KubectlCutoverAPI):
         self.ingress_class, self.image = ingress_class, image
 
     def foundation(self) -> FoundationBinding:
-        raise NotImplementedError
+        """Read and validate current deployment configuration before rendering."""
+        try:
+            self.verify_identity(self.binding)
+            view = json.loads(self._run(["config", "view", "--minify", "-o", "json"]))
+            clusters = view["clusters"]
+            if (len(clusters) != 1 or clusters[0]["cluster"]["server"] != self.api_server
+                    or not clusters[0]["name"].endswith(self.cluster_id.removeprefix("mk8s"))
+                    or clusters[0]["cluster"].get("insecure-skip-tls-verify")
+                    or not (clusters[0]["cluster"].get("certificate-authority")
+                            or clusters[0]["cluster"].get("certificate-authority-data"))):
+                raise OperationError("Kubernetes context does not match trusted ingress binding")
+            row = self._get(["get", "configmap", "loom-platform-config", "-n", self.binding.namespace])
+            if row is None:
+                raise OperationError("live platform configuration unavailable")
+            resource_identity(row, kind="ConfigMap", name="loom-platform-config", namespace=self.binding.namespace)
+            data = row["data"]
+            config, profile = json.loads(data["environment.json"]), json.loads(data["profile.json"])
+            if (config["namespace"] != self.binding.namespace or config["cluster_id"] != self.cluster_id
+                    or config["kubernetes_api_server"] != self.api_server or profile["candidate_sha"] != self.candidate
+                    or not re.fullmatch(r"cr\." + re.escape(config["region"]) + r"\.nebius\.cloud/[A-Za-z0-9_-]+/loom-shared-ingress@"
+                                        + re.escape(DIGEST), self.image)):
+                raise OperationError("live platform differs from installed ingress authority")
+            # Validate before normalization so an invalid flag is not hidden.
+            foundation = FoundationBinding(
+                platform_config_json=json.dumps(config, sort_keys=True), public_dns_zone=self.binding.child_domain,
+                ingress_class_name=self.ingress_class, ingress_namespace=self.binding.namespace,
+                ingress_controller_label="loom-shared-ingress",
+            )
+            # The flag controls the existing public Service, not these staged
+            # resources. Canonicalize this one operation-owned field so replay
+            # after cutover keeps the initial staging render and journal intact.
+            foundation = foundation.model_copy(update={
+                "platform_config_json": json.dumps({**config, "shared_ingress_enabled": False}, sort_keys=True),
+            })
+            SharedIngressInstallation(installation_id=UUID(self.binding.installation_id), foundation=foundation,
+                                      image=self.image, tls_secret_name="loom-ingress-pending")
+            self.verify_identity(self.binding)
+            return foundation
+        except OperationError:
+            raise
+        except Exception:
+            raise OperationError("trusted live ingress foundation is unavailable") from None
 
 
 def qualify_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[str, Any]]) -> dict[str, Any]:

@@ -7,10 +7,9 @@ import json
 from uuid import uuid4
 
 import pytest
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
-
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_image import DIGEST
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def module():
