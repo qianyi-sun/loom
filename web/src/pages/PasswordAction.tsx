@@ -1,8 +1,9 @@
+import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
@@ -25,7 +26,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
   const [confirmPassword, setConfirmPassword] = useState("");
   const isSetup = mode === "setup";
   const lookup = useQuery({
-    queryKey: ["password-action", mode, token],
+    queryKey: queryKeys["password-action"](mode, token),
     queryFn: () => (isSetup ? api.setupLookup(token) : api.resetLookup(token)),
     enabled: token.length > 0,
     retry: false,

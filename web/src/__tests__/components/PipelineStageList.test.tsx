@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 
-import type { PipelineStageRunSummary } from "../../api/client";
+import type { PipelineStageRunSummary } from "../../api";
 import PipelineStageList from "../../components/pipelines/PipelineStageList";
 
 function stage(index: number, overrides: Partial<PipelineStageRunSummary> = {}): PipelineStageRunSummary {
@@ -62,8 +62,10 @@ test("virtualizes large pages, handles focus keys, scrolling, and pagination", (
   render(<PipelineStageList stages={stages} selectedNodeKey={null} stateFilter="" outcomeFilter="" page={2} hasPrevious hasNext onStateFilter={vi.fn()} onOutcomeFilter={vi.fn()} onPrevious={onPrevious} onNext={onNext} onOpen={onOpen} />);
 
   const table = screen.getByRole("table");
-  expect(table).toHaveAttribute("aria-rowcount", "260");
+  expect(table).toHaveAttribute("aria-rowcount", "261");
+  expect(screen.getAllByRole("columnheader")).toHaveLength(8);
   const first = screen.getByRole("row", { name: /bulk shard-0/i });
+  expect(first).toHaveAttribute("aria-rowindex", "2");
   fireEvent.keyDown(first, { key: "ArrowDown" });
   fireEvent.keyDown(first, { key: "ArrowUp" });
   fireEvent.keyDown(first, { key: "Enter" });

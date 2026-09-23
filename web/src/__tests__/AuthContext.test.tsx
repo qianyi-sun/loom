@@ -8,7 +8,7 @@ import {
   apiFetch,
   setCsrfToken,
   setUnauthorizedHandler,
-} from "../api/client";
+} from "../api";
 import { AuthProvider } from "../auth/AuthContext";
 import { useAuth } from "../auth/useAuth";
 import {

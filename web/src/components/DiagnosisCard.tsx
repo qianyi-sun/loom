@@ -85,14 +85,14 @@ export function DiagnosisCard({
         {clusters.length > 0 ? (
           <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
             <div className="font-semibold text-slate-900">Reason clusters</div>
-            <div className="mt-2 overflow-x-auto">
-              <table className="min-w-full text-xs">
+            <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-label="Reason clusters scroll area">
+              <table aria-label="Reason clusters" className="min-w-full text-xs">
                 <thead>
                   <tr className="text-left text-slate-500">
-                    <th className="py-1 pr-3 font-medium">Reason</th>
-                    <th className="py-1 pr-3 font-medium">Count</th>
-                    <th className="py-1 pr-3 font-medium">Affected</th>
-                    <th className="py-1 pr-3 font-medium">Representative</th>
+                    <th scope="col" className="py-1 pr-3 font-medium">Reason</th>
+                    <th scope="col" className="py-1 pr-3 font-medium">Count</th>
+                    <th scope="col" className="py-1 pr-3 font-medium">Affected</th>
+                    <th scope="col" className="py-1 pr-3 font-medium">Representative</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">

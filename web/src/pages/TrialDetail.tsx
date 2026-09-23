@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialProgress";
 /**
  * Per-trial detail: header card with summary stats, trajectory
@@ -9,7 +10,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -527,7 +528,7 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
   const [fallbackDone, setFallbackDone] = useState(false);
 
   const fallback = useQuery({
-    queryKey: ["trajectory-fallback", trialId, fallbackPages.length],
+    queryKey: queryKeys["trajectory-fallback"](trialId, fallbackPages.length),
     queryFn: async () => {
       const result = await api.getTrajectoryPage(trialId, fallbackCursor, 200);
       setFallbackPages((prev) => [...prev, result.events]);
@@ -609,7 +610,7 @@ export default function TrialDetail(): JSX.Element {
   });
 
   const trial = useQuery({
-    queryKey: ["trial", trialId],
+    queryKey: queryKeys["trial"](trialId),
     queryFn: () => api.getTrial(trialId!),
     enabled: !!trialId,
     refetchInterval: (q) => {

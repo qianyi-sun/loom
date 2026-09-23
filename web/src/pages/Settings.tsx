@@ -1,10 +1,11 @@
+import { queryKeys } from "../api/queryKeys";
 /** Account onboarding and team settings. */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 
-import { api, type ApiTokenEntry } from "../api/client";
+import { api, type ApiTokenEntry } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -61,13 +62,13 @@ function TeamMembers({
     return <EmptyState label="No browser users have joined this team yet." />;
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-slate-200 text-sm">
+    <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Team members scroll area">
+      <table aria-label="Team members" className="min-w-full divide-y divide-slate-200 text-sm">
         <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
           <tr>
-            <th className="px-4 py-3 font-semibold">Member</th>
-            <th className="px-4 py-3 font-semibold">Role</th>
-            <th className="px-4 py-3 font-semibold">Joined</th>
+            <th scope="col" className="px-4 py-3 font-semibold">Member</th>
+            <th scope="col" className="px-4 py-3 font-semibold">Role</th>
+            <th scope="col" className="px-4 py-3 font-semibold">Joined</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 bg-white">
@@ -112,13 +113,13 @@ export default function Settings(): JSX.Element {
   const canManageTeam = isAdmin || currentTeam?.role === "owner";
 
   const tokens = useQuery({
-    queryKey: ["tokens"],
+    queryKey: queryKeys["tokens"](),
     queryFn: () => api.listTokens(),
     enabled: isAuthenticated && canManageTokens,
     retry: false,
   });
   const teamDetail = useQuery({
-    queryKey: ["team", currentTeamId],
+    queryKey: queryKeys["team"](currentTeamId),
     queryFn: () => api.getTeam(currentTeamId ?? ""),
     enabled: isAuthenticated && currentTeamId !== null,
     retry: false,
@@ -127,16 +128,16 @@ export default function Settings(): JSX.Element {
   const switchTeamMutation = useMutation({
     mutationFn: (teamId: string) => switchTeam(teamId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["team"] });
-      queryClient.invalidateQueries({ queryKey: ["tokens"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys["team"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["tokens"]() });
     },
   });
 
   const revoke = useMutation({
     mutationFn: (prefix: string) => api.revokeToken(prefix),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["tokens"] });
-      queryClient.invalidateQueries({ queryKey: ["api-tokens"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys["tokens"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["api-tokens"]() });
     },
   });
 
@@ -331,17 +332,17 @@ export default function Settings(): JSX.Element {
               tokens.data.items.length === 0 ? (
                 <EmptyState label="No API tokens." />
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="API tokens scroll area">
+                  <table aria-label="API tokens" className="min-w-full divide-y divide-slate-200 text-sm">
                     <thead>
                       <tr className="bg-slate-50/50">
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Name</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Prefix</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Scopes</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Issued</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Expires</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Status</th>
-                        <th className="px-4 py-3" />
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Name</th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Prefix</th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Scopes</th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Issued</th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Expires</th>
+                        <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">Status</th>
+                        <th scope="col" className="px-4 py-3" />
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">

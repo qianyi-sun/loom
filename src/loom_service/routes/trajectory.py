@@ -53,6 +53,7 @@ from loom.db.schema import Trial, TrialEvent
 from loom.trajectory.object_identity import resolve_trajectory_object_key
 from loom_listen.metrics import PUSH_MODE_GAUGE as _PUSH_MODE_GAUGE
 from loom_listen.self_test import notify_round_trip
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import (
     require_scope,
     require_team_or_admin,
@@ -213,7 +214,7 @@ def _postgres_events_download_response(
     )
 
 
-@router.get("/trials/{trial_id}/trajectory")
+@router.get("/trials/{trial_id}/trajectory", response_model=wire.TrajectoryPage, response_model_exclude_unset=True)
 async def list_events(
     request: Request,
     sc: SessionAndCtx,

@@ -21,12 +21,13 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from loom_service import wire_responses as wire
 from loom_service.dependencies import SessionAndCtx
 
 router = APIRouter()
 
 
-@router.get("/local-servers")
+@router.get("/local-servers", response_model=wire.GetLocalServersResponse, response_model_exclude_unset=True)
 async def list_local_servers(
     request: Request,
     sc: SessionAndCtx,

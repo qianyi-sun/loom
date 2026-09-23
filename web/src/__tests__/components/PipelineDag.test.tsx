@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { vi } from "vitest";
 
-import type { PipelineNodeTopology, PipelineRunDetail, PipelineStageRunSummary } from "../../api/client";
+import type { PipelineNodeTopology, PipelineRunDetail, PipelineStageRunSummary } from "../../api";
 import PipelineDag from "../../components/pipelines/PipelineDag";
 
 function stage(overrides: Partial<PipelineStageRunSummary>): PipelineStageRunSummary { return { id: crypto.randomUUID(), node_key: "prepare", shard_key: "one", node_kind: "container", topological_level: 0, upstream_node_keys: [], state: "succeeded", domain_outcome: "opaque", reason_code: null, attempt_count: 1, resource_profile_name: "cpu@1", resource_class: "cpu", retry_allowed: false, retry_ineligible_reason: "stage_not_failed", ...overrides }; }

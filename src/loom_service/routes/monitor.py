@@ -19,6 +19,7 @@ from loom_control_plane.execution_capacity import fetch_execution_capacity_statu
 from loom_control_plane.execution_resource_calibration import (
     fetch_execution_resource_profile_status,
 )
+from loom_service import wire_responses as wire
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.monitor_filters import (
@@ -393,7 +394,7 @@ def _resource_trials_stmt() -> Any:
     )
 
 
-@router.get("/monitor/summary")
+@router.get("/monitor/summary", response_model=wire.MonitorSummary, response_model_exclude_unset=True)
 async def get_monitor_summary(
     response: Response,
     sc: SessionAndCtx,
@@ -560,7 +561,7 @@ async def get_monitor_summary(
     }
 
 
-@router.get("/monitor/placement")
+@router.get("/monitor/placement", response_model=wire.MonitorPlacement, response_model_exclude_unset=True)
 async def get_monitor_placement(
     response: Response, sc: SessionAndCtx, target_id: str,
     team_id: UUID | None = None, batch_id: UUID | None = None,

@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Rate-cards browse + publish.
  *
@@ -13,7 +14,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -98,16 +99,16 @@ function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
                 No model pricing entries are published in this card.
               </p>
             ) : (
-              <div className="mt-3 overflow-x-auto">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <div className="mt-3 overflow-x-auto" tabIndex={0} role="region" aria-label="Model prices scroll area">
+                <table aria-label="Model prices" className="min-w-full divide-y divide-slate-200 text-sm">
                   <thead>
                     <tr className="text-left text-xs uppercase tracking-wider text-slate-500">
-                      <th className="py-2 pr-4 font-medium">Provider</th>
-                      <th className="py-2 pr-4 font-medium">Model</th>
-                      <th className="py-2 pr-4 font-medium">Input</th>
-                      <th className="py-2 pr-4 font-medium">Output</th>
-                      <th className="py-2 pr-4 font-medium">Cache read</th>
-                      <th className="py-2 pr-4 font-medium">Cache write</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Provider</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Model</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Input</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Output</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Cache read</th>
+                      <th scope="col" className="py-2 pr-4 font-medium">Cache write</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -151,13 +152,13 @@ export default function RateCardsAdmin(): JSX.Element {
 
   const queryClient = useQueryClient();
   const list = useQuery({
-    queryKey: ["rate-cards"],
+    queryKey: queryKeys["rate-cards"](),
     queryFn: () => api.listRateCards(),
   });
   const create = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.createRateCard(body),
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["rate-cards"] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys["rate-cards"]() }),
   });
 
   const submit = (): void => {

@@ -25,7 +25,7 @@ export function TagFiltersCard({
 }): JSX.Element | null {
   if (loading && schema.length === 0) {
     return (
-      <p className="text-xs text-slate-500">Loading tag schema…</p>
+      <p className="text-xs text-slate-500">Loading available tags…</p>
     );
   }
   if (schema.length === 0) return null;

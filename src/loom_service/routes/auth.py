@@ -30,6 +30,7 @@ from loom.db.schema import (
 )
 from loom.security.redaction import redact_text
 from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import (
     actor_from_context,
     hash_optional,
@@ -412,7 +413,7 @@ async def public_teams(request: Request) -> dict[str, list[dict[str, str]]]:
     return {"items": [{"id": str(team.id), "name": team.name} for team in rows]}
 
 
-@router.post("/registration-requests", status_code=202)
+@router.post("/registration-requests", status_code=202, response_model=wire.UserRegistrationEntry, response_model_exclude_unset=True)
 async def request_registration(
     request: Request,
     payload: _RegistrationRequestReq,
@@ -575,7 +576,7 @@ async def list_registration_requests(
     return {"items": [_serialize_registration_request(row) for row in rows]}
 
 
-@admin_router.post("/registration-requests/{registration_id}/approve")
+@admin_router.post("/registration-requests/{registration_id}/approve", response_model=wire.AccountActionApproval, response_model_exclude_unset=True)
 async def approve_registration_request(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -659,7 +660,7 @@ async def approve_registration_request(
     }
 
 
-@admin_router.post("/registration-requests/{registration_id}/reject")
+@admin_router.post("/registration-requests/{registration_id}/reject", response_model=wire.UserRegistrationEntry, response_model_exclude_unset=True)
 async def reject_registration_request(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -744,7 +745,7 @@ async def list_password_reset_requests(
     return {"items": [_serialize_password_reset_request(row) for row in rows]}
 
 
-@admin_router.post("/password-reset-requests/{reset_request_id}/approve")
+@admin_router.post("/password-reset-requests/{reset_request_id}/approve", response_model=wire.AccountActionApproval, response_model_exclude_unset=True)
 async def approve_password_reset_request(
     request: Request,
     sc: AdminSessionAndCtx,
@@ -802,7 +803,7 @@ async def approve_password_reset_request(
     }
 
 
-@admin_router.post("/password-reset-requests/{reset_request_id}/reject")
+@admin_router.post("/password-reset-requests/{reset_request_id}/reject", response_model=wire.PasswordResetRequestEntry, response_model_exclude_unset=True)
 async def reject_password_reset_request(
     request: Request,
     sc: AdminSessionAndCtx,

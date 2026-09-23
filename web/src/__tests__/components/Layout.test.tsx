@@ -34,6 +34,8 @@ describe("Layout", () => {
     );
     expect(screen.getAllByRole("main")).toHaveLength(1);
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("link", { name: "Skip to main content" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Skip to main content" })).toHaveAttribute(
       "href",
       "#main-content",
@@ -237,6 +239,8 @@ describe("Layout", () => {
     expect(identityContext).toHaveTextContent("Owner / EAI");
     expect(identityContext).toHaveTextContent("owner");
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("link", { name: "Skip to main content" })).toBeInTheDocument();
   });
 
   it("gives the signed-out settings page a wide public onboarding shell", async () => {
@@ -255,6 +259,8 @@ describe("Layout", () => {
     expect(shell).toHaveClass("max-w-6xl");
     expect(shell).not.toHaveClass("max-w-md");
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("link", { name: "Skip to main content" })).toBeInTheDocument();
   });
 
   it("keeps invite acceptance reachable before sign-in", async () => {

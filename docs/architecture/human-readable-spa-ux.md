@@ -99,3 +99,34 @@ The cross-layer accessibility contract also runs through:
 ```bash
 uv run pytest -q tests/ops/test_frontend_accessibility_contract.py
 ```
+
+## Navigation, filters and table access
+
+Every normal shell includes a keyboard skip link that focuses `main`, as do
+loading/recovery shells. `RouteContext` supplies titles and breadcrumb links
+using the router basename. Task sets have a primary-navigation entry.
+
+Run Library keeps search visible, debounces it for 300 ms, and puts the dense
+filters behind native `details`. Removable chips and Clear filters preserve
+scope/team context; URL changes, refresh and back/forward remain authoritative.
+The retained Pipeline artifact mode preserves its recipe/result filters.
+
+Native tables have names and column headers. Horizontal table containers are
+named keyboard-focusable regions, including tables with no row actions.
+Virtual Pipeline stages retain a header row, total row count including that
+header and absolute data row indexes. Decorative card separators stay subtle;
+form controls and secondary buttons use a contrasting slate-500 boundary.
+Focus outlines apply to every focusable element, including disclosures and
+scroll regions. Reduced-motion preference suppresses transitions and animation.
+
+`LoadingState` owns a polite status and `ErrorState` owns an alert by default.
+Callers with their own live region pass `announce={false}`: authentication and
+destructive-dialog alerts, plus paginated Run Library/audit loading updates.
+Status pills remain visible textual labels without a live region, so polling
+rows does not repeatedly announce unchanged status.
+
+Measured token pairs: slate-500 on white is 4.76:1 and on slate-50 is 4.55:1;
+indigo-600 on white is 6.29:1 and on slate-50 is 6.01:1. The field-boundary and
+text assertions read computed browser colors; axe covers rendered foreground
+pairs and textual status labels. These measurements are not a blanket claim
+about every state or third-party artifact viewer.

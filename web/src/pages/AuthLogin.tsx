@@ -1,10 +1,11 @@
+import { queryKeys } from "../api/queryKeys";
 /** Signed-out onboarding: sign-in, account request, password-reset request (#775). */
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
@@ -31,7 +32,7 @@ export default function AuthLogin(): JSX.Element {
   const [resetUsername, setResetUsername] = useState("");
 
   const publicTeams = useQuery({
-    queryKey: ["public-teams"],
+    queryKey: queryKeys["public-teams"](),
     queryFn: () => api.publicTeams(),
     enabled: !isAuthenticated,
   });
@@ -142,7 +143,7 @@ export default function AuthLogin(): JSX.Element {
             </form>
             {signIn.isError ? (
               <div role="alert">
-                <ErrorState error={SIGN_IN_FAILURE} />
+                <ErrorState announce={false} error={SIGN_IN_FAILURE} />
               </div>
             ) : null}
           </Card.Body>
@@ -231,7 +232,7 @@ export default function AuthLogin(): JSX.Element {
                 </p>
               ) : null}
               {requestAccess.isError ? (
-                <ErrorState error={requestAccess.error} />
+                <ErrorState announce={false} error={requestAccess.error} />
               ) : null}
             </Card.Body>
           </Card>
@@ -277,7 +278,7 @@ export default function AuthLogin(): JSX.Element {
                 </p>
               ) : null}
               {requestReset.isError ? (
-                <ErrorState error={requestReset.error} />
+                <ErrorState announce={false} error={requestReset.error} />
               ) : null}
             </Card.Body>
           </Card>

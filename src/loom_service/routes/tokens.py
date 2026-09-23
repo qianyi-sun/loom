@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom.db.schema import Token
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import (
     is_admin,
@@ -184,7 +185,7 @@ def _created_by_actor(ctx: AuthContext, admin_actor: str | None) -> str | None:
     return f"{ctx.type}:{ctx.token_hash.hex()[:8]}"
 
 
-@router.get("/tokens")
+@router.get("/tokens", response_model=wire.TokenList, response_model_exclude_unset=True)
 async def list_tokens(
     request: Request,
     sc: SessionAndCtx,
@@ -197,7 +198,7 @@ async def list_tokens(
     return {"items": [_serialize(r) for r in rows]}
 
 
-@router.post("/tokens", status_code=201)
+@router.post("/tokens", status_code=201, response_model=wire.PostTokensResponse, response_model_exclude_unset=True)
 async def create_token(
     request: Request,
     sc: SessionAndCtx,
@@ -335,7 +336,7 @@ async def revoke_token(
     await s.commit()
 
 
-@router.post("/tokens/{prefix}/rotate")
+@router.post("/tokens/{prefix}/rotate", response_model=wire.PostTokensPrefixRotateResponse, response_model_exclude_unset=True)
 async def rotate_token(
     request: Request,
     sc: SessionAndCtx,

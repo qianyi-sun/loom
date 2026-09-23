@@ -6,7 +6,7 @@ import {
   api,
   type PipelineExecutionAttemptList,
   type PipelineLivePreviewMetadata,
-} from "../../../api/client";
+} from "../../../api";
 import BehaviorRolloutLivePreview from "../../../components/artifacts/BehaviorRolloutLivePreview";
 
 type Attempt = PipelineExecutionAttemptList["items"][number];

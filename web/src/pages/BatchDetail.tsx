@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 import { ProgressSummary } from "../components/TrialProgress";
 /**
  * Batch detail — one batch's aggregate stats + per-state trial
@@ -8,7 +9,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import type { components } from "../api/schema";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
 import { Button } from "../components/Button";
@@ -78,11 +79,11 @@ function TaskResourceRequests({
       <p className="mt-2 text-xs text-slate-600">
         Reservations per task execution, shared across its controller and sandboxes. These are scheduling requests, not measured usage or task limits. Repeated samples each reserve their own resources.
       </p>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full text-left text-xs">
+      <div className="mt-2 overflow-x-auto" tabIndex={0} role="region" aria-label="Task resource requests scroll area">
+        <table aria-label="Task resource requests" className="w-full text-left text-xs">
           <thead><tr>
-            <th className="p-2">Task</th><th className="p-2">CPU</th>
-            <th className="p-2">Memory (MiB)</th><th className="p-2">Temporary disk (MiB)</th>
+            <th scope="col" className="p-2">Task</th><th scope="col" className="p-2">CPU</th>
+            <th scope="col" className="p-2">Memory (MiB)</th><th scope="col" className="p-2">Temporary disk (MiB)</th>
           </tr></thead>
           <tbody>{tasks.map(([taskId, profile]) => {
             const roles = Object.values(profile.requests);
@@ -119,7 +120,7 @@ export default function BatchDetail(): JSX.Element {
   });
 
   const query = useQuery({
-    queryKey: ["batch", batchId],
+    queryKey: queryKeys["batch"](batchId),
     queryFn: () => api.getBatch(batchId!),
     enabled: !!batchId,
     refetchInterval: (q) => {
@@ -130,7 +131,7 @@ export default function BatchDetail(): JSX.Element {
   });
 
   const diagnosticsQuery = useQuery({
-    queryKey: ["batch-diagnostics", batchId],
+    queryKey: queryKeys["batch-diagnostics"](batchId),
     queryFn: async () => {
       const [diagnosis, debugEvidence] = await Promise.all([
         api.getBatchDiagnosis(batchId!),
@@ -144,14 +145,14 @@ export default function BatchDetail(): JSX.Element {
   const cancel = useMutation({
     mutationFn: () => api.cancelBatch(batchId!),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["batch", batchId] });
-      queryClient.invalidateQueries({ queryKey: ["batches"] });
-      queryClient.invalidateQueries({ queryKey: ["trials"] });
-      queryClient.invalidateQueries({ queryKey: ["overview"] });
-      queryClient.invalidateQueries({ queryKey: ["monitor-summary"] });
-      queryClient.invalidateQueries({ queryKey: ["run-library"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys["batch"](batchId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys["batches"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["trials"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["overview"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["monitor-summary"]() });
+      queryClient.invalidateQueries({ queryKey: queryKeys["run-library"]() });
       queryClient.invalidateQueries({
-        queryKey: ["run-library-batch", batchId],
+        queryKey: queryKeys["run-library-batch"](batchId),
       });
     },
   });
@@ -164,7 +165,7 @@ export default function BatchDetail(): JSX.Element {
   const rerunFailed = useMutation({
     mutationFn: () => api.rerunFailedBatch(batchId!),
     onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["batch", batchId] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys["batch"](batchId) }),
   });
 
   if (!batchId) {
@@ -556,23 +557,23 @@ export default function BatchDetail(): JSX.Element {
             description="Per-benchmark score and platform failure counts for this multi-benchmark batch."
           />
           <Card.Body className="p-0">
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Benchmark results scroll area">
+              <table aria-label="Benchmark results" className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
                   <tr className="bg-slate-50/50">
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Benchmark
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Score
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Completed
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Platform failures
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Trial states
                     </th>
                   </tr>
@@ -681,14 +682,14 @@ export default function BatchDetail(): JSX.Element {
             </span>
           </summary>
           <Card.Body className="p-0">
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Trial states scroll area">
+              <table aria-label="Trial states" className="min-w-full divide-y divide-slate-200 text-sm">
                 <thead>
                   <tr className="bg-slate-50/50">
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       State
                     </th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Count
                     </th>
                   </tr>

@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Tasks browse. Plan 24 redesign:
  *
@@ -13,7 +14,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -64,12 +65,12 @@ export default function Tasks(): JSX.Element {
   const [submitTaskId, setSubmitTaskId] = useState<string | null>(null);
 
   const benchmarks = useQuery({
-    queryKey: ["benchmarks"],
+    queryKey: queryKeys["benchmarks"](),
     queryFn: () => api.listBenchmarks({ limit: "200" }),
   });
 
   const query = useQuery({
-    queryKey: ["tasks", benchmark, search, page.current],
+    queryKey: queryKeys["tasks"](benchmark, search, page.current),
     queryFn: () =>
       api.listTasks({
         benchmark_id: benchmark || undefined,

@@ -4,7 +4,7 @@ import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
 
-import { api, type PipelineStageRunSummary } from "../../api/client";
+import { api, type PipelineStageRunSummary } from "../../api";
 import PipelineStageDrawer from "../../components/pipelines/PipelineStageDrawer";
 
 const stage: PipelineStageRunSummary = {

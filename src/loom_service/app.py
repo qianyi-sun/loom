@@ -144,6 +144,35 @@ async def _assert_schema_startup(engine: AsyncEngine) -> int:
     return await assert_schema_at_head(engine, db_url_env_var="LOOM_SVC_DB_URL")
 
 
+def register_api_routes(
+    app: FastAPI, *, management: bool = False, include_local_execution: bool = True,
+) -> None:
+    """Share route registration with credential-free offline OpenAPI export."""
+    app.include_router(management_health.router if management else health.router, prefix="/api/v1")
+    app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(auth.admin_router, prefix="/api/v1")
+    app.include_router(invites.router, prefix="/api/v1")
+    app.include_router(tokens.router, prefix="/api/v1")
+    app.include_router(admin_audit.router, prefix="/api/v1")
+    app.include_router(platform_admins.router, prefix="/api/v1")
+    app.include_router(team_registrations.router, prefix="/api/v1")
+    app.include_router(teams.router, prefix="/api/v1")
+    if management:
+        app.include_router(environments.router, prefix="/api/v1")
+    if not management:
+        app.include_router(managed_child.router, prefix="/api/v1")
+        for workload_router in (
+            trials.router, trajectory.router, atif.router, tasks.router, benchmarks.router,
+            tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
+            run_library.router, rate_cards.router, usage.router, agents.router, models.router,
+            monitor.router, overview.router, pipeline.router, backends.router, local_servers.router,
+            provider_connections.router, secret_store_admin.router,
+        ):
+            app.include_router(workload_router, prefix="/api/v1")
+        if include_local_execution:
+            app.include_router(pipeline.local_execution_router, prefix="/api/v1")
+
+
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     management = settings.service_mode == "management"
     child_registration = load_child_registration(settings)
@@ -416,29 +445,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             ),
         }
 
-    app.include_router(management_health.router if management else health.router, prefix="/api/v1")
-    app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(auth.admin_router, prefix="/api/v1")
-    app.include_router(invites.router, prefix="/api/v1")
-    app.include_router(tokens.router, prefix="/api/v1")
-    app.include_router(admin_audit.router, prefix="/api/v1")
-    app.include_router(platform_admins.router, prefix="/api/v1")
-    app.include_router(team_registrations.router, prefix="/api/v1")
-    app.include_router(teams.router, prefix="/api/v1")
-    if management:
-        app.include_router(environments.router, prefix="/api/v1")
-    if not management:
-        app.include_router(managed_child.router, prefix="/api/v1")
-        for workload_router in (
-            trials.router, trajectory.router, atif.router, tasks.router, benchmarks.router,
-            tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
-            run_library.router, rate_cards.router, usage.router, agents.router, models.router,
-            monitor.router, overview.router, pipeline.router, backends.router, local_servers.router,
-            provider_connections.router, secret_store_admin.router,
-        ):
-            app.include_router(workload_router, prefix="/api/v1")
-        if local_execution_enabled():
-            app.include_router(pipeline.local_execution_router, prefix="/api/v1")
+    register_api_routes(
+        app, management=management, include_local_execution=local_execution_enabled(),
+    )
 
     @app.middleware("http")
     async def _staging_admin_validation_session_middleware(  # type: ignore[no-untyped-def]

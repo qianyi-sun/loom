@@ -5,7 +5,7 @@ import {
   api,
   type PipelineExecutionAttemptList,
   type PipelineLivePreviewMetadata,
-} from "../../api/client";
+} from "../../api";
 
 const MIN_POLL_MS = 500;
 const MIN_STALLED_MS = 5_000;

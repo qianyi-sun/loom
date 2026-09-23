@@ -1,8 +1,10 @@
+import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { api, type TaskSetDetailResponse } from "../api/client";
+import { api } from "../api";
+import type { TaskSetDetailView } from "../api/catalogViews";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
@@ -37,7 +39,7 @@ function statusVariant(status: string): StatusVariant {
 
 const ACTIVE_STATUSES = new Set(["materializing"]);
 
-function capabilityLabel(ts: TaskSetDetailResponse): string {
+function capabilityLabel(ts: TaskSetDetailView): string {
   if (ts.evaluation_ready && ts.intents.includes("trajectory_generation")) {
     return "both";
   }
@@ -69,11 +71,11 @@ export default function TaskSetDetail(): JSX.Element {
   });
 
   const query = useQuery({
-    queryKey: ["taskSets", id],
+    queryKey: queryKeys["taskSets"](id),
     queryFn: () => api.getTaskSet(id),
     enabled: validId,
     refetchInterval: (q) => {
-      const data = q.state.data as TaskSetDetailResponse | undefined;
+      const data = q.state.data as TaskSetDetailView | undefined;
       if (!data || !ACTIVE_STATUSES.has(data.status)) return false;
       return polling.refetchInterval;
     },
@@ -82,18 +84,18 @@ export default function TaskSetDetail(): JSX.Element {
   const rebuild = useMutation({
     mutationFn: () => api.rebuildTaskSet(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["taskSets", id] });
-      queryClient.invalidateQueries({ queryKey: ["taskSets"] });
+      queryClient.invalidateQueries({ queryKey: queryKeys["taskSets"](id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys["taskSets"]() });
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteTaskSet(id),
     onSuccess: () => {
-      queryClient.removeQueries({ queryKey: ["taskSets", id] });
-      queryClient.invalidateQueries({ queryKey: ["taskSets"], exact: true });
+      queryClient.removeQueries({ queryKey: queryKeys["taskSets"](id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys["taskSets"](), exact: true });
       queryClient.invalidateQueries({
-        queryKey: ["taskSets", "evaluation-ready"],
+        queryKey: queryKeys["taskSets"]("evaluation-ready"),
       });
     },
   });
@@ -144,7 +146,7 @@ export default function TaskSetDetail(): JSX.Element {
     );
   }
 
-  const ts = query.data as TaskSetDetailResponse;
+  const ts = query.data as TaskSetDetailView;
   if (!ts) return <LoadingState />;
 
   return (
@@ -245,7 +247,7 @@ export default function TaskSetDetail(): JSX.Element {
   );
 }
 
-function OverviewPanel({ ts }: { ts: TaskSetDetailResponse }): JSX.Element {
+function OverviewPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
   return (
     <Card>
       <Card.Body className="space-y-4">
@@ -311,7 +313,7 @@ function OverviewPanel({ ts }: { ts: TaskSetDetailResponse }): JSX.Element {
   );
 }
 
-function ErrorsPanel({ ts }: { ts: TaskSetDetailResponse }): JSX.Element {
+function ErrorsPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
   if (ts.error_summary.length === 0) {
     return (
       <Card>
@@ -327,16 +329,16 @@ function ErrorsPanel({ ts }: { ts: TaskSetDetailResponse }): JSX.Element {
   return (
     <Card>
       <Card.Body className="p-0">
-        <table className="min-w-full divide-y divide-slate-200 text-sm">
+        <table aria-label="Task import errors" className="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">
-              <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+              <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                 Instance
               </th>
-              <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+              <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                 Code
               </th>
-              <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
+              <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                 Message
               </th>
             </tr>

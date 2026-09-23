@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from loom.auth import AuthContext
 from loom.db.schema import Team, TeamInvite, TeamMembership, User
 from loom.system_identities import TASKSET_FENCE_CANARY_TEAM_ID
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import require_admin_actor, write_admin_audit_event
 from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
@@ -233,7 +234,7 @@ def _email_matches_invite(invite: TeamInvite, email: str) -> bool:
     return False
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=wire.InviteReveal, response_model_exclude_unset=True)
 async def create_invite(
     request: Request,
     payload: _CreateInviteReq,
@@ -340,7 +341,7 @@ async def list_invites(
     return {"items": items}
 
 
-@router.get("/lookup")
+@router.get("/lookup", response_model=wire.InviteLookup, response_model_exclude_unset=True)
 async def lookup_invite(
     request: Request,
     code: str = Query(min_length=16, max_length=256),
@@ -488,7 +489,7 @@ async def accept_invite(
     return body
 
 
-@router.post("/{invite_id}/revoke")
+@router.post("/{invite_id}/revoke", response_model=wire.InviteEntry, response_model_exclude_unset=True)
 async def revoke_invite(
     request: Request,
     invite_id: UUID,
@@ -529,7 +530,7 @@ async def revoke_invite(
     return _serialize_invite(invite, team=team, now=now)
 
 
-@router.post("/{invite_id}/resend")
+@router.post("/{invite_id}/resend", response_model=wire.InviteReveal, response_model_exclude_unset=True)
 async def resend_invite(
     request: Request,
     invite_id: UUID,

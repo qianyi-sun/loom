@@ -21,7 +21,10 @@ const routes: Record<BrowserRole, string[]> = {
     "/",
     "/batches/new",
     "/monitor",
+    "/monitor?view=trials",
+    "/monitor?view=resources",
     "/library",
+    "/task-sets/task-set-1",
     "/providers",
     "/task-sets",
     "/settings",
@@ -88,6 +91,18 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
         locator: "main, [data-testid='public-onboarding-shell']",
       });
 
+      await expect(page).toHaveTitle(/.+ · Loom$/);
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.keyboard.press("Tab");
+      await expect(page.getByRole("link", { name: "Skip to main content" })).toBeFocused();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#main-content")).toBeFocused();
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      const transition = await page.getByRole("link", { name: "Skip to main content" }).evaluate(el => getComputedStyle(el).transitionDuration);
+      expect(transition.split(",").every(value => Number.parseFloat(value) <= 0.00001)).toBe(true);
+      if (role !== "logged-out" && path !== "/") {
+        await expect(page.getByRole("navigation", { name: "Breadcrumb" }).getByRole("link", { name: "Home", exact: true })).toHaveAttribute("href", browserHarness.routePrefix);
+      }
       await page.addStyleTag({
         content: "*, *::before, *::after { animation: none !important; transition: none !important; }",
       });

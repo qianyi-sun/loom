@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * /providers/:id — tab shell + Overview (inline) + Settings (inline).
  * Models tab implemented in T6.
@@ -6,7 +7,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import CommandSnippet from "../components/CommandSnippet";
@@ -62,7 +63,7 @@ export default function ProviderDetail(): JSX.Element {
     setSearchParams(next);
   };
   const { data, isLoading, error } = useQuery({
-    queryKey: ["providers", id],
+    queryKey: queryKeys["providers"](id),
     queryFn: () => api.getProviderConnection(id),
     enabled: !!id,
   });

@@ -2,7 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { api, type ApiError, type TaskSetSubmitResponse } from "../api/client";
+import { api, type ApiError, type TaskSetSubmitResponse } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import DocsCallout from "../components/DocsCallout";

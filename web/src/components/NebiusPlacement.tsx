@@ -1,7 +1,8 @@
+import { queryKeys } from "../api/queryKeys";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router-dom";
-import { api } from "../api/client";
+import { api } from "../api";
 import type { components } from "../api/schema";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import ErrorState from "./ErrorState";
@@ -33,7 +34,7 @@ export function NebiusPlacement({ targetId }: { targetId?: string }): JSX.Elemen
   for (const key of ["team_id", "batch_id", "q", "benchmark_id", "agent_name", "model_provider",
     "model_name", "provider_connection_id", "provider_model_id"]) scope[key] = params.get(key) ?? undefined;
   const query = useQuery({
-    queryKey: ["monitor-placement", scope], queryFn: () => api.getMonitorPlacement(scope),
+    queryKey: queryKeys["monitor-placement"](scope), queryFn: () => api.getMonitorPlacement(scope),
     enabled: expanded && Boolean(targetId), refetchInterval: expanded ? polling.refetchInterval : false,
   });
   if (!targetId) return null;

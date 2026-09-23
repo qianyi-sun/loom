@@ -47,6 +47,7 @@ from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
 )
+from loom_service import wire_responses as wire
 from loom_service.agent_catalog import (
     known_names,
     validate_agent_model_compat,
@@ -351,7 +352,7 @@ def _trial_row(
     return out
 
 
-@router.get("/trials")
+@router.get("/trials", response_model=wire.TrialList, response_model_exclude_unset=True)
 async def list_trials(
     request: Request,
     sc: SessionAndCtx,
@@ -640,7 +641,7 @@ def _projected_service_execution_artifacts(
     return out
 
 
-@router.get("/trials/{trial_id}")
+@router.get("/trials/{trial_id}", response_model=wire.TrialDetail, response_model_exclude_unset=True)
 async def get_trial(
     request: Request,
     sc: SessionAndCtx,
@@ -1042,7 +1043,7 @@ async def get_trial_resource_usage(
     return resource_usage_response(rows)
 
 
-@router.get("/trials/{trial_id}/debug")
+@router.get("/trials/{trial_id}/debug", response_model=wire.DebugEvidence, response_model_exclude_unset=True)
 async def get_trial_debug(
     request: Request,
     sc: SessionAndCtx,
@@ -1090,7 +1091,7 @@ async def get_trial_debug(
     )
 
 
-@router.get("/trials/{trial_id}/diagnosis")
+@router.get("/trials/{trial_id}/diagnosis", response_model=wire.DiagnosisReport, response_model_exclude_unset=True)
 async def get_trial_diagnosis(
     request: Request,
     sc: SessionAndCtx,

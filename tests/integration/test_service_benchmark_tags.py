@@ -204,3 +204,31 @@ async def test_unauthenticated_401(
     ) as ac:
         r = await ac.get("/api/v1/benchmarks/aime-22/tags")
     assert r.status_code == 401
+
+
+@pytest.mark.parametrize("ids,status", [
+    (["aime-22", "humaneval", "aime-22"], 200),
+    (["humaneval"], 200),
+    (["aime-22", "missing"], 404),
+])
+async def test_aggregate_tag_discovery(tags_setup, ids, status):
+    app, raw = tags_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        response = await client.post(
+            "/api/v1/benchmarks/discover", json={"benchmark_ids": ids},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+    assert response.status_code == status
+    if status == 200:
+        assert response.json() == {"items": [
+            {"key": "exam", "values": ["I", "II"]},
+            {"key": "problem", "values": ["1", "5"]},
+            {"key": "year", "values": ["2023", "2024"]},
+        ] if "aime-22" in ids else []}
+
+
+async def test_aggregate_tag_discovery_requires_auth(tags_setup):
+    app, _ = tags_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        response = await client.post("/api/v1/benchmarks/discover", json={"benchmark_ids": ["aime-22"]})
+    assert response.status_code == 401

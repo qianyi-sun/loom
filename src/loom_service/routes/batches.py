@@ -72,6 +72,7 @@ from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
 )
+from loom_service import wire_responses as wire
 from loom_service.admin_audit import (
     actor_from_context,
     write_admin_audit_event,
@@ -1689,7 +1690,7 @@ def _reject_required_worker_pools_on_user_batch(raw_body: object) -> None:
     )
 
 
-@router.post("/batches", status_code=201)
+@router.post("/batches", status_code=201, response_model=wire.PostBatchesResponse, response_model_exclude_unset=True)
 async def create_batch(
     request: Request,
     sc: SessionAndCtx,
@@ -1767,7 +1768,7 @@ def _derive_combination_label(combo: Combination) -> str:
     return f"{name}/{combo.agent_model.provider}/{combo.agent_model.name}"
 
 
-@router.get("/batches")
+@router.get("/batches", response_model=wire.BatchList, response_model_exclude_unset=True)
 async def list_batches(
     request: Request,
     sc: SessionAndCtx,
@@ -2312,7 +2313,7 @@ def _result_status_from_trials(trials: Sequence[Any]) -> str | None:
     return "partial_failed"
 
 
-@router.get("/batches/{batch_id}")
+@router.get("/batches/{batch_id}", response_model=wire.BatchDetail, response_model_exclude_unset=True)
 async def get_batch(
     request: Request,
     sc: SessionAndCtx,
@@ -2558,7 +2559,7 @@ async def get_batch_resource_usage(
     return response
 
 
-@router.get("/batches/{batch_id}/debug")
+@router.get("/batches/{batch_id}/debug", response_model=wire.DebugEvidence, response_model_exclude_unset=True)
 async def get_batch_debug(
     request: Request,
     sc: SessionAndCtx,
@@ -2595,7 +2596,7 @@ async def get_batch_debug(
     )
 
 
-@router.get("/batches/{batch_id}/diagnosis")
+@router.get("/batches/{batch_id}/diagnosis", response_model=wire.DiagnosisReport, response_model_exclude_unset=True)
 async def get_batch_diagnosis(
     request: Request,
     sc: SessionAndCtx,
@@ -2636,7 +2637,7 @@ async def get_batch_diagnosis(
     )
 
 
-@router.get("/batches/{batch_id}/rerun-plan")
+@router.get("/batches/{batch_id}/rerun-plan", response_model=wire.RerunPlan, response_model_exclude_unset=True)
 async def get_batch_rerun_plan(
     sc: SessionAndCtx,
     batch_id: UUID,
@@ -2697,7 +2698,7 @@ async def get_batch_rerun_plan(
     )
 
 
-@router.post("/batches/{batch_id}/rerun-failed", status_code=201)
+@router.post("/batches/{batch_id}/rerun-failed", status_code=201, response_model=wire.PostBatchesIdRerunFailedResponse, response_model_exclude_unset=True)
 async def rerun_failed_batch(
     request: Request,
     sc: SessionAndCtx,
@@ -2954,7 +2955,7 @@ async def rerun_failed_batch(
     }
 
 
-@router.post("/batches/{batch_id}/cancel")
+@router.post("/batches/{batch_id}/cancel", response_model=wire.PostBatchesIdCancelResponse, response_model_exclude_unset=True)
 async def cancel_batch(
     request: Request,
     sc: SessionAndCtx,

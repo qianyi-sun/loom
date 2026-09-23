@@ -17,7 +17,7 @@ import {
   setCsrfToken,
   setUnauthorizedHandler,
   type AuthMe,
-} from "../api/client";
+} from "../api";
 import {
   createBrowserFailureId,
   reportBrowserFailure,

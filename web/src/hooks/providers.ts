@@ -1,3 +1,4 @@
+import { queryKeys } from "../api/queryKeys";
 /**
  * Provider-connection mutation hooks (#167).
  *
@@ -12,7 +13,7 @@
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { api } from "../api/client";
+import { api } from "../api";
 
 export function useCreateConnection() {
   const qc = useQueryClient();
@@ -20,7 +21,7 @@ export function useCreateConnection() {
     mutationFn: (payload: Parameters<typeof api.createProviderConnection>[0]) =>
       api.createProviderConnection(payload),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"]() });
     },
   });
 }
@@ -31,10 +32,10 @@ export function useEditConnection(id: string) {
     mutationFn: (patch: Parameters<typeof api.updateProviderConnection>[1]) =>
       api.updateProviderConnection(id, patch),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
-      qc.invalidateQueries({ queryKey: ["providers", id] });
-      qc.invalidateQueries({ queryKey: ["provider-connections"] });
-      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](), exact: true });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id) });
+      qc.invalidateQueries({ queryKey: queryKeys["provider-connections"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -45,10 +46,10 @@ export function useRotateConnectionKey(id: string) {
     mutationFn: (newKey: string) =>
       api.updateProviderConnection(id, { api_key: newKey }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
-      qc.invalidateQueries({ queryKey: ["providers", id] });
-      qc.invalidateQueries({ queryKey: ["provider-connections"] });
-      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](), exact: true });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id) });
+      qc.invalidateQueries({ queryKey: queryKeys["provider-connections"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -58,10 +59,10 @@ export function useDeleteConnection() {
   return useMutation({
     mutationFn: (id: string) => api.deleteProviderConnection(id),
     onSuccess: (_void, id) => {
-      qc.removeQueries({ queryKey: ["providers", id] });
-      qc.invalidateQueries({ queryKey: ["providers"], exact: true });
-      qc.invalidateQueries({ queryKey: ["provider-connections"] });
-      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.removeQueries({ queryKey: queryKeys["providers"](id) });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](), exact: true });
+      qc.invalidateQueries({ queryKey: queryKeys["provider-connections"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -71,8 +72,8 @@ export function useTestConnection(id: string) {
   return useMutation({
     mutationFn: () => api.testProviderConnection(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers"] });
-      qc.invalidateQueries({ queryKey: ["providers", id] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"]() });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id) });
     },
   });
 }
@@ -82,7 +83,7 @@ export function useRefreshModels(id: string) {
   return useMutation({
     mutationFn: () => api.refreshProviderConnectionModels(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
     },
   });
 }
@@ -93,8 +94,8 @@ export function usePreflightModel(id: string) {
     mutationFn: (modelId: string) =>
       api.preflightProviderConnectionModel(id, modelId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
-      qc.invalidateQueries({ queryKey: ["models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
+      qc.invalidateQueries({ queryKey: queryKeys["models"]() });
     },
   });
 }
@@ -105,7 +106,7 @@ export function useAddManualModel(id: string) {
     mutationFn: (model: Parameters<typeof api.addProviderConnectionModel>[1]) =>
       api.addProviderConnectionModel(id, model),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
     },
   });
 }
@@ -116,7 +117,7 @@ export function useHideModel(id: string) {
     mutationFn: (modelId: string) =>
       api.hideProviderConnectionModel(id, modelId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
     },
   });
 }
@@ -127,7 +128,7 @@ export function useUnhideModel(id: string) {
     mutationFn: (modelId: string) =>
       api.unhideProviderConnectionModel(id, modelId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["providers", id, "models"] });
+      qc.invalidateQueries({ queryKey: queryKeys["providers"](id, "models") });
     },
   });
 }

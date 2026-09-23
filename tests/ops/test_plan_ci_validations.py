@@ -728,3 +728,9 @@ def test_nebius_scoped_routing_cannot_remove_mixed_path_or_label_requirements():
         labels={"cluster-smoke"}, event_name="pull_request",
     )
     assert plan.selected_heavy_checks() == set(HEAVY_CHECKS)
+
+
+@pytest.mark.parametrize("path", ["src/loom_service/routes/benchmarks.py", "src/loom_service/wire_responses.py", "scripts/export_openapi.py"])
+def test_api_contract_changes_select_frontend_codegen_check(path):
+    plan = plan_validations(changed_paths=[path], labels=set(), event_name="pull_request")
+    assert plan.web_checks

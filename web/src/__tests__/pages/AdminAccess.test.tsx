@@ -51,6 +51,23 @@ describe("AdminAccess", () => {
     vi.restoreAllMocks();
   });
 
+  it("fetches section data only when the section is visible", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+      jsonResponse(String(input).includes("/auth/me") ? platformAdminMe : { items: [] }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<AdminAccess />, { route: "/admin/access" });
+    await screen.findByRole("tab", { name: "Requests" });
+    const requested = (path: string) => fetchSpy.mock.calls.some(([url]) => String(url).includes(path));
+    expect(requested("/invites")).toBe(false);
+    expect(requested("/tokens")).toBe(false);
+    await user.click(screen.getByRole("tab", { name: "API tokens" }));
+    await waitFor(() => expect(requested("/tokens")).toBe(true));
+    expect(requested("/invites")).toBe(false);
+    await user.click(screen.getByRole("tab", { name: "Invites" }));
+    await waitFor(() => expect(requested("/invites")).toBe(true));
+  });
+
   it("reviews registrations and reveals approved invite link once", async () => {
     window.localStorage.setItem("loom_token", "loom_admin_secret");
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(

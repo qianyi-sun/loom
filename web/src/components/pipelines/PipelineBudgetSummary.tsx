@@ -1,4 +1,4 @@
-import type { PipelineRunDetail } from "../../api/client";
+import type { PipelineRunDetail } from "../../api";
 import { formatMicrousd } from "../../lib/pipelinePresentation";
 
 const ROWS = [
@@ -17,9 +17,9 @@ export default function PipelineBudgetSummary({
 }): JSX.Element {
   if (!budget) return <p className="text-sm text-slate-500">Budget ledger unavailable.</p>;
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full text-sm">
-        <thead><tr>{["Budget", "Limit", "Reserved", "Settled", "Remaining"].map((label) => <th key={label} className="px-3 py-2 text-left text-xs uppercase text-slate-500">{label}</th>)}</tr></thead>
+    <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Pipeline budget scroll area">
+      <table aria-label="Pipeline budget" className="min-w-full text-sm">
+        <thead><tr>{["Budget", "Limit", "Reserved", "Settled", "Remaining"].map((label) => <th scope="col" key={label} className="px-3 py-2 text-left text-xs uppercase text-slate-500">{label}</th>)}</tr></thead>
         <tbody>
           {ROWS.map((name) => {
             const row = budget[name];
@@ -27,7 +27,7 @@ export default function PipelineBudgetSummary({
             const value = (amount: number): string => name === "max_provider_cost_usd" ? formatMicrousd(amount) : amount.toLocaleString();
             return (
               <tr key={name} className={invalid ? "bg-red-50 text-red-800" : "border-t border-slate-100"}>
-                <th className="px-3 py-2 text-left font-medium">{name}</th>
+                <th scope="row" className="px-3 py-2 text-left font-medium">{name}</th>
                 <td className="px-3 py-2">{value(row.limit)}</td><td className="px-3 py-2">{value(row.reserved)}</td><td className="px-3 py-2">{value(row.settled)}</td><td className="px-3 py-2">{invalid ? "budget ledger invariant" : value(row.remaining)}</td>
               </tr>
             );

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
-import type { PipelineArtifactDetail } from "../../../api/client";
+import type { PipelineArtifactDetail } from "../../../api";
 import BehaviorRolloutViewer from "../../../components/artifacts/BehaviorRolloutViewer";
 
 const digest = (value: string) => `sha256:${value.repeat(64)}`;

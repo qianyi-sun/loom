@@ -1,7 +1,8 @@
+import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
-import { api } from "../api/client";
+import { api } from "../api";
 import ArtifactRenderer from "../components/artifacts/ArtifactRenderer";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
@@ -9,7 +10,7 @@ import LoadingState from "../components/LoadingState";
 export default function PipelineArtifactDetail(): JSX.Element {
   const { runId, stageRunId, artifactId } = useParams();
   const query = useQuery({
-    queryKey: ["pipeline-artifact", runId, stageRunId, artifactId],
+    queryKey: queryKeys["pipeline-artifact"](runId, stageRunId, artifactId),
     queryFn: ({ signal }) => api.getPipelineArtifact(runId!, stageRunId!, artifactId!, signal),
     enabled: Boolean(runId && stageRunId && artifactId),
   });
@@ -17,11 +18,7 @@ export default function PipelineArtifactDetail(): JSX.Element {
   if (query.isError) return <ErrorState error={query.error} />;
   const artifact = query.data;
   return <div className="space-y-6">
-    <nav aria-label="Breadcrumb" className="text-sm">
-      <Link to="/pipelines" className="text-accent">Pipelines</Link> /{" "}
-      <Link to={`/pipelines/${runId}`} className="text-accent">{runId}</Link> /{" "}
-      <span>{artifact.name}</span>
-    </nav>
+    <Link to={`/pipelines/${runId}`} className="inline-block rounded px-1 py-1 text-sm text-accent">Back to pipeline run</Link>
     <header>
       <h1 className="text-2xl font-bold">{artifact.name}</h1>
       <p>{artifact.artifact_type} · {artifact.stored_size_bytes ?? 0} bytes</p>
