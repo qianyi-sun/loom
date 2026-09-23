@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_ingress_gateway import KubectlControllerAPI, TLSBinding
 
 MARKER = "loom.nebius/ingress-cutover-id"
 
@@ -37,6 +38,18 @@ class CutoverAPI(Protocol):
     def public_probe(self) -> None:
         """Verify exact-IP public management TLS and legacy HTTPS passthrough."""
         ...
+
+
+class KubectlCutoverAPI(KubectlControllerAPI):
+    def __init__(self, kubeconfig: Path, *, binding: TLSBinding, executable: Path, candidate: str):
+        super().__init__(kubeconfig, binding=binding, executable=executable)
+        self.candidate = candidate
+
+    def patch(self, before: dict[str, Any], after: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    def guard(self, action: str, owner: str, candidate: str) -> dict[str, Any]:
+        raise NotImplementedError
 
 
 def _stable(value: dict[str, Any]) -> dict[str, Any]:
