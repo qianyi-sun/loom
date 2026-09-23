@@ -142,3 +142,30 @@ async def test_acl_probe_rejects_symlink_root(acl_drivers, root):
     assert (await agent.exec("mkdir /data/sub && ln -s /data /workspace/link")).return_code == 0
     with pytest.raises(WorkspaceSnapshotError, match="ACL"):
         await require_acl_support(agent, PurePosixPath(root))
+
+
+async def test_acl_capture_accepts_read_only_final_roots(acl_drivers, tmp_path):
+    agent, verifier = acl_drivers
+    for root in ("/workspace", "/data"):
+        changed = await agent.exec(
+            f"printf answer > {root}/file && "
+            f"setfacl -m d:u::rwx,d:g::r-x,d:o::--- {root} && chmod 0555 {root}",
+        )
+        assert changed.return_code == 0, changed.stderr
+    await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier, workdir=PurePosixPath("/workspace"),
+        policy=WorkspaceStagingPolicy((), (), ()), preserve_acls=True,
+    )
+    await export_mutable_paths(
+        agent, (PurePosixPath("/data"),), tmp_path / "mutable",
+        workdir=PurePosixPath("/workspace"), preserve_acls=True,
+    )
+    await import_mutable_paths(
+        verifier, (PurePosixPath("/data"),), tmp_path / "mutable",
+        workdir=PurePosixPath("/workspace"), preserve_acls=True,
+    )
+    for root in ("/workspace", "/data"):
+        assert (await verifier.exec(f"stat -c %a {root}")).stdout.strip() == b"555"
+        assert (await verifier.exec(f"getfacl -cpn {root}")).stdout == (
+            await agent.exec(f"getfacl -cpn {root}")
+        ).stdout
