@@ -35,6 +35,15 @@ warm floor (default zero). It cannot be supplied by feature source. Constructing
 this object validates inputs; it does not provision infrastructure or change the
 native autoscaler's settings.
 
+The optional `generated_postgres_storage_gi` setting selects the database size
+for newly generated environments (a strict integer from 10 to 1024 GiB). Omitted
+or `null` preserves inheritance from `platform_config_json.postgres_storage_gi`.
+The selected size controls the PVC, backup dump/scratch and platform storage
+reservation together. Imported bindings retain their existing configured size.
+Creation records freeze the chosen size and manifests, so a later default change
+does not resize an existing database or alter an idempotent creation replay.
+This setting does not increase the protected platform/storage allowance.
+
 `loom.nebius_environment_render.render_environment` reuses the standalone stack
 templates for a registered child. Each render contains its own PostgreSQL
 StatefulSet/PVC, namespaced credential references, incarnation-derived bucket

@@ -323,6 +323,15 @@ origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
 `cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
 These are explicit projected-file paths, not an ambient operator login.
 
+For new managed databases, set
+`installation.foundation.generated_postgres_storage_gi` explicitly when the
+standalone database's size is inappropriate. The value is an integer from 10 to
+1024 GiB; omitted/`null` keeps the inherited size. For example, `10` selects a
+10 GiB PVC and corresponding backup scratch for each newly generated child,
+without shrinking imported or previously created databases. Account for these
+requests in the separate `platform_budget`, including concurrent backups. This
+is a creation default, not authorization to buy storage or a PVC resize command.
+
 ```bash
 uv run --no-sync python scripts/ops/render_nebius_management.py \
   --deployment /secure/management-deployment.json \
