@@ -132,6 +132,85 @@ def test_snapshot_rejects_entry_below_symlink(
         _validate_workspace_archive(archive, policy)
 
 
+@pytest.mark.parametrize("target", ["/app/data/file", "/app/data/missing", "/app"])
+def test_snapshot_accepts_absolute_link_within_declared_root(
+    tmp_path: Path, policy: WorkspaceStagingPolicy, target: str,
+) -> None:
+    archive = tmp_path / "absolute.tar"
+    _write_archive(archive, [
+        _member("data", tarfile.DIRTYPE),
+        _member("data/file", tarfile.REGTYPE),
+        _member("alias", tarfile.SYMTYPE, link=target),
+    ])
+
+    _validate_workspace_archive(archive, policy, root=PurePosixPath("/app"))
+    with tarfile.open(archive) as stream:
+        assert stream.getmember("alias").linkname == target
+
+
+@pytest.mark.parametrize("target,message", [
+    ("/app-other/file", "escapes workdir"),
+    ("/etc/passwd", "escapes workdir"),
+    ("/app/../outside", "escapes workdir"),
+    ("/app/tests/secret", "private path"),
+    ("/app/tests/../public", "private path"),
+    ("/app/solution", "private path"),
+    ("//app/file", "unsafe target"),
+])
+def test_snapshot_rejects_unsafe_absolute_link(
+    tmp_path: Path, policy: WorkspaceStagingPolicy, target: str, message: str,
+) -> None:
+    archive = tmp_path / "absolute.tar"
+    _write_archive(archive, [_member("alias", tarfile.SYMTYPE, link=target)])
+    with pytest.raises(WorkspaceSnapshotError, match=message):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath("/app"))
+
+
+@pytest.mark.parametrize("prefix", ["", "/app/"])
+@pytest.mark.parametrize("target,message", [
+    ("dir/up/../outside", "escapes workdir"),
+    ("dir/up/tests/secret", "private path"),
+    ("dir/up/tests/../public", "private path"),
+    ("alias", "cycle"),
+])
+def test_snapshot_resolves_links_before_parent_components(
+    tmp_path: Path, policy: WorkspaceStagingPolicy, prefix: str, target: str, message: str,
+) -> None:
+    archive = tmp_path / "chain.tar"
+    _write_archive(archive, [
+        _member("dir", tarfile.DIRTYPE),
+        _member("dir/up", tarfile.SYMTYPE, link=".."),
+        _member("alias", tarfile.SYMTYPE, link=prefix + target),
+    ])
+    with pytest.raises(WorkspaceSnapshotError, match=message):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath("/app"))
+
+
+def test_snapshot_accepts_repeated_noncyclic_directory_link(
+    tmp_path: Path, policy: WorkspaceStagingPolicy,
+) -> None:
+    archive = tmp_path / "chain.tar"
+    _write_archive(archive, [
+        _member("dir", tarfile.DIRTYPE),
+        _member("link", tarfile.SYMTYPE, link="/app/dir"),
+        _member("alias", tarfile.SYMTYPE, link="link/../link/file"),
+    ])
+    _validate_workspace_archive(archive, policy, root=PurePosixPath("/app"))
+
+
+def test_relative_link_cannot_hide_escape_behind_directory_link(
+    tmp_path: Path, policy: WorkspaceStagingPolicy,
+) -> None:
+    archive = tmp_path / "relative-chain.tar"
+    _write_archive(archive, [
+        _member("dir", tarfile.DIRTYPE),
+        _member("dir/up", tarfile.SYMTYPE, link=".."),
+        _member("alias", tarfile.SYMTYPE, link="dir/up/../outside"),
+    ])
+    with pytest.raises(WorkspaceSnapshotError, match="escapes workdir"):
+        _validate_workspace_archive(archive, policy)
+
+
 async def test_snapshot_export_rejects_socket_before_tar(tmp_path: Path) -> None:
     class _SocketDriver:
         async def exec(self, cmd: str, **_kwargs: object) -> ExecResult:
