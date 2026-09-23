@@ -41,3 +41,26 @@ def test_older_candidate_is_not_deployed(monkeypatch):
         return SimpleNamespace(returncode=1 if "merge-base" in argv else 0)
     monkeypatch.setattr(rollout.subprocess, "run", command)
     assert rollout.candidate_follows("b" * 40, "a" * 40) is False
+
+
+def test_busy_cli_explains_activity_without_exposing_raw_evidence(monkeypatch, tmp_path, capsys):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setattr("sys.argv", [
+        "rollout", "run", "--publication-dir", str(tmp_path), "--candidate", "a" * 40,
+        "--kubeconfig", "unused", "--expected-cluster-id", "unused",
+        "--evidence-dir", str(tmp_path),
+    ])
+    monkeypatch.setattr(rollout, "rollout", lambda args: {
+        "status": "skipped_busy", "candidate_sha": "a" * 40,
+        "guard": {"active": {"trials": 1, "executions": 1, "builds": 0, "build_cleanup": 0}},
+        "private_diagnostic": "must-not-be-published",
+    })
+    assert rollout.main() == 0
+    body = summary.read_text()
+    log = capsys.readouterr().out
+    assert "1 claimed/running trial(s)" in body
+    assert "1 claimed/running trial(s)" in log
+    assert "No deployment was applied" in body
+    assert "| Image builds awaiting cleanup | 0 |" in body
+    assert "must-not-be-published" not in body + log

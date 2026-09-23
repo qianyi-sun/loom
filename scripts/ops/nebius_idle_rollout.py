@@ -15,6 +15,7 @@ if __package__ in {None, ""}:
     sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl, deploy  # noqa: E402
+from scripts.ops.nebius_rollout_reporting import emit_result, explanation  # noqa: E402
 
 from loom.nebius_platform_render import build_platform, write_platform  # noqa: E402
 
@@ -53,10 +54,10 @@ def select_publication(run_id: str | None) -> dict:
     artifacts = github(f"actions/runs/{run_id}/artifacts?per_page=100")["artifacts"]
     if not any(row["name"] == artifact and not row["expired"] for row in artifacts):
         # harness-only publications are intentionally not platform deployments.
-        return {"status": "skipped_no_platform_candidate"}
+        return {"status": "skipped_no_platform_candidate", "sha": sha, "run_id": run_id}
     if subprocess.run(["git", "cat-file", "-e", sha + ":scripts/ops/nebius_idle_rollout.py"],
                       cwd=ROOT, capture_output=True).returncode:
-        return {"status": "skipped_before_idle_rollout_support"}
+        return {"status": "skipped_before_idle_rollout_support", "sha": sha, "run_id": run_id}
     return {"status": "ready", "sha": sha, "run_id": run_id, "artifact": artifact}
 
 
@@ -122,7 +123,7 @@ def rollout(args: argparse.Namespace) -> dict:
     if result["status"] == "complete":
         report("success", "Candidate deployed; HTTPS and workload versions verified; dispatch resumed")
     else:
-        report("inactive", "Skipped: " + result["status"] + "; no rollout applied")
+        report("inactive", ("Skipped: " + explanation(result))[:140])
     return result
 
 
@@ -147,14 +148,7 @@ def main() -> int:
                 for key in ("status", "sha", "run_id", "artifact"):
                     if key in result:
                         stream.write(f"{key}={result[key]}\n")
-        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
-            with Path(summary).open("a") as stream:
-                stream.write(f"Nebius: **{result['status']}**\n\n")
-                if args.command == "run":
-                    stream.write(f"Candidate: `{args.candidate}`\n\n")
-                    if "guard" in result:
-                        stream.write(f"Activity: `{json.dumps(result['guard'])}`\n")
-        print(json.dumps({key: result[key] for key in ("status", "candidate_sha") if key in result}))
+        emit_result(result)
         return 0
     except Exception as exc:
         print(f"Idle rollout failed ({type(exc).__name__}); inspect sanitized deployment evidence", file=sys.stderr)
