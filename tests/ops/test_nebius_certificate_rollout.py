@@ -78,7 +78,7 @@ def test_forced_command_rejection_has_a_distinct_safe_diagnostic(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
         a, 126, b"private-output", b"private-authority-path",
     ))
-    with pytest.raises(module().CertificateAuthorityDenied):
+    with pytest.raises(module().CertificateAuthorityDeniedError):
         module().transfer(b"data", target="codex@192.0.2.1", key=Path("/private/key"),
                           known_hosts=Path("/private/known_hosts"))
 

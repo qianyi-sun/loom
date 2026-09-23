@@ -148,7 +148,7 @@ jobs:
             --format requirements-txt --no-header --quiet --output-file "$RUNNER_TEMP/certificate-requirements.txt"
       - name: Qualify certificate on the private gateway
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_CERTIFICATE_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
           LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
           NEBIUS_CERTIFICATE_INSTALLATION_JSON: ${{ vars.NEBIUS_CERTIFICATE_INSTALLATION_JSON }}

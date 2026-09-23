@@ -175,6 +175,48 @@ made transactional by these hooks.
 gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=certificate
 ```
 
+The certificate operation requires its own protected `NEBIUS_CERTIFICATE_SSH_KEY`.
+Do not reuse `NEBIUS_DEPLOY_SSH_KEY`: that key may be forced to the Kubernetes-only
+gateway and correctly rejects certificate commands. Keep its restriction intact.
+The new key is restricted to the literal `loom-nebius-certificate-v1` command and
+one reviewed bundle digest; it cannot upload arbitrary replacement tooling.
+Use a new Ed25519 key, never an operator's ordinary private login key.
+
+From the exact merged source and pinned `uv`, prepare the non-secret bundle:
+
+```bash
+uv export --locked --only-group nebius-certificates --no-emit-project --no-emit-workspace \
+  --format requirements-txt --no-header --quiet --output-file /secure/requirements.txt
+uv run --no-sync python scripts/ops/nebius_certificate_rollout.py \
+  --requirements /secure/requirements.txt --evidence-dir /secure/preparation \
+  --prepare-bundle /secure/certificate-bundle.zip
+```
+
+Supply the same `NEBIUS_CERTIFICATE_INSTALLATION_JSON` used by the protected
+workflow. Preparation makes no SSH/DNS call and refuses to overwrite the bundle.
+Preserve its reported SHA-256. Through the existing approved operator route,
+transfer only that bundle, the reviewed installer and the new public key into a
+private gateway directory. Keep the private key out of this transfer and logs.
+Run the installer first without `--apply`, inspect the receipt, then apply:
+
+```bash
+python3 /secure/install_nebius_certificate_entrypoint.py \
+  --bundle /secure/certificate-bundle.zip --bundle-sha256 REVIEWED_SHA256 \
+  --public-key /secure/certificate.pub --apply
+```
+
+Inputs must be private owned regular files. Installation appends one restricted
+key while preserving existing entries, under an operator-local lock with atomic
+replacement/readback; coordinate other SSH key edits through the same operator.
+It installs immutable hash-bound gateway source beneath the dedicated certificate
+root, but does not issue a certificate or alter Kubernetes. Same-key conflicting
+authority and changed installed files block. A changed bundle/configuration needs
+another explicit authority installation; a self-reported bundle hash is not trust.
+Set the matching private key only in the protected Environment's certificate
+secret, verify the entrypoint/key binding, then dispatch the protected workflow.
+`certificate_transport_authority_rejected` means command/bundle authorization
+failed, not an ACME failure. Never remove restrictions to clear that diagnostic.
+
 It does not require enabling automatic application rollout and cannot select
 application deployment. The same workflow concurrency group serializes it with
 rollout and inspection. There is **no renewal schedule yet**: recurring issuance
