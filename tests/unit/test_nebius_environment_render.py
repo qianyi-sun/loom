@@ -143,6 +143,33 @@ def test_platform_envelope_covers_surge_bootstrap_backup_and_retained_storage(pl
     assert pod["initContainers"][0]["resources"]["requests"]["ephemeral-storage"] == f"{platform_inputs[0]['postgres_storage_gi']}Gi"
 
 
+@pytest.mark.parametrize("size,expected", [(None, 50), (10, 10), (100, 100)])
+def test_generated_database_size_controls_volume_backup_and_admission(platform_inputs, size, expected):
+    from loom.nebius_environment_contract import FoundationBinding
+    from loom.nebius_environment_render import render_environment
+
+    config, candidate, profile = platform_inputs
+    config["postgres_storage_gi"] = 50
+    foundation = FoundationBinding.model_validate({
+        **foundation_from(config).model_dump(), "generated_postgres_storage_gi": size,
+    })
+    row = registration_for(foundation, "alice")
+    result = render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+    db = named(result, "StatefulSet", "loom-postgres")
+    assert db["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] == f"{expected}Gi"
+    assert result.config["postgres_storage_gi"] == expected
+    assert result.platform_envelope.storage_mib == expected * 1024
+    backup = named(result, "CronJob", "loom-platform-backup")["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    dump = next(volume for volume in backup["volumes"] if volume["name"] == "dump")
+    assert dump["emptyDir"]["sizeLimit"] == f"{expected}Gi"
+    assert backup["initContainers"][0]["resources"]["requests"]["ephemeral-storage"] == f"{expected}Gi"
+    # The chosen value survives the same persisted input used by bootstrap.
+    persisted = json.loads(named(result, "ConfigMap", "loom-platform-config")["data"]["environment.json"])
+    validate_environment(persisted)
+    assert persisted["postgres_storage_gi"] == expected
+    assert config["postgres_storage_gi"] == foundation.platform_config["postgres_storage_gi"] == 50
+
+
 @pytest.mark.parametrize("field,value", [
     ("cluster_id", "another-cluster"), ("physical_pool_id", "another-pool"),
     ("public_host", "bob.dev.example.com"), ("public_host", "alice.attacker.com"),
@@ -253,10 +280,13 @@ def test_import_preserves_exact_existing_names_and_buckets(platform_inputs, cert
         return
     foundation = FoundationBinding.model_validate({
         **foundation.model_dump(), "public_dns_zone": config["public_host"].split(".", 1)[1],
+        "generated_postgres_storage_gi": 10,
     })
     result = render_environment(row, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
     assert result.config["buckets"] == config["buckets"]
     assert result.config["namespace"] == config["namespace"]
+    assert result.config["postgres_storage_gi"] == config["postgres_storage_gi"]
+    assert result.platform_envelope.storage_mib == config["postgres_storage_gi"] * 1024
     changed = EnvironmentRegistrationV1.model_validate({**row.model_dump(), "application_namespace": "loom-imported-other"})
     with pytest.raises(ValueError, match="import"):
         render_environment(changed, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
