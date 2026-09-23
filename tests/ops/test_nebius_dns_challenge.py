@@ -259,3 +259,82 @@ def test_hook_rejects_symlink_and_malformed_journal_without_provider_writes(tmp_
             hook(dns, root, "cleanup")
     assert state.calls.count("POST") == 1
     assert state.calls.count("DELETE") == 0
+
+
+def dns_reply(name, value=None, *, authoritative=True, alias=False):
+    import dns.flags
+    import dns.message
+    import dns.rrset
+
+    reply = dns.message.make_response(dns.message.make_query(name, "TXT"))
+    if authoritative:
+        reply.flags |= dns.flags.AA
+    if alias:
+        reply.answer.append(dns.rrset.from_text(name, 600, "IN", "CNAME", "foreign.example."))
+    elif value:
+        reply.answer.append(dns.rrset.from_text(name, 600, "IN", "TXT", '"' + value + '"'))
+    return reply
+
+
+def test_waits_for_every_authority_not_recursive_or_provider_success(monkeypatch):
+    mod = module()
+    monkeypatch.setattr(mod, "_authorities", lambda *_args: ["8.8.8.8", "1.1.1.1"])
+    seen = []
+    slept = []
+
+    def query(message, server, **kwargs):
+        seen.append(server)
+        value = "v" * 43 if server == "8.8.8.8" or slept else None
+        return dns_reply(message.question[0].name, value)
+
+    monkeypatch.setattr(mod.dns.query, "udp", query)
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: slept.append(seconds))
+    mod.wait_for_txt("yylx.world", "_acme-challenge.dev.nebius.yylx.world", "v" * 43)
+    assert set(seen) == {"8.8.8.8", "1.1.1.1"}
+    assert len(slept) == 1
+
+
+@pytest.mark.parametrize("kwargs", [{"authoritative": False}, {"alias": True}])
+def test_delegated_or_aliased_challenge_is_rejected(monkeypatch, kwargs):
+    mod = module()
+    monkeypatch.setattr(mod, "_authorities", lambda *_args: ["8.8.8.8"])
+    monkeypatch.setattr(mod.dns.query, "udp", lambda message, *_a, **_kw: dns_reply(message.question[0].name, "v" * 43, **kwargs))
+    with pytest.raises(mod.DNSChallengeError, match="authoritative|alias"):
+        mod.wait_for_txt("yylx.world", "_acme-challenge.dev.nebius.yylx.world", "v" * 43)
+
+
+def test_propagation_has_a_bounded_deadline(monkeypatch):
+    mod = module()
+    now = [0.0]
+    monkeypatch.setattr(mod, "_authorities", lambda *_args: ["8.8.8.8"])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(mod.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(mod.dns.query, "udp", lambda message, *_a, **_kw: dns_reply(message.question[0].name))
+    with pytest.raises(mod.DNSChallengeError, match="deadline"):
+        mod.wait_for_txt("yylx.world", "_acme-challenge.dev.nebius.yylx.world", "v" * 43, timeout=10)
+    assert now[0] == 10
+
+
+def test_cli_runs_exact_hook_and_never_prints_validation_or_credential(tmp_path, monkeypatch, capsys):
+    mod = module()
+    state = ProviderState()
+    constructor = mod.GoDaddyDNS
+    monkeypatch.setattr(mod, "GoDaddyDNS", lambda *args: constructor(*args, transport=httpx.MockTransport(state.handle)))
+    monkeypatch.setattr(mod, "wait_for_txt", lambda *_args: None)
+    monkeypatch.setenv("CERTBOT_DOMAIN", "dev.nebius.yylx.world")
+    monkeypatch.setenv("CERTBOT_VALIDATION", "v" * 43)
+    credential = tmp_path / "credential.json"
+    credential.write_text(json.dumps({"token": "private-pat", "expires_on": "2099-01-01"}))
+    credential.chmod(0o600)
+    args = ["--zone", "yylx.world", "--certificate-domain", "dev.nebius.yylx.world",
+            "--credential-file", str(credential), "--state-dir", str(tmp_path / "journal")]
+    assert mod.main(["auth", *args]) == 0
+    assert mod.main(["cleanup", *args]) == 0
+    output = capsys.readouterr()
+    assert output.out.splitlines() == ['{"status": "present"}', '{"status": "cleaned"}']
+    assert output.err == ""
+    monkeypatch.setenv("CERTBOT_DOMAIN", "private-malformed-domain")
+    assert mod.main(["auth", *args]) == 1
+    output = capsys.readouterr()
+    assert "private" not in output.err + output.out
+    assert "v" * 43 not in output.err + output.out
