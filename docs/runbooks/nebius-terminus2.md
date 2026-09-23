@@ -355,8 +355,8 @@ equivalent `--python` and `--with` options),
 exact-pinned pip plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Official Debian-based Python full
-and slim images are supported; Alpine images are not. Prebuilt images, custom
-Malformed Dockerfile `SHELL`, selected build targets, floating Git dependencies and
+and slim images are supported; Alpine images are not. Prebuilt images, malformed
+Dockerfile `SHELL`, selected build targets, floating Git dependencies and
 unrecognized shell/installer forms need explicit adaptation. An upstream asset
 URL can still change on a future rebuild; a prepared image fixes the bytes used
 for its own executions, without making an upstream reproducibility claim. The publisher then dry-runs
