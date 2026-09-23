@@ -124,6 +124,16 @@ DNS/TLS or installed multi-owner acceptance.
 
 ### Render management manifests
 
+Management HTTP requests default to a 1 MiB body limit, eight in-flight requests
+per process and a 30-second total body-reception deadline, enforced before
+parsing/authentication. Overload returns 503 with Retry-After rather than queuing;
+oversize requests return 413. Response streaming is not buffered. Configure via
+`LOOM_SVC_MANAGEMENT_HTTP_MAX_BODY_BYTES`,
+`LOOM_SVC_MANAGEMENT_HTTP_MAX_INFLIGHT` and
+`LOOM_SVC_MANAGEMENT_HTTP_BODY_TIMEOUT_SEC` only after accounting for raw bodies,
+copies and parsing/application memory in the Pod envelope. These controls are
+management-only and do not establish personal-upload or installed readiness.
+
 Prepare the protected `loom.nebius-management-deployment.v1` JSON described in
 [the management architecture](../architecture/nebius-primary-platform.md#management-deployment-manifests)
 outside the repository. Its nested `installation.provider_runtime` is mandatory

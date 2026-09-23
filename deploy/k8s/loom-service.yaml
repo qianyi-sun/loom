@@ -84,6 +84,12 @@ spec:
           value: '{}'
         - name: LOOM_SVC_LOG_LEVEL
           value: info
+        - name: LOOM_SVC_MANAGEMENT_HTTP_BODY_TIMEOUT_SEC
+          value: '30.0'
+        - name: LOOM_SVC_MANAGEMENT_HTTP_MAX_BODY_BYTES
+          value: '1048576'
+        - name: LOOM_SVC_MANAGEMENT_HTTP_MAX_INFLIGHT
+          value: '8'
         - name: LOOM_SVC_MINIO_ACCESS_KEY
           valueFrom:
             secretKeyRef:
