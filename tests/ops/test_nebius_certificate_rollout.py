@@ -43,6 +43,7 @@ def test_transfer_preserves_host_verification_and_passes_only_data_stdin(monkeyp
         assert "StrictHostKeyChecking=yes" in args and "IdentitiesOnly=yes" in args
         assert "UserKnownHostsFile=/private/known_hosts" in args
         assert args[-2] == "codex@192.0.2.1"
+        assert args[-1] == "loom-nebius-certificate-v1"
         assert kwargs["input"] == b"tooling-only"
         assert b"tooling-only" not in args[-1].encode()
         return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b"")
@@ -73,6 +74,41 @@ def test_remote_failure_is_not_retried_or_forwarded(monkeypatch):
     assert len(calls) == 1 and "private-" not in str(error.value)
 
 
+def test_forced_command_rejection_has_a_distinct_safe_diagnostic(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 126, b"private-output", b"private-authority-path",
+    ))
+    with pytest.raises(module().CertificateAuthorityDeniedError):
+        module().transfer(b"data", target="codex@192.0.2.1", key=Path("/private/key"),
+                          known_hosts=Path("/private/known_hosts"))
+
+
+def test_operator_prepares_exact_bundle_without_contacting_gateway(tmp_path, monkeypatch, capsys):
+    import sys
+
+    output = tmp_path / "approved.zip"
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["prepare", "--requirements", str(tmp_path / "requirements"),
+                                    "--evidence-dir", str(evidence), "--prepare-bundle", str(output)])
+    monkeypatch.setenv("NEBIUS_CERTIFICATE_INSTALLATION_JSON", "{}")
+    monkeypatch.setattr(module(), "load_installation", lambda path: {})
+    monkeypatch.setattr(module().shutil, "which", lambda name: "/qualified/uv")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, b"uv 0.11.26 (x86_64-unknown-linux-gnu)\n", b"",
+    ))
+    monkeypatch.setattr(module(), "build_bundle", lambda *a, **k: b"approved-bundle")
+    monkeypatch.setattr(module(), "transfer", lambda *a, **k: pytest.fail("preparation contacted gateway"))
+    assert module().main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report == {"status": "prepared", "bundle_sha256": "f6bb76de752093a645ae712531636a2f688acfea0a61ca76339f16c7ad576e1f"}
+    assert output.read_bytes() == b"approved-bundle"
+    assert output.stat().st_mode & 0o077 == 0
+    # Never overwrite an operator's existing approved artifact.
+    output.write_bytes(b"retained")
+    assert module().main() == 1
+    assert output.read_bytes() == b"retained"
+
+
 def test_certificate_operation_is_protected_and_not_a_route_to_application_rollout():
     workflow = yaml.load((Path(__file__).parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
     assert "certificate" in workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"]
@@ -89,6 +125,8 @@ def test_certificate_operation_is_protected_and_not_a_route_to_application_rollo
     assert "nebius_certificate_rollout.py" in commands
     assert "nebius_idle_rollout.py" not in commands
     assert "--only-group nebius-certificates" in commands
+    transport = next(step for step in job["steps"] if step.get("name") == "Qualify certificate on the private gateway")
+    assert transport["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_CERTIFICATE_SSH_KEY }}"
     artifact = next(step for step in job["steps"] if step.get("name") == "Preserve sanitized certificate evidence")
     assert artifact["with"]["path"].endswith("/certificate-result.json")
 

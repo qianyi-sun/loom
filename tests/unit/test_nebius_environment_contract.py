@@ -153,3 +153,13 @@ def test_foundation_rejects_warm_floor_outside_pool_envelope(
     foundation = foundation_from(platform_inputs[0])
     with pytest.raises(ValidationError):
         FoundationBinding.model_validate({**foundation.model_dump(), "min_nodes": warm_floor})
+
+
+@pytest.mark.parametrize("storage", [-1, 0, 9, True, 10.5, "10", 1025])
+def test_generated_storage_requires_bounded_strict_gib(platform_inputs, storage):
+    from loom.nebius_environment_contract import FoundationBinding
+
+    with pytest.raises(ValidationError):
+        FoundationBinding.model_validate({
+            **foundation_from(platform_inputs[0]).model_dump(), "generated_postgres_storage_gi": storage,
+        })

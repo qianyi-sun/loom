@@ -175,6 +175,48 @@ made transactional by these hooks.
 gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev -f operation=certificate
 ```
 
+The certificate operation requires its own protected `NEBIUS_CERTIFICATE_SSH_KEY`.
+Do not reuse `NEBIUS_DEPLOY_SSH_KEY`: that key may be forced to the Kubernetes-only
+gateway and correctly rejects certificate commands. Keep its restriction intact.
+The new key is restricted to the literal `loom-nebius-certificate-v1` command and
+one reviewed bundle digest; it cannot upload arbitrary replacement tooling.
+Use a new Ed25519 key, never an operator's ordinary private login key.
+
+From the exact merged source and pinned `uv`, prepare the non-secret bundle:
+
+```bash
+uv export --locked --only-group nebius-certificates --no-emit-project --no-emit-workspace \
+  --format requirements-txt --no-header --quiet --output-file /secure/requirements.txt
+uv run --no-sync python scripts/ops/nebius_certificate_rollout.py \
+  --requirements /secure/requirements.txt --evidence-dir /secure/preparation \
+  --prepare-bundle /secure/certificate-bundle.zip
+```
+
+Supply the same `NEBIUS_CERTIFICATE_INSTALLATION_JSON` used by the protected
+workflow. Preparation makes no SSH/DNS call and refuses to overwrite the bundle.
+Preserve its reported SHA-256. Through the existing approved operator route,
+transfer only that bundle, the reviewed installer and the new public key into a
+private gateway directory. Keep the private key out of this transfer and logs.
+Run the installer first without `--apply`, inspect the receipt, then apply:
+
+```bash
+python3 /secure/install_nebius_certificate_entrypoint.py \
+  --bundle /secure/certificate-bundle.zip --bundle-sha256 REVIEWED_SHA256 \
+  --public-key /secure/certificate.pub --apply
+```
+
+Inputs must be private owned regular files. Installation appends one restricted
+key while preserving existing entries, under an operator-local lock with atomic
+replacement/readback; coordinate other SSH key edits through the same operator.
+It installs immutable hash-bound gateway source beneath the dedicated certificate
+root, but does not issue a certificate or alter Kubernetes. Same-key conflicting
+authority and changed installed files block. A changed bundle/configuration needs
+another explicit authority installation; a self-reported bundle hash is not trust.
+Set the matching private key only in the protected Environment's certificate
+secret, verify the entrypoint/key binding, then dispatch the protected workflow.
+`certificate_transport_authority_rejected` means command/bundle authorization
+failed, not an ACME failure. Never remove restrictions to clear that diagnostic.
+
 It does not require enabling automatic application rollout and cannot select
 application deployment. The same workflow concurrency group serializes it with
 rollout and inspection. There is **no renewal schedule yet**: recurring issuance
@@ -244,6 +286,22 @@ existing public LoadBalancer. The protected ingress installer must verify exact
 Secret ownership/UID and delivered fingerprint before activation, and connect
 renewal to verified reload before enabling a schedule.
 
+### Ingress TLS delivery and rotation status
+
+`scripts/ops/nebius_ingress_gateway.py` supplies private delivery, journaled
+controller switching and per-Pod TLS qualification primitives. There is no live
+ingress-install command or workflow operation yet; do not invoke them manually
+against a shared cluster to bypass protected rollout authority.
+
+Their receipts distinguish `tls_delivered`, `controller_switch_observed` and
+`controller_qualified`. These mean, respectively, exact immutable Secret readback,
+an observed controller specification change, and current-Pod certificate proof.
+None establishes public DNS, selector cutover or management readiness. On an
+unknown create/switch outcome, preserve the private delivery/switch journals and
+old Secrets. Never erase the intent or repeat a write to make it disappear; only
+exact readback can reconcile it. Renewal stays unscheduled until the protected
+issuance, delivery, reload and public-route qualification are connected.
+
 ### Render management manifests
 
 Management HTTP requests default to a 1 MiB body limit, eight in-flight requests
@@ -264,6 +322,15 @@ origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
 `credentials_file` to `/var/run/loom-management-kubernetes/credentials.json`, and
 `cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
 These are explicit projected-file paths, not an ambient operator login.
+
+For new managed databases, set
+`installation.foundation.generated_postgres_storage_gi` explicitly when the
+standalone database's size is inappropriate. The value is an integer from 10 to
+1024 GiB; omitted/`null` keeps the inherited size. For example, `10` selects a
+10 GiB PVC and corresponding backup scratch for each newly generated child,
+without shrinking imported or previously created databases. Account for these
+requests in the separate `platform_budget`, including concurrent backups. This
+is a creation default, not authorization to buy storage or a PVC resize command.
 
 ```bash
 uv run --no-sync python scripts/ops/render_nebius_management.py \

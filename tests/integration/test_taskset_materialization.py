@@ -53,6 +53,7 @@ from loom_service.taskset_gc import (
 from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild_task_set
 from loom_service.taskset_materializer import run_once
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+from tests.support.minio import ensure_test_bucket
 
 _MANIFEST_INLINE = """
 apiVersion: loom.taskset/v1
@@ -285,8 +286,7 @@ async def materialization_setup(
     app.state.http_client = httpx.AsyncClient(
         base_url=str(settings.control_plane_url),
     )
-    if not materialization_minio.get_client().bucket_exists(settings.artifacts_bucket):
-        materialization_minio.get_client().make_bucket(settings.artifacts_bucket)
+    ensure_test_bucket(materialization_minio, settings.artifacts_bucket)
 
     team_a = uuid4()
     raw_a = f"loom_team_{uuid4().hex}"

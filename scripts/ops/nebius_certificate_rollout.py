@@ -8,7 +8,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +26,10 @@ from scripts.ops.nebius_certificates import load_installation  # noqa: E402
 
 class RolloutError(RuntimeError):
     """Fixed protected-operation failure; no remote diagnostics are forwarded."""
+
+
+class CertificateAuthorityDeniedError(RolloutError):
+    """The forced command rejected its command or installed bundle authority."""
 
 
 def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path) -> bytes:
@@ -57,13 +60,14 @@ def transfer(content: bytes, *, target: str, key: Path, known_hosts: Path) -> di
     if (not re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target)
             or not key.is_absolute() or not known_hosts.is_absolute() or len(content) > MAX_BUNDLE):
         raise RolloutError("invalid protected certificate transport configuration")
-    bootstrap = (ROOT / "scripts" / "ops" / "nebius_certificate_gateway.py").read_text()
     command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
                "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                "-o", "UserKnownHostsFile=" + str(known_hosts), "-i", str(key), target,
-               shlex.join(["python3", "-c", bootstrap])]
+               "loom-nebius-certificate-v1"]
     try:
         result = subprocess.run(command, input=content, capture_output=True, timeout=2400, check=False)
+        if result.returncode == 126:
+            raise CertificateAuthorityDeniedError("certificate transport authority rejected")
         if result.returncode:
             raise RolloutError("certificate gateway operation failed; preserve private state before retry")
         return safe_report(result.stdout)
@@ -75,6 +79,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument("--prepare-bundle", type=Path,
+                        help="Operator-only: write an exact bundle for forced-command installation; no SSH")
     args = parser.parse_args()
     result: dict[str, Any] = {"status": "blocked"}
     try:
@@ -93,16 +99,26 @@ def main() -> int:
         if version.returncode or version.stdout.strip() != b"uv 0.11.26 (x86_64-unknown-linux-gnu)":
             raise RolloutError("tooling installer differs from qualified pin or architecture")
         content = build_bundle(config, uv=Path(executable), requirements=args.requirements)
-        result = transfer(content, target=os.environ["LOOM_DEPLOY_SSH_TARGET"],
-                          key=Path(os.environ["LOOM_DEPLOY_SSH_KEY_FILE"]),
-                          known_hosts=Path(os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"]))
+        if args.prepare_bundle is not None:
+            descriptor = os.open(args.prepare_bundle, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            result = {"status": "prepared", "bundle_sha256": hashlib.sha256(content).hexdigest()}
+        else:
+            result = transfer(content, target=os.environ["LOOM_DEPLOY_SSH_TARGET"],
+                              key=Path(os.environ["LOOM_DEPLOY_SSH_KEY_FILE"]),
+                              known_hosts=Path(os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"]))
+    except CertificateAuthorityDeniedError:
+        result = {"status": "blocked", "reason": "certificate_transport_authority_rejected"}
     except Exception:
         # Neither exception messages nor SSH/client output are public evidence.
         result = {"status": "blocked", "reason": "certificate operation failed; reconcile private gateway state"}
     args.evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     (args.evidence_dir / "certificate-result.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "qualified" else 1
+    return 0 if result["status"] == "qualified" or (args.prepare_bundle is not None and result["status"] == "prepared") else 1
 
 
 if __name__ == "__main__":

@@ -35,6 +35,15 @@ warm floor (default zero). It cannot be supplied by feature source. Constructing
 this object validates inputs; it does not provision infrastructure or change the
 native autoscaler's settings.
 
+The optional `generated_postgres_storage_gi` setting selects the database size
+for newly generated environments (a strict integer from 10 to 1024 GiB). Omitted
+or `null` preserves inheritance from `platform_config_json.postgres_storage_gi`.
+The selected size controls the PVC, backup dump/scratch and platform storage
+reservation together. Imported bindings retain their existing configured size.
+Creation records freeze the chosen size and manifests, so a later default change
+does not resize an existing database or alter an idempotent creation replay.
+This setting does not increase the protected platform/storage allowance.
+
 `loom.nebius_environment_render.render_environment` reuses the standalone stack
 templates for a registered child. Each render contains its own PostgreSQL
 StatefulSet/PVC, namespaced credential references, incarnation-derived bucket
@@ -132,6 +141,26 @@ protected installer must first qualify those inputs, ownership, before-state,
 readiness, legacy-host probes and rollback; certificate renewal must also reload
 the controller. Management/personal activation remains closed until that installed
 route is verified. See the [deployment runbook](../runbooks/nebius-deployment.md).
+
+The private `scripts/ops/nebius_ingress_gateway.py` primitives deliver qualified
+certificate generations as immutable, separately named TLS Secrets. The protected
+binding includes exact cluster and destination-namespace UIDs. A private durable
+intent precedes creation; matching UID, ownership and material readback resolves
+an unknown reply. An untracked Secret is not adopted and a missing recorded Secret
+is not recreated. Previous generations remain available for recovery.
+
+For an already owned controller, certificate switching freshly validates the
+selected certificate and delivery receipt, journals intent, and submits one
+UID/resourceVersion-conditioned patch to only the mounted Secret reference.
+Unknown outcomes require exact spec/generation readback, never a repeated write.
+`controller_switch_observed` is not readiness. Separate qualification requires
+current owned Pods, stable membership and an authenticated TLS fingerprint from
+each exact Pod through a bounded loopback-only port-forward. Disposable Kubernetes
+coverage proves fresh-Pod rotation and retained legacy HTTPS/TLS-ALPN passthrough.
+
+These primitives do not expose a protected installation operation. Initial
+resource staging, mirrored-image publication, guarded public selector/configuration
+cutover and renewal scheduling remain separate installation requirements.
 
 ## Independent management service runtime
 

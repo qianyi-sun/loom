@@ -43,7 +43,7 @@ async def handoff_workspace_snapshot(
         await _export_workspace_archive(agent_driver, workdir, archive)
         await asyncio.to_thread(_strip_private_entries, archive, policy)
         await asyncio.to_thread(_validate_workspace_archive, archive, policy)
-        await _import_workspace_archive(verifier_driver, archive, workdir)
+        await _import_workspace_archive(verifier_driver, archive, workdir, policy=policy)
 
 
 async def _export_workspace_archive(
@@ -106,13 +106,25 @@ async def _import_workspace_archive(
     driver: Driver,
     src: Path,
     dst: PurePosixPath,
+    *,
+    policy: WorkspaceStagingPolicy | None = None,
 ) -> None:
-    """Import an already-validated archive through the production boundary."""
+    """Restore an archive, replacing public state when a policy is supplied.
+
+    Mutable-path callers already validate and clear their independent roots.
+    Workdir callers must supply the policy protecting staged private inputs.
+    """
 
     native = getattr(driver, "import_workspace_archive", None)
     if native is not None:
-        await native(src, dst)
+        if policy is None:
+            await native(src, dst)
+        else:
+            await native(src, dst, policy=policy)
         return
+
+    if policy is not None:
+        await _prepare_workspace_import(driver, src, dst, policy, user="root")
 
     token = uuid4().hex
     remote_archive = PurePosixPath(f"/tmp/loom-workspace-{token}.tar")
@@ -135,6 +147,74 @@ async def _import_workspace_archive(
             await driver.exec(f"rm -f {archive_q}", user="root")
         except Exception:
             pass
+
+
+def _workspace_deletions(
+    archive: Path, entries: set[PurePosixPath], policy: WorkspaceStagingPolicy,
+) -> list[PurePosixPath]:
+    """Plan replacement without removing private paths or their ancestors."""
+    preserved: set[PurePosixPath] = set()
+    for path in entries:
+        if any(_is_private(policy, parent) for parent in (path, *path.parents)):
+            preserved.update((path, *path.parents))
+    with tarfile.open(archive, mode="r:*") as stream:
+        for member in stream:
+            path = _member_path(member.name)
+            if path in preserved and not member.isdir():
+                raise WorkspaceSnapshotError(
+                    f"workspace archive would replace a private path ancestor: {path}",
+                )
+    removable = {path for path in entries if path.parts and path not in preserved}
+    return sorted(path for path in removable if not any(p in removable for p in path.parents))
+
+
+async def _prepare_workspace_import(
+    driver: Driver, archive: Path, dst: PurePosixPath, policy: WorkspaceStagingPolicy,
+    *, user: str | None = None,
+) -> None:
+    """Clear public baseline state in a quiescent verifier before extraction.
+
+    Inventory uses NUL delimiters and never follows links. Validate the complete
+    archive, destination and inventory before removing anything. Native sandboxes
+    use their declared identity; only the legacy driver boundary requests root.
+    """
+    await asyncio.to_thread(_validate_workspace_archive, archive, policy)
+    if dst.anchor != "/" or len(dst.parts) < 2 or ".." in dst.parts:
+        raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
+    checks = [f"test ! -L {shlex.quote(str(path))}" for path in (*reversed(dst.parents), dst)]
+    quoted = shlex.quote(str(dst))
+    checks.append(f"(test ! -e {quoted} || test -d {quoted})")
+    checked = await driver.exec(" && ".join(checks), user=user)
+    if checked.return_code or checked.stderr or checked.truncated:
+        raise WorkspaceSnapshotError("workspace destination must not traverse symlinks")
+    inventory = await driver.exec(f"mkdir -p {quoted} && cd {quoted} && find . -print0", user=user)
+    if (inventory.return_code or inventory.stderr or inventory.truncated
+            or not inventory.stdout.endswith(b"\0")):
+        raise WorkspaceSnapshotError("unable to inspect complete verifier workspace inventory")
+    try:
+        names = inventory.stdout[:-1].decode("utf-8").split("\0")
+        entries = {_member_path(name) for name in names}
+    except UnicodeError as exc:
+        raise WorkspaceSnapshotError("verifier workspace inventory has invalid filenames") from exc
+    if not names or names[0] != "." or len(entries) != len(names):
+        raise WorkspaceSnapshotError("verifier workspace inventory is ambiguous")
+    deletions = await asyncio.to_thread(_workspace_deletions, archive, entries, policy)
+    # Bound each RPC command by bytes, including filenames needing shell quotes.
+    command = "rm -rf --"
+    for path in deletions:
+        argument = " " + shlex.quote(str(dst / path))
+        if len((command + argument).encode()) > 32_768:
+            await _remove_workspace_entries(driver, command, user=user)
+            command = "rm -rf --"
+        command += argument
+    if command != "rm -rf --":
+        await _remove_workspace_entries(driver, command, user=user)
+
+
+async def _remove_workspace_entries(driver: Driver, command: str, *, user: str | None) -> None:
+    result = await driver.exec(command, user=user)
+    if result.return_code or result.stderr or result.truncated:
+        raise WorkspaceSnapshotError("unable to replace verifier public workspace state")
 
 
 def _validate_workspace_archive(

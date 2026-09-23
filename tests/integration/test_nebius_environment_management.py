@@ -93,6 +93,51 @@ async def test_concurrent_retry_has_one_identity_and_different_payload_conflicts
         await registry.create(principal=alice, idempotency_key="same-key", prepared=prepare("another"))
 
 
+async def test_generated_storage_reservation_and_plan_remain_frozen_on_replay(
+    environment_registry, platform_inputs,
+):
+    from loom.db.nebius_environment_schema import (
+        NebiusEnvironmentOperation,
+        NebiusPlatformReservation,
+    )
+    from loom.nebius_environment_contract import EnvironmentCreateRequestV1, FoundationBinding
+    from loom_service.environment_management.manager import (
+        EnvironmentManager,
+        EnvironmentPlanFactory,
+    )
+
+    registry, factory, (alice, _), prepare = environment_registry
+    config, candidate, profile = platform_inputs
+    foundation = FoundationBinding.model_validate({
+        **foundation_from(config).model_dump(), "generated_postgres_storage_gi": 10,
+    })
+    prepared = render_environment(prepare().registration, candidate, foundation,
+                                  profile=profile, keyring={}, repo_root=ROOT)
+    first = await registry.create(principal=alice, idempotency_key="sized", prepared=prepared)
+
+    class UnavailableCatalog:
+        async def resolve(self, identity):
+            raise ConnectionError("Publication unavailable after creation")
+
+    changed = FoundationBinding.model_validate({
+        **foundation.model_dump(), "generated_postgres_storage_gi": 100,
+    })
+    manager = EnvironmentManager(registry, EnvironmentPlanFactory(
+        changed, UnavailableCatalog(), keyring={}, repo_root=ROOT,
+    ))
+    request = EnvironmentCreateRequestV1(slug="alice", candidate_id=prepared.registration.candidate_id)
+    assert await manager.create(alice, request, idempotency_key="sized") == first
+    async with factory() as session:
+        reservation = (await session.execute(select(NebiusPlatformReservation))).scalar_one()
+        operation = await session.get(NebiusEnvironmentOperation, first.operation_id)
+        assert reservation.storage_mib == 10240
+        assert reservation.ephemeral_storage_mib == prepared.platform_envelope.ephemeral_storage_mib
+        assert operation.plan_json["config"]["postgres_storage_gi"] == 10
+        database = next(doc for doc in operation.plan_json["files"]["20-database.yaml"]
+                        if doc["kind"] == "StatefulSet")
+        assert database["spec"]["volumeClaimTemplates"][0]["spec"]["resources"]["requests"]["storage"] == "10Gi"
+
+
 async def test_owner_conflict_and_cross_owner_status_do_not_change_registration(environment_registry):
     from loom_service.environment_management.registry import ManagementError
 
