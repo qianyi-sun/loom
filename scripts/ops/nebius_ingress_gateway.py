@@ -7,7 +7,11 @@ import hashlib
 import json
 import os
 import re
+import select
+import socket
+import ssl
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -125,6 +129,96 @@ class ControllerAPI(TLSAPI, Protocol):
     def probe_tls(self, namespace: str, name: str, uid: str, server_name: str) -> str:
         """Authenticate the exact Pod's TLS using system trust; return leaf SHA256."""
         ...
+
+
+def _forward_port(process: subprocess.Popen[bytes], *, timeout: float = 10) -> int:
+    if process.stdout is None:
+        raise IngressError("private Pod forwarder unavailable")
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise IngressError("private Pod forwarder exited")
+        if not select.select([process.stdout], [], [], min(0.1, max(0, deadline - time.monotonic())))[0]:
+            continue
+        chunk = os.read(process.stdout.fileno(), 4096)
+        output.extend(chunk)
+        if not chunk or len(output) > 16384:
+            raise IngressError("private Pod forwarder report unavailable")
+        match = re.search(rb"(?:^|\n)Forwarding from 127\.0\.0\.1:([0-9]{1,5}) -> 8443\r?\n", output)
+        if match and 1024 <= int(match[1]) <= 65535:
+            return int(match[1])
+    raise IngressError("private Pod forwarder readiness timed out")
+
+
+class KubectlControllerAPI(KubectlTLSAPI):
+    def _namespace(self, namespace: str) -> None:
+        if namespace != self.binding.namespace:
+            raise IngressError("controller namespace outside protected binding")
+
+    def get_deployment(self, namespace: str, name: str) -> dict[str, Any] | None:
+        self._namespace(namespace)
+        if name != "loom-shared-ingress":
+            raise IngressError("controller name outside protected binding")
+        return self._get(["get", "deployment", name, "-n", namespace])
+
+    def _list(self, kind: str, namespace: str) -> list[dict[str, Any]]:
+        self._namespace(namespace)
+        document = self._get(["get", kind, "-n", namespace, "-l", "app=loom-shared-ingress"])
+        items = (document or {}).get("items")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise IngressError("controller membership readback unavailable")
+        return items
+
+    def list_controller_pods(self, namespace: str) -> list[dict[str, Any]]:
+        return self._list("pods", namespace)
+
+    def list_controller_replicasets(self, namespace: str) -> list[dict[str, Any]]:
+        return self._list("replicasets", namespace)
+
+    def get_pod(self, namespace: str, name: str) -> dict[str, Any] | None:
+        self._namespace(namespace)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}", name):
+            raise IngressError("invalid controller Pod name")
+        return self._get(["get", "pod", name, "-n", namespace])
+
+    def probe_tls(self, namespace: str, name: str, uid: str, server_name: str) -> str:
+        self._namespace(namespace)
+        if server_name != self.binding.management_host:
+            raise IngressError("TLS server name outside protected binding")
+        pod = self.get_pod(namespace, name)
+        if not pod or pod["metadata"].get("uid") != uid:
+            raise IngressError("TLS probe Pod identity differs")
+        # Let kubectl reserve the local port: never release/rebind a guessed
+        # free port. Bind loopback only, and retain the forwarder while probing.
+        process = subprocess.Popen(
+            [*self.prefix, "port-forward", "--address=127.0.0.1", "-n", namespace, f"pod/{name}", ":8443"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+        )
+        try:
+            port = _forward_port(process)
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+                with ssl.create_default_context().wrap_socket(connection, server_hostname=server_name) as secured:
+                    certificate = secured.getpeercert(binary_form=True)
+            current = self.get_pod(namespace, name)
+            if (not certificate or process.poll() is not None or not current
+                    or current["metadata"].get("uid") != uid):
+                raise IngressError("TLS probe identity changed")
+            return hashlib.sha256(certificate).hexdigest()
+        except Exception:
+            raise IngressError("private Pod TLS verification failed") from None
+        finally:
+            # Inherit the protected gateway operation's supervised process group.
+            # Never detach kubectl from its parent-death/timeout cleanup boundary.
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
 
 
 def qualify_controller(*, binding: TLSBinding, api: ControllerAPI, deployment_uid: str,
