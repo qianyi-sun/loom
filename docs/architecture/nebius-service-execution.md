@@ -734,6 +734,15 @@ Archive validation, a complete non-following destination inventory, and checks
 for symlink destinations and conflicting private ancestors precede deletion.
 Native cleanup and extraction both run as the sandbox's declared identity.
 
+An ACL-dependent task additionally declares `environment.preserve_acls = true`.
+Automatic Terminus execution preflights ACL tools and a filesystem roundtrip
+before entering the agent. It preserves numeric POSIX access/default ACLs on
+the workdir and mutable roots, including default inheritance for new children.
+Unsupported ACL metadata fails archive validation before verifier replacement;
+the declaration does not grant root or transfer arbitrary extended attributes.
+Task-supplied runtime templates cannot bypass this native handoff requirement.
+Ordinary undeclared tasks continue using their existing mode/link contract.
+
 An explicit `environment.service_lifecycle` retains task processes through the
 independent verifier. Its optional returning startup argv initializes the
 environment before agent execution; agent-owned services have no initializer.

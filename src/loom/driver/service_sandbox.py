@@ -270,7 +270,9 @@ class ServiceSandboxDriver:
         """Resume only processes suspended by the preceding pause operation."""
         await self._request("POST", "/resume-processes")
 
-    async def export_workspace_archive(self, src: PurePosixPath, dst: Path) -> None:
+    async def export_workspace_archive(
+        self, src: PurePosixPath, dst: Path, *, preserve_acls: bool = False,
+    ) -> None:
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         source, archive = shlex.quote(str(src)), shlex.quote(str(remote))
         special = await self.exec(
@@ -279,18 +281,30 @@ class ServiceSandboxDriver:
         if special.return_code or special.stdout:
             raise DriverError("workspace has unsupported special files or cannot be inspected")
         try:
-            result = await self.exec(f"tar -C {source} -cf {archive} .")
+            result = await self.exec(
+                f"tar {'--acls --numeric-owner --format=pax ' if preserve_acls else ''}"
+                f"-C {source} -cf {archive} .",
+            )
             if result.return_code or result.stderr:
-                raise DriverError("unable to export a stable workspace archive")
+                raise DriverError(
+                    "unable to export POSIX ACL workspace archive (tar --acls required)"
+                    if preserve_acls else "unable to export a stable workspace archive",
+                )
             await self.download(remote, dst)
         finally:
             await self.exec(f"rm -f {archive}")
 
     async def import_workspace_archive(
         self, src: Path, dst: PurePosixPath, *, policy: WorkspaceStagingPolicy | None = None,
+        preserve_acls: bool = False,
     ) -> None:
         # workspace_snapshot validates/strips the archive in the trusted agent
         # before invoking this hook. The sandbox never chooses verifier inputs.
+        from loom.trial.workspace_acls import check_acl_declaration, require_acl_support
+
+        await asyncio.to_thread(check_acl_declaration, src, preserve_acls=preserve_acls)
+        if preserve_acls:
+            await require_acl_support(self, dst)
         if policy is not None:
             from loom.trial.workspace_snapshot import _prepare_workspace_import
 
@@ -300,7 +314,8 @@ class ServiceSandboxDriver:
         try:
             await self.upload(src, remote)
             result = await self.exec(
-                f"mkdir -p {destination} && tar --numeric-owner -C {destination} -xpf {archive}"
+                f"mkdir -p {destination} && tar {'--acls ' if preserve_acls else ''}"
+                f"--numeric-owner -C {destination} -xpf {archive}"
             )
             if result.return_code or result.stderr:
                 raise DriverError("unable to restore workspace archive")

@@ -169,6 +169,8 @@ class FakeDriver:
         self,
         src: PurePosixPath,
         dst: Path,
+        *,
+        preserve_acls: bool = False,
     ) -> None:
         """Test-only archive hook used by isolated verifier handoff.
 
@@ -178,6 +180,10 @@ class FakeDriver:
         """
 
         self._require_running()
+        if preserve_acls:
+            from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+            raise WorkspaceSnapshotError("FakeDriver does not model POSIX ACL snapshots")
         selected: list[tuple[PurePosixPath, bytes]] = []
         directories: set[PurePosixPath] = set()
         for path, data in self.filesystem.items():
@@ -217,10 +223,15 @@ class FakeDriver:
         dst: PurePosixPath,
         *,
         policy: WorkspaceStagingPolicy | None = None,
+        preserve_acls: bool = False,
     ) -> None:
         """Restore regular files from a pre-validated test archive."""
 
         self._require_running()
+        if preserve_acls:
+            from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+            raise WorkspaceSnapshotError("FakeDriver does not model POSIX ACL snapshots")
         if policy is not None:
             from loom.trial.workspace_snapshot import (
                 _validate_workspace_archive,

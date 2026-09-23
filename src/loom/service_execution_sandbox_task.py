@@ -160,6 +160,11 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=_agent_input_exclusions(task),
                 )
+                if task.environment.preserve_acls:
+                    from loom.trial.workspace_acls import require_acl_support
+
+                    for root in (task.environment.workdir, *task.environment.mutable_paths):
+                        await require_acl_support(driver, root)
                 if lifecycle is not None and lifecycle.startup_command:
                     result = await driver.exec(
                         shlex.join(lifecycle.startup_command), cwd=task.environment.workdir,
@@ -216,7 +221,10 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                             else:
                                 await driver.stop_processes()
                         archive = workspace / ".loom/workspace.tar"
-                        await _export_workspace_archive(driver, task.environment.workdir, archive)
+                        await _export_workspace_archive(
+                            driver, task.environment.workdir, archive,
+                            preserve_acls=task.environment.preserve_acls,
+                        )
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
                         await asyncio.to_thread(
                             _validate_workspace_archive, archive, _POLICY,
@@ -226,6 +234,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                             await export_mutable_paths(
                                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
                                 workdir=task.environment.workdir,
+                                preserve_acls=task.environment.preserve_acls,
                             )
                         for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
@@ -319,11 +328,15 @@ async def _run_verifier(
         archive = workspace / ".loom/workspace.tar"
         # The archive was validated by the agent phase before durable capture;
         # it stays in the private controller workspace between phases.
-        await _import_workspace_archive(driver, archive, task.environment.workdir, policy=_POLICY)
+        await _import_workspace_archive(
+            driver, archive, task.environment.workdir, policy=_POLICY,
+            preserve_acls=task.environment.preserve_acls,
+        )
         if task.environment.mutable_paths:
             await import_mutable_paths(
                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
                 workdir=task.environment.workdir,
+                preserve_acls=task.environment.preserve_acls,
             )
         remote_output = task.environment.workdir / ".loom/verifier/output.json"
         result = await driver.exec(

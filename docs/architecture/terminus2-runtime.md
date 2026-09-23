@@ -46,6 +46,20 @@ and archive entries that would replace a parent of a preserved private input
 before deleting public state. Cancellation waits for verifier-driver teardown before it
 propagates, preventing sandbox cleanup from racing network/sidecar teardown.
 
+Tasks that depend on POSIX access or default ACLs declare
+`environment.preserve_acls = true`. That declaration applies to the workdir and
+every mutable root. Preparation proves a numeric ACL roundtrip with `tar --acls`,
+`getfacl` and `setfacl` on the task filesystem before model execution; missing
+tools, unsupported filesystems or insufficient permissions fail explicitly.
+Capture uses PAX ACL headers and numeric ownership, private-file filtering
+retains public metadata, and independent extraction restores both access and
+default ACLs. Archive validation rejects malformed, named-identity and non-POSIX
+ACL metadata before replacing verifier contents. Restoration runs under the
+normal sandbox identity and does not transfer general xattrs, file capabilities
+or SELinux labels. Undeclared tasks retain the ordinary mode/link transfer
+contract, including BusyBox tar compatibility; ACL-bearing archives cannot be
+silently restored through that ordinary path.
+
 ## Runtime shape
 
 ```

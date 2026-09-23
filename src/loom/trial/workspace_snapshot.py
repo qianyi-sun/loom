@@ -34,6 +34,7 @@ async def handoff_workspace_snapshot(
     verifier_driver: Driver,
     workdir: PurePosixPath,
     policy: WorkspaceStagingPolicy,
+    preserve_acls: bool = False,
 ) -> None:
     """Copy one validated public workspace snapshot between sandbox drivers."""
 
@@ -41,22 +42,29 @@ async def handoff_workspace_snapshot(
 
     with tempfile.TemporaryDirectory(prefix="loom-verifier-handoff-") as temp:
         archive = Path(temp) / "workspace.tar"
-        await _export_workspace_archive(agent_driver, workdir, archive)
+        await _export_workspace_archive(agent_driver, workdir, archive, preserve_acls=preserve_acls)
         await asyncio.to_thread(_strip_private_entries, archive, policy)
         await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=workdir)
-        await _import_workspace_archive(verifier_driver, archive, workdir, policy=policy)
+        await _import_workspace_archive(
+            verifier_driver, archive, workdir, policy=policy, preserve_acls=preserve_acls,
+        )
 
 
 async def _export_workspace_archive(
     driver: Driver,
     src: PurePosixPath,
     dst: Path,
+    *,
+    preserve_acls: bool = False,
 ) -> None:
     """Export via a driver-native test hook or the production POSIX boundary."""
 
     native = getattr(driver, "export_workspace_archive", None)
     if native is not None:
-        await native(src, dst)
+        if preserve_acls:
+            await native(src, dst, preserve_acls=True)
+        else:
+            await native(src, dst)
         return
 
     token = uuid4().hex
@@ -84,13 +92,15 @@ async def _export_workspace_archive(
 
     try:
         result = await driver.exec(
-            f"tar -C {src_q} -cf {archive_q} .",
+            f"tar {'--acls --numeric-owner --format=pax ' if preserve_acls else ''}"
+            f"-C {src_q} -cf {archive_q} .",
             user="root",
         )
         if result.return_code != 0 or result.stderr:
             detail = result.stderr.decode("utf-8", errors="replace").strip()
             raise WorkspaceSnapshotError(
-                "unable to create a stable agent workspace archive"
+                ("unable to create a stable POSIX ACL workspace archive (tar --acls required)"
+                 if preserve_acls else "unable to create a stable agent workspace archive")
                 + (f": {detail}" if detail else ""),
             )
         await driver.download(remote_archive, dst)
@@ -109,6 +119,7 @@ async def _import_workspace_archive(
     dst: PurePosixPath,
     *,
     policy: WorkspaceStagingPolicy | None = None,
+    preserve_acls: bool = False,
 ) -> None:
     """Restore an archive, replacing public state when a policy is supplied.
 
@@ -116,13 +127,21 @@ async def _import_workspace_archive(
     Workdir callers must supply the policy protecting staged private inputs.
     """
 
+    from loom.trial.workspace_acls import check_acl_declaration, require_acl_support
+
+    await asyncio.to_thread(check_acl_declaration, src, preserve_acls=preserve_acls)
     native = getattr(driver, "import_workspace_archive", None)
     if native is not None:
-        if policy is None:
+        if preserve_acls:
+            await native(src, dst, policy=policy, preserve_acls=True)
+        elif policy is None:
             await native(src, dst)
         else:
             await native(src, dst, policy=policy)
         return
+
+    if preserve_acls:
+        await require_acl_support(driver, dst)
 
     if policy is not None:
         await _prepare_workspace_import(driver, src, dst, policy, user="root")
@@ -134,7 +153,8 @@ async def _import_workspace_archive(
     try:
         await driver.upload(src, remote_archive)
         result = await driver.exec(
-            f"mkdir -p {dst_q} && tar -C {dst_q} -xpf {archive_q}",
+            f"mkdir -p {dst_q} && tar {'--acls --numeric-owner ' if preserve_acls else ''}"
+            f"-C {dst_q} -xpf {archive_q}",
             user="root",
         )
         if result.return_code != 0 or result.stderr:
@@ -236,6 +256,8 @@ def _validate_workspace_archive(
     if root is not None and (root.anchor != "/" or len(root.parts) < 2 or ".." in root.parts):
         raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
 
+    from loom.trial.workspace_acls import validate_acl_headers
+
     try:
         with tarfile.open(archive, mode="r:*") as tf:
             members = tf.getmembers()
@@ -246,6 +268,7 @@ def _validate_workspace_archive(
     symlink_targets: dict[PurePosixPath, str] = {}
     hardlink_targets: dict[PurePosixPath, PurePosixPath] = {}
     for member in members:
+        validate_acl_headers(member)
         path = _member_path(member.name)
         if not path.parts:
             if not member.isdir():

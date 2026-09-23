@@ -100,6 +100,7 @@ async def _check_cross_root_hardlinks(driver: Driver, roots: tuple[PurePosixPath
 
 async def export_mutable_paths(
     driver: Driver, paths: tuple[PurePosixPath, ...], directory: Path, *, workdir: PurePosixPath,
+    preserve_acls: bool = False,
 ) -> None:
     validate_mutable_paths(paths, workdir=workdir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -113,7 +114,7 @@ async def export_mutable_paths(
         await _check_cross_root_hardlinks(driver, (workdir, *paths))
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
-        await _export_workspace_archive(driver, root, archive)
+        await _export_workspace_archive(driver, root, archive, preserve_acls=preserve_acls)
         evidence = await asyncio.to_thread(_archive_evidence, archive, root)
         records.append({"path": str(root), "archive": archive.name, **evidence})
         _check_totals(records)
@@ -124,8 +125,10 @@ async def export_mutable_paths(
 
 async def import_mutable_paths(
     driver: Driver, paths: tuple[PurePosixPath, ...], directory: Path, *, workdir: PurePosixPath,
+    preserve_acls: bool = False,
 ) -> None:
     validate_mutable_paths(paths, workdir=workdir)
+    from loom.trial.workspace_acls import check_acl_declaration, require_acl_support
     manifest = directory / "manifest.json"
     try:
         if manifest.is_symlink() or manifest.stat().st_size > 64 * 1024:
@@ -138,6 +141,7 @@ async def import_mutable_paths(
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
         evidence = await asyncio.to_thread(_archive_evidence, archive, root)
+        await asyncio.to_thread(check_acl_declaration, archive, preserve_acls=preserve_acls)
         records.append({"path": str(root), "archive": archive.name, **evidence})
         _check_totals(records)
     if declared != {"schema_version": 1, "paths": records}:
@@ -151,6 +155,8 @@ async def import_mutable_paths(
         raise WorkspaceSnapshotError("cannot determine mutable path restore identity") from exc
     for index, root in enumerate(paths):
         await _check_root(driver, root, writable=True)
+        if preserve_acls:
+            await require_acl_support(driver, root)
         if uid != 0:
             with tarfile.open(directory / f"{index}.tar") as stream:
                 if any(member.uid != uid or member.gid != gid for member in stream):
@@ -164,4 +170,6 @@ async def import_mutable_paths(
         )
         if result.return_code or result.stderr:
             raise WorkspaceSnapshotError(f"cannot replace verifier mutable directory: {root}")
-        await _import_workspace_archive(driver, directory / f"{index}.tar", root)
+        await _import_workspace_archive(
+            driver, directory / f"{index}.tar", root, preserve_acls=preserve_acls,
+        )
