@@ -8,6 +8,7 @@ import ProviderDetail from "./pages/ProviderDetail";
 import ProvidersList from "./pages/ProvidersList";
 import BatchDetail from "./pages/BatchDetail";
 import Home from "./pages/Home";
+import GettingStarted from "./pages/GettingStarted";
 import InviteAccept from "./pages/InviteAccept";
 import Monitor from "./pages/Monitor";
 import PipelineRunDetail from "./pages/PipelineRunDetail";
@@ -37,6 +38,7 @@ export default function App(): JSX.Element {
       <Route path="/auth/managed" element={<ManagedLogin />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
+        <Route path="getting-started" element={<GettingStarted />} />
         <Route path="monitor" element={<Monitor />} />
         <Route path="pipelines" element={<PipelineRuns />} />
         <Route path="pipelines/:runId" element={<PipelineRunDetail />} />

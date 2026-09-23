@@ -3572,3 +3572,87 @@ def test_batch_rerun_failed_submits_linked_selection(
         "use_current_runtime": current,
     }
     assert json.loads(capsys.readouterr().out)["rerun_of_batch_id"] == _BATCH_ID
+
+
+@pytest.mark.parametrize("purpose", ["evaluation", "trajectory_generation"])
+@pytest.mark.parametrize("from_file", [False, True])
+def test_batch_create_complete_request_preserves_export(
+    mock_server: MockServer, tmp_path: Path, purpose: str, from_file: bool,
+) -> None:
+    payload = {
+        "purpose": purpose,
+        "team_id": "team-b",
+        "name_suffix": "a's $(literal)",
+        "task_filter": {
+            "benchmark_ids": ["benchmark-a", "benchmark-b"],
+            "tag_filters": {"language": ["python", "C++"]},
+            "subset_kind": "random_n", "n": 4, "seed": 72,
+        },
+        "combinations": [
+            {
+                "agent_name": "terminus-2", "agent_version": "harbor-v2",
+                "agent_model": {"provider": "openai", "name": "model", "source": "api"},
+                "provider_connection_id": _CONN_ID,
+                "provider_model_id": "model", "n_per_task": 3, "label": "first",
+            },
+            {"agent_name": "oracle", "agent_model": None, "n_per_task": 2, "label": "second"},
+        ],
+        "trial_config": {
+            "force_build": True, "override_agent_timeout_sec": 100,
+            "retry": {"max_attempts": 2, "retry_on": ["worker_crash"]},
+        },
+        "budget_usd": 2.5, "budget_policy": "soft", "budget_confirmed": True,
+    }
+    if purpose == "trajectory_generation":
+        payload["task_filter"] = {"subset_kind": "explicit", "task_ids": ["a/0", "b/1"]}
+        payload["trial_config"]["skip_verifier"] = True
+    request = json.dumps(payload)
+    if from_file:
+        path = tmp_path / "batch.json"
+        path.write_text(request)
+        request = f"@{path}"
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201, json={"batch_id": _BATCH_ID, "state": "submitted"},
+    )
+    assert main(["eval", "batch", "create", "--request-json", request]) == 0
+    assert len(mock_server) == 1
+    assert json.loads(mock_server[0].content) == payload
+    assert mock_server[0].headers["Authorization"] == "Bearer loom_admin_test123456"
+
+
+@pytest.mark.parametrize("flags", [
+    ["--agent", "oracle"], ["--team-id", "another-team"],
+    ["--skip-verifier"], ["--name-suffix", "overwrite"],
+    ["--combinations-json", '[{"agent_name":"oracle"}]'],
+    ["--storage-preflight-evidence", "does-not-exist.json"],
+    ["--n-per-task", "1"], ["--n-per-task=1"], ["--name-suffix", ""],
+])
+def test_batch_request_rejects_overrides_before_network(
+    mock_server: MockServer, flags: list[str], capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["eval", "batch", "create", "--request-json", '{"purpose":"evaluation"}', *flags]) == 2
+    assert "complete batch request; omit" in capsys.readouterr().err
+    assert len(mock_server) == 0
+
+
+@pytest.mark.parametrize("raw_request", ["[]", "null", "bad json", "@missing-export.json"])
+def test_batch_request_requires_json_object(mock_server: MockServer, raw_request: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["eval", "batch", "create", "--request-json", raw_request])
+    assert exc.value.code == 2
+    assert len(mock_server) == 0
+
+
+def test_batch_request_and_purpose_mutually_exclusive(mock_server: MockServer) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["eval", "batch", "create", "--request-json", "{}", "--purpose", "evaluation"])
+    assert exc.value.code == 2
+    assert len(mock_server) == 0
+
+
+def test_batch_request_preserves_server_authority(mock_server: MockServer) -> None:
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        403, json={"detail": "no access to target team"},
+    )
+    assert main(["eval", "batch", "create", "--request-json", '{"purpose":"evaluation","team_id":"other-team"}']) != 0
+    assert len(mock_server) == 1

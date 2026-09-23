@@ -132,6 +132,37 @@ def _login_with_password(args: argparse.Namespace, *, server_url: str) -> int:
             )
             assert_2xx_response(response, action="log in with username/password")
             data = response.json()
+
+            cookie = response_session_cookie(response)
+            csrf_token = data.get("csrf_token") if isinstance(data, dict) else None
+            if not cookie or not isinstance(csrf_token, str) or not csrf_token:
+                sys.stderr.write("error: login response did not include session credentials\n")
+                return 1
+            if args.team_id is not None:
+                # A fresh password session starts in the user's default team.
+                # Select the exported team explicitly before persisting this login.
+                response = c.post(
+                    "/api/v1/auth/team",
+                    json={"team_id": str(args.team_id)},
+                    headers={
+                        "Cookie": f"{cookie[0]}={cookie[1]}",
+                        CSRF_HEADER_NAME: csrf_token,
+                    },
+                )
+                assert_2xx_response(response, action="select login team")
+                data = response.json()
+                selected = data.get("current_team") if isinstance(data, dict) else None
+                rotated_csrf = data.get("csrf_token") if isinstance(data, dict) else None
+                if (
+                    not isinstance(selected, dict)
+                    or selected.get("id") != str(args.team_id)
+                    or not isinstance(rotated_csrf, str)
+                    or not rotated_csrf
+                ):
+                    sys.stderr.write("error: team selection response did not confirm the requested team and session credentials\n")
+                    return 1
+                cookie = response_session_cookie(response, current_name=cookie[0]) or cookie
+                csrf_token = rotated_csrf
     except HttpStatusError as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
@@ -139,11 +170,6 @@ def _login_with_password(args: argparse.Namespace, *, server_url: str) -> int:
         sys.stderr.write(f"error: could not reach {server_url}: {e}\n")
         return 2
 
-    cookie = response_session_cookie(response)
-    csrf_token = data.get("csrf_token") if isinstance(data, dict) else None
-    if not cookie or not isinstance(csrf_token, str) or not csrf_token:
-        sys.stderr.write("error: login response did not include session credentials\n")
-        return 1
     _save_session_login(
         server_url=server_url,
         session_cookie=cookie[1],
@@ -165,6 +191,9 @@ def _login(args: argparse.Namespace) -> int:
         return 2
 
     if args.token is not None:
+        if args.team_id is not None:
+            sys.stderr.write("error: --team-id requires username/password login; API tokens already have a team scope\n")
+            return 2
         if args.username is not None or args.password is not None:
             sys.stderr.write("error: use either --token or --username/--password, not both\n")
             return 2
@@ -682,6 +711,10 @@ def dispatch(argv: list[str]) -> int:
         ),
     )
     p_login.add_argument("--username", help="Username for account login.")
+    p_login.add_argument(
+        "--team-id", type=UUID,
+        help="Select this team after username/password login (requires membership). Not valid with --token.",
+    )
     p_login.add_argument(
         "--password",
         type=secret_source_argparse_type("--password"),

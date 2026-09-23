@@ -543,7 +543,7 @@ describe("RunLibrary", () => {
 
     expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
     expect(screen.getByText("Reuse guide")).toBeInTheDocument();
-    expect(screen.getByText(/Provider credentials are not copied/i)).toBeInTheDocument();
+    expect(screen.getByText(/credentials are not copied/i)).toBeInTheDocument();
     expect(screen.getAllByText("Ada / Dev").length).toBeGreaterThan(0);
     expect(screen.getAllByText("unknown/unpriced").length).toBeGreaterThan(0);
     expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
@@ -853,12 +853,14 @@ describe("RunLibraryBatchDetail", () => {
     );
 
     expect(await screen.findByText("shared alpha run")).toBeInTheDocument();
-    expect(screen.getByText("Library CLI downloads")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Download shared artifact with CLI" }));
+    expect(screen.getByRole("dialog", { name: "Shared artifact download" })).toBeInTheDocument();
     expect(
       screen.getByText(
         "loom eval trial download trial-alpha --kind artifact --artifact-key team-alpha/trial-alpha/main/report.json --output artifact.bin",
       ),
     ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "close" }));
     expect(screen.getByText("Owner")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();

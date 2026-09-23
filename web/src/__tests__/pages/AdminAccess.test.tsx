@@ -1195,10 +1195,8 @@ describe("AdminAccess", () => {
       screen.queryByText("loom auth login --server <server-url> --token env:LOOM_API_TOKEN"),
     ).not.toBeInTheDocument();
     expect(screen.getByText("loom auth whoami")).toBeInTheDocument();
-    expect(screen.getByText("Next CLI checks")).toBeInTheDocument();
-    expect(screen.getByText(/loom eval batch create/)).toHaveTextContent(
-      "--agent oracle",
-    );
+    expect(screen.getByText("Run your first batch")).toBeInTheDocument();
+    expect(screen.queryByText(/--agent oracle/)).not.toBeInTheDocument();
     await waitFor(() => {
       const createCall = fetchSpy.mock.calls.find(([input, init]) =>
         String(input).endsWith("/api/v1/tokens") && init?.method === "POST",

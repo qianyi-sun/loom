@@ -40,6 +40,9 @@ describe("NavBar", () => {
     expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "New batch" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Monitor" })).toBeInTheDocument();
+    for (const name of ["Pipelines", "Run Library", "Providers", "Task sets", "Getting started"]) {
+      expect(screen.getByRole("link", { name })).toBeInTheDocument();
+    }
     expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
     expect(
       screen.queryByRole("link", { name: "Task Sets" }),

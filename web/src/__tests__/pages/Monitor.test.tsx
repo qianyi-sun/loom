@@ -444,9 +444,9 @@ describe("Monitor human-readable labels", () => {
 
     expect(await screen.findByText("human-readable-batch")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
-    expect(screen.getByText("Monitor quick actions")).toBeInTheDocument();
+    expect(screen.queryByText("Monitor quick actions")).not.toBeInTheDocument();
     expect(screen.getByText("unknown/unpriced")).toBeInTheDocument();
-    expect(screen.getByText("loom eval batch show batch-1")).toBeInTheDocument();
+    expect(screen.queryByText("loom eval batch show batch-1")).not.toBeInTheDocument();
     expect(screen.getByText("Planned trials")).toBeInTheDocument();
     expect(screen.queryByText("Expected")).not.toBeInTheDocument();
     expect(

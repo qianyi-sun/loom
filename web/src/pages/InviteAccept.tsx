@@ -1,3 +1,4 @@
+import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -7,7 +8,6 @@ import { api, type InviteLookup, type InviteStatus } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
@@ -162,12 +162,8 @@ export default function InviteAccept(): JSX.Element {
 
           {joinedTeam ? (
             <div className="space-y-3 border-t border-slate-100 pt-4">
-              <DocsCallout title="Next setup steps" tone="success">
-                <p>
-                  Create or test a model provider first, then launch a one-task
-                  batch to verify the team, provider, worker, and artifact path.
-                </p>
-              </DocsCallout>
+              <p className="text-sm text-slate-600">Your team is ready to use. Choose an existing provider connection or ask an owner to configure one.</p>
+              <HelpButton topic="quickstart">Getting started</HelpButton>
               <div className="flex flex-wrap gap-2">
                 <Link
                   to="/providers/new"

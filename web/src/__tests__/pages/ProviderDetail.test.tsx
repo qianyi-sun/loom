@@ -79,8 +79,8 @@ describe("ProviderDetail", () => {
     expect(
       screen.getByText(/OpenAI-compatible root ending in \/v1/i),
     ).toBeInTheDocument();
-    expect(screen.getByText("Provider next steps")).toBeInTheDocument();
-    expect(screen.getByText("loom providers test prod-anthropic")).toBeInTheDocument();
+    expect(screen.getByText("Provider setup guide")).toBeInTheDocument();
+    expect(screen.queryByText("loom providers test prod-anthropic")).not.toBeInTheDocument();
   });
 
   it("clicking Models tab switches content", async () => {

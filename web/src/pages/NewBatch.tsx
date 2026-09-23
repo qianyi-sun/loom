@@ -1,12 +1,11 @@
+import { useState } from "react";
 import { AgentModelPicker } from "../components/AgentModelPicker";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
-import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import { agentLabel } from "../lib/agentLabel";
-import { oracleSmokeBatchCommand, providerSmokeBatchCommand } from "../lib/quickstartSnippets";
+import { BatchExportDialog, type BatchExportResult } from "./newBatch/BatchExportDialog";
 import { clampInt } from "./newBatch/advancedConfig";
 import { DEFAULT_AGENT_NAME } from "./newBatch/formState";
 import { FieldLabel } from "./NewBatchFields";
@@ -17,6 +16,17 @@ import { NewBatchTaskSelection } from "./NewBatchTaskSelection";
 import { useNewBatch } from "./useNewBatch";
 export default function NewBatch(): JSX.Element {
   const state = useNewBatch();
+  const [exportResult, setExportResult] = useState<BatchExportResult | null>(null);
+  const exportConfiguration = () => {
+    const result = state.buildSubmission();
+    if (!result.ok) {
+      setExportResult({ error: result.error });
+    } else if (result.providerOverrides.some((override) => override.manual_model)) {
+      setExportResult({ error: "Save manually entered models in Providers first, then select the saved model before exporting. Export does not save models or change provider connections." });
+    } else {
+      setExportResult({ payload: result.payload });
+    }
+  };
   const {
     matchedTaskCount,
     addRow,
@@ -60,20 +70,7 @@ export default function NewBatch(): JSX.Element {
         </p>
       </header>
 
-      <DocsCallout title="CLI/API equivalent" tone="info">
-        <p>
-          The form below builds the same task filter, agent, model, and retry shape as the CLI. Start with the
-          oracle canary, then run a provider-backed smoke after adding a provider connection.
-        </p>
-        <CommandSnippet
-          label="Smoke batch examples"
-          command={[
-            oracleSmokeBatchCommand(),
-            "# provider-backed smoke after provider setup",
-            providerSmokeBatchCommand("smoke-openai", "gpt-4o-mini"),
-          ].join("\n\n")}
-        />
-      </DocsCallout>
+      {exportResult ? <BatchExportDialog result={exportResult} onClose={() => setExportResult(null)} /> : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}
@@ -173,6 +170,7 @@ export default function NewBatch(): JSX.Element {
             <Card.Header
               title="Release review"
               description="Check the planned task slate and execution readiness before submitting."
+              actions={<Button variant="secondary" size="sm" onClick={exportConfiguration}>Export CLI / API</Button>}
             />
             <Card.Body className="space-y-2 text-sm text-slate-700">
               <p>{releaseScopeText}</p>

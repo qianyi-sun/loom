@@ -417,47 +417,43 @@ export function useNewBatch() {
     return { ok: true, value: overrides.map((override) => override.value) };
   }
 
-  const submit = async (): Promise<void> => {
-    setLocalError(null);
+  // Shared read-only validation and payload construction for submit and export.
+  // Remote writes happen only in submit, after this result succeeds.
+  const buildSubmission = (): {
+    ok: true; payload: CreateBatchBody; providerOverrides: ProviderOverride[];
+  } | { ok: false; error: string } => {
     if (tagSelectionPending) {
-      setLocalError("Wait for benchmark tags to finish loading before submitting.");
-      return;
+      return { ok: false, error: "Wait for benchmark tags to finish loading before submitting." };
     }
     if (!currentTeamId) {
-      setLocalError("Select an active team before submitting a batch.");
-      return;
+      return { ok: false, error: "Select an active team before submitting a batch." };
     }
     if (subsetKind === "explicit") {
       if (parsed.error || parsed.ids.length === 0) {
-        setLocalError("Paste at least one task id.");
-        return;
+        return { ok: false, error: "Paste at least one task id." };
       }
     } else {
       if (selectedBenchmarks.size === 0) {
-        setLocalError(
+        return { ok: false, error:
           batchPurpose === "evaluation"
             ? "Pick at least one native benchmark."
             : "Pick at least one benchmark or TaskSet.",
-        );
-        return;
+        };
       }
       if (subsetKind !== "all") {
         const n = Number.parseInt(subsetN, 10);
         if (!Number.isFinite(n) || n < 1) {
-          setLocalError("Subset N must be a positive integer.");
-          return;
+          return { ok: false, error: "Subset N must be a positive integer." };
         }
       }
       if (subsetKind === "random_n") {
         const seedN = Number.parseInt(subsetSeed, 10);
         if (!Number.isFinite(seedN) || seedN < 0 || seedN > 2 ** 31 - 1) {
-          setLocalError("Seed must be a non-negative 32-bit integer.");
-          return;
+          return { ok: false, error: "Seed must be a non-negative 32-bit integer." };
         }
       }
       if (matchedTaskCount === undefined) {
-        setLocalError("Still counting matching tasks — try again in a moment.");
-        return;
+        return { ok: false, error: "Still counting matching tasks — try again in a moment." };
       }
       // Issue #28: with tag_filters active the SPA used to skip this
       // check because the local estimate was a pure upper bound; the
@@ -466,44 +462,38 @@ export function useNewBatch() {
       // real `/tasks/count` endpoint when `hasTagFilter`, so the gate
       // applies uniformly.
       if (matchedTaskCount === 0) {
-        setLocalError(
+        return { ok: false, error:
           hasTagFilter
             ? "Tag filters narrow the slate to zero tasks — adjust the filters or unselect them."
             : "No tasks match the current source selection + subset.",
-        );
-        return;
+        };
       }
     }
 
     const combos = buildCombinations();
     if (!combos.ok) {
-      setLocalError(combos.error);
-      return;
+      return { ok: false, error: combos.error };
     }
     const providerSelection = buildProviderSelection();
     if (!providerSelection.ok) {
-      setLocalError(providerSelection.error);
-      return;
+      return { ok: false, error: providerSelection.error };
     }
 
     if (totalTrials !== undefined && totalTrials > FAN_OUT_CONFIRM_THRESHOLD && !confirmedLargeFanOut) {
-      setLocalError(`This will launch ${totalTrials} trials. Tick the confirm box below, then submit again.`);
-      return;
+      return { ok: false, error: `This will launch ${totalTrials} trials. Tick the confirm box below, then submit again.` };
     }
 
     const budgetText = budgetUsd.trim();
     const budgetValue = budgetText ? Number.parseFloat(budgetText) : undefined;
     if (budgetText && (!Number.isFinite(budgetValue) || budgetValue! < 0)) {
-      setLocalError("Budget USD must be a non-negative number.");
-      return;
+      return { ok: false, error: "Budget USD must be a non-negative number." };
     }
 
     const adv = buildAdvancedConfig(
       batchPurpose === "evaluation" ? { ...advanced, skipVerifier: false } : advanced,
     );
     if (!adv.ok) {
-      setLocalError(`Advanced options: ${adv.error}`);
-      return;
+      return { ok: false, error: `Advanced options: ${adv.error}` };
     }
 
     const trial_config: Record<string, unknown> = { ...adv.value };
@@ -549,6 +539,32 @@ export function useNewBatch() {
     }
 
     const providerOverrides = providerSelection.value;
+
+    const payload: CreateBatchBody = {
+      team_id: currentTeamId,
+      purpose: batchPurpose,
+      task_filter,
+      trial_config,
+      combinations: combos.value,
+    };
+    const suffix = nameSuffix.trim();
+    if (suffix) payload.name_suffix = suffix;
+    if (budgetValue !== undefined) {
+      payload.budget_usd = budgetValue;
+      payload.budget_policy = budgetPolicy === "none" ? "hard" : budgetPolicy;
+      payload.budget_confirmed = budgetConfirmed;
+    }
+    return { ok: true, payload, providerOverrides };
+  };
+
+  const submit = async (): Promise<void> => {
+    setLocalError(null);
+    const result = buildSubmission();
+    if (!result.ok) {
+      setLocalError(result.error);
+      return;
+    }
+    const { payload, providerOverrides } = result;
     try {
       const manualOverrides = new Map<string, ProviderOverride>();
       for (const override of providerOverrides) {
@@ -568,20 +584,6 @@ export function useNewBatch() {
       return;
     }
 
-    const payload: CreateBatchBody = {
-      team_id: currentTeamId,
-      purpose: batchPurpose,
-      task_filter,
-      trial_config,
-      combinations: combos.value,
-    };
-    const suffix = nameSuffix.trim();
-    if (suffix) payload.name_suffix = suffix;
-    if (budgetValue !== undefined) {
-      payload.budget_usd = budgetValue;
-      payload.budget_policy = budgetPolicy === "none" ? "hard" : budgetPolicy;
-      payload.budget_confirmed = budgetConfirmed;
-    }
     create.mutate(payload);
   };
 
@@ -751,6 +753,7 @@ export function useNewBatch() {
     setConfirmedLargeFanOut,
     localError,
     submit,
+    buildSubmission,
     tagSelectionPending,
     submitButtonLabel,
   };

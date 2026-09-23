@@ -73,7 +73,7 @@ describe("Benchmarks page", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders readiness context, hidden-route guidance, and safe CLI snippets", async () => {
+  it("renders readiness context, guidance without exposing operator commands", async () => {
     setFrontendConfigForTests({
       environment: "staging",
       environmentLabel: "Staging",
@@ -86,19 +86,16 @@ describe("Benchmarks page", () => {
 
     expect(await screen.findByText("AIME 2025")).toBeInTheDocument();
     expect(screen.getByText("SWE-Bench Verified")).toBeInTheDocument();
-    expect(screen.getByText("Benchmark catalog guidance")).toBeInTheDocument();
-    expect(screen.getByText(/hidden power-user view/i)).toBeInTheDocument();
+    expect(screen.getByText("Benchmark readiness guide")).toBeInTheDocument();
+    expect(screen.getByText(/Missing or stale task configurations require operator attention/)).toBeInTheDocument();
     expect(screen.getByText("30 runnable tasks are registered.")).toBeInTheDocument();
     expect(
       screen.getByText("Publish/register tasks before selecting this benchmark."),
     ).toBeInTheDocument();
 
     const pageText = document.body.textContent ?? "";
-    expect(pageText).toContain("loom datasets list --remote");
-    expect(pageText).toContain(`--server-url ${window.location.origin}/dev`);
-    expect(pageText).toContain("--token env:LOOM_API_TOKEN");
-    expect(pageText).toContain('loom datasets audit --all --db-url "$LOOM_DB_URL"');
-    expect(pageText).toContain("loom datasets sync-config");
+    expect(pageText).not.toContain("loom datasets audit");
+    expect(pageText).not.toContain("LOOM_DB_URL");
     expect(pageText).not.toMatch(/\bsk-[A-Za-z0-9_-]+/i);
     expect(pageText).not.toMatch(/\bAuthorization:\s*Bearer\s+\S+/i);
     expect(pageText).not.toMatch(/X-Amz-Signature=/i);

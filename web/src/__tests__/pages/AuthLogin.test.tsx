@@ -120,15 +120,9 @@ describe("AuthLogin", () => {
     expect(screen.getAllByText("Request account").length).toBeGreaterThan(0);
     expect(screen.getByText("Forgot password")).toBeInTheDocument();
     expect(screen.getByText("CLI setup")).toBeInTheDocument();
-    expect(screen.getByText("First run checklist")).toBeInTheDocument();
-    expect(screen.getByText(/export LOOM_PASSWORD=\.\.\./)).toBeInTheDocument();
-    expect(screen.getByText(/loom auth whoami/)).toBeInTheDocument();
-    const cliCommand = screen.getByText(/loom auth login --server/i);
-    expect(cliCommand).toHaveTextContent(`${window.location.origin}/dev`);
-    expect(cliCommand).toHaveTextContent("--username USER --password env:LOOM_PASSWORD");
-    expect(cliCommand).not.toHaveTextContent("<server-url>");
-    expect(cliCommand).not.toHaveTextContent("LOOM_API_TOKEN");
-    expect(cliCommand.closest("pre")).toHaveClass("whitespace-pre-wrap");
+    expect(screen.getByText("Account setup guide")).toBeInTheDocument();
+    expect(screen.getByText("Connect through CLI or API")).toBeInTheDocument();
+    expect(screen.queryByText(/loom auth login --server/i)).not.toBeInTheDocument();
 
     expect(await screen.findByRole("option", { name: "Research" })).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("Requested username"), "Mark");

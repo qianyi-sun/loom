@@ -54,13 +54,9 @@ describe("ProviderCreate", () => {
     });
     renderPage();
     expect(screen.getByText(/third-party api/i)).toBeInTheDocument();
-    expect(screen.getByText("Hosted API CLI")).toBeInTheDocument();
-    expect(
-      screen.getByText(/loom auth login --server/i),
-    ).toHaveTextContent(`${window.location.origin}/dev`);
-    expect(screen.getByText(/loom providers create/)).toHaveTextContent(
-      "--api-key env:PROVIDER_API_KEY",
-    );
+    expect(screen.getByText("Provider setup guide")).toBeInTheDocument();
+    expect(screen.queryByText(/loom auth login --server/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/loom providers create/)).not.toBeInTheDocument();
   });
 
   it("with ?returnTo=/batches/new redirects there", async () => {

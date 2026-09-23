@@ -1,3 +1,4 @@
+import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialProgress";
 /**
@@ -14,10 +15,8 @@ import { api } from "../api";
 import type { components } from "../api/schema";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
-import CommandSnippet from "../components/CommandSnippet";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
-import DocsCallout from "../components/DocsCallout";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
@@ -443,17 +442,7 @@ function TrialHeader({
           )}
         </div>
 
-        <DocsCallout title="Trial download commands" tone="info">
-          <div className="grid gap-3 lg:grid-cols-2">
-            {trialDownloadCommands(trial.id, firstArtifactKey).map((command) => (
-              <CommandSnippet
-                key={command}
-                label="Trial CLI"
-                command={command}
-              />
-            ))}
-          </div>
-        </DocsCallout>
+        <CommandActions title="Trial download commands" label="Download with CLI" commands={trialDownloadCommands(trial.id, firstArtifactKey)} />
 
         {trial.artifacts.length > 0 ? (
           <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">

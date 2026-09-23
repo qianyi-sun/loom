@@ -657,10 +657,8 @@ describe("NewBatch", () => {
     expect(screen.getByText("Agent/model combinations")).toBeInTheDocument();
     expect(screen.getByText("Generated identity")).toBeInTheDocument();
     expect(screen.getByText("Advanced trial settings")).toBeInTheDocument();
-    expect(screen.getByText("CLI/API equivalent")).toBeInTheDocument();
-    expect(screen.getByText(/loom eval batch create/)).toHaveTextContent(
-      "--agent oracle",
-    );
+    expect(screen.getByRole("button", { name: "Export CLI / API" })).toBeInTheDocument();
+    expect(screen.queryByText("CLI/API equivalent")).not.toBeInTheDocument();
     expect(
       screen.getByText(
         /Shared settings applied to every trial unless a combination overrides them/i,
@@ -759,6 +757,36 @@ describe("NewBatch", () => {
       await screen.findByText(/Pick at least one native benchmark\./i),
     ).toBeInTheDocument();
     expect(batchCall(spy)).toBeNull();
+  });
+
+  it("exports the same validated payload as submit without creating a batch", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pick at least one native benchmark.");
+    expect(screen.getByRole("dialog").querySelector("pre")).toBeNull();
+    await user.keyboard("{Escape}");
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await screen.findByText(/12 tasks match across 1 benchmark/i);
+    await user.type(screen.getByLabelText(/Name suffix/i), "export's $(literal)");
+    await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
+    const dialog = await screen.findByRole("dialog");
+    const snapshot = JSON.parse(dialog.querySelector("pre")!.textContent!);
+    expect(dialog).toHaveTextContent("Set LOOM_USERNAME and LOOM_PASSWORD");
+    expect(dialog).not.toHaveTextContent("Set LOOM_TOKEN");
+    await user.click(within(dialog).getByRole("button", { name: "API" }));
+    expect(dialog).toHaveTextContent("Set LOOM_TOKEN to a user-owned API token");
+    expect(dialog).not.toHaveTextContent("Set LOOM_USERNAME");
+    expect(snapshot.name_suffix).toBe("export's $(literal)");
+    expect(batchCall(spy)).toBeNull();
+    expect(manualModelCall(spy)).toBeNull();
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    expect(batchCall(spy)!.body).toEqual(snapshot);
   });
 
   it("shows '<N> tasks match' once the count loads for the chosen benchmark", async () => {
@@ -1573,6 +1601,11 @@ describe("NewBatch", () => {
       await screen.findByPlaceholderText("manual-vllm-checkpoint"),
       "manual-vllm-checkpoint",
     );
+    await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Save manually entered models in Providers first");
+    expect(batchCall(spy)).toBeNull();
+    expect(manualModelCall(spy)).toBeNull();
+    await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
     await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
     expect(manualModelCall(spy)?.body).toEqual({

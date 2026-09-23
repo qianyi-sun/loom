@@ -5,6 +5,7 @@ import { queryKeys } from "../api/queryKeys";
  * separates user-owned next actions from operator-owned prerequisites.
  */
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
@@ -135,6 +136,7 @@ function LatestBatch({ data }: { data: OverviewSummary }): JSX.Element {
 }
 
 function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
+  const [guideExpanded, setGuideExpanded] = useState(true);
   const userActions = data.next_actions.filter(
     (action) => action.kind === "user",
   );
@@ -163,6 +165,33 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
           {statusLabel(data.status)}
         </StatusPill>
       </header>
+
+      <section aria-labelledby="getting-started-heading" className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-5">
+        <div className="flex items-center justify-between gap-4">
+          <h2 id="getting-started-heading" className="text-base font-semibold text-slate-900">
+            <Link to="/getting-started" className="rounded hover:text-accent">Start using Loom</Link>
+          </h2>
+          <button
+            type="button"
+            aria-expanded={guideExpanded}
+            aria-controls="getting-started-content"
+            aria-label={guideExpanded ? "Collapse getting started" : "Expand getting started"}
+            onClick={() => setGuideExpanded((expanded) => !expanded)}
+            className="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            {guideExpanded ? "Collapse" : "Expand"}
+          </button>
+        </div>
+        <div id="getting-started-content" hidden={!guideExpanded}>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-4">
+            <p className="text-sm text-slate-600">Run evaluations, generate trajectories, and bring results into your workflow.</p>
+            <div className="flex flex-wrap gap-2">
+              <Link to="/getting-started?channel=web" className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover">Use the web app</Link>
+              <Link to="/getting-started?channel=cli" className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:border-accent">Connect with CLI / API</Link>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <Card>
         <Card.Header

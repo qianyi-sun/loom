@@ -1,4 +1,5 @@
 import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "../../App";
@@ -141,6 +142,23 @@ describe("Home overview", () => {
     vi.restoreAllMocks();
   });
 
+  it("collapses and reopens the guide while keeping its title link and overview", async () => {
+    mockHomeFetch();
+    renderWithProviders(<App />, { route: "/" });
+    const user = userEvent.setup();
+    const collapse = await screen.findByRole("button", { name: "Collapse getting started" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    await user.click(collapse);
+    const expand = screen.getByRole("button", { name: "Expand getting started" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("link", { name: "Use the web app" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Start using Loom" })).toHaveAttribute("href", "/getting-started");
+    expect(screen.getByRole("heading", { name: "Provider health" })).toBeInTheDocument();
+    await user.click(expand);
+    expect(screen.getByRole("link", { name: "Use the web app" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Connect with CLI / API" })).toBeVisible();
+  });
+
   it("renders as the authenticated root route with user next actions", async () => {
     mockHomeFetch();
 
@@ -149,6 +167,9 @@ describe("Home overview", () => {
     expect(
       await screen.findByRole("heading", { name: "Team overview" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Start using Loom" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Use the web app" })).toHaveAttribute("href", "/getting-started?channel=web");
+    expect(screen.getByRole("link", { name: "Connect with CLI / API" })).toHaveAttribute("href", "/getting-started?channel=cli");
     expect(screen.getAllByText("EAI").length).toBeGreaterThan(0);
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("1 ready")).toBeInTheDocument();
