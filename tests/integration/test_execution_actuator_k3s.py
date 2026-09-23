@@ -272,6 +272,11 @@ def _start_k3s(*, node_name: str | None = None, ephemeral_storage_floor: str | N
                 "server",
                 "--disable=traefik",
                 "--disable=servicelb",
+                # Disposable Docker nodes have no cloud integration. K3s's
+                # embedded CCM can exit during its own RBAC bootstrap and take
+                # the test API down; neither it nor ServiceLB is needed here.
+                # Keep ordinary API RBAC, scheduling, CNI and policies enabled.
+                "--disable-cloud-controller",
                 "--tls-san=127.0.0.1",
                 "--write-kubeconfig-mode=644",
                 *([] if node_name is None else [f"--node-name={node_name}"]),
@@ -302,10 +307,21 @@ def _load_client(container: object) -> tuple[object, object, object]:
             core = client.CoreV1Api()
             batch = client.BatchV1Api()
             try:
-                core.get_api_resources()
-                return client, core, batch
+                core.get_api_resources(_request_timeout=5)
             except Exception as exc:  # API server is not ready yet.
                 last_error = str(exc)
+            else:
+                # Discovery can serve before the namespace bootstrap controller.
+                # Callers bind cluster identity to this namespace's actual UID;
+                # wait for creation, never create it or substitute an identity.
+                try:
+                    core.read_namespace("kube-system", _request_timeout=5)
+                except client.exceptions.ApiException as exc:
+                    if exc.status != 404:
+                        raise
+                    last_error = "kube-system namespace bootstrap pending"
+                else:
+                    return client, core, batch
         time.sleep(1)
     raise AssertionError(f"disposable k3s did not become ready: {last_error}")
 

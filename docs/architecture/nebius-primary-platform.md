@@ -133,6 +133,26 @@ readiness, legacy-host probes and rollback; certificate renewal must also reload
 the controller. Management/personal activation remains closed until that installed
 route is verified. See the [deployment runbook](../runbooks/nebius-deployment.md).
 
+The private `scripts/ops/nebius_ingress_gateway.py` primitives deliver qualified
+certificate generations as immutable, separately named TLS Secrets. The protected
+binding includes exact cluster and destination-namespace UIDs. A private durable
+intent precedes creation; matching UID, ownership and material readback resolves
+an unknown reply. An untracked Secret is not adopted and a missing recorded Secret
+is not recreated. Previous generations remain available for recovery.
+
+For an already owned controller, certificate switching freshly validates the
+selected certificate and delivery receipt, journals intent, and submits one
+UID/resourceVersion-conditioned patch to only the mounted Secret reference.
+Unknown outcomes require exact spec/generation readback, never a repeated write.
+`controller_switch_observed` is not readiness. Separate qualification requires
+current owned Pods, stable membership and an authenticated TLS fingerprint from
+each exact Pod through a bounded loopback-only port-forward. Disposable Kubernetes
+coverage proves fresh-Pod rotation and retained legacy HTTPS/TLS-ALPN passthrough.
+
+These primitives do not expose a protected installation operation. Initial
+resource staging, mirrored-image publication, guarded public selector/configuration
+cutover and renewal scheduling remain separate installation requirements.
+
 ## Independent management service runtime
 
 Management mode bounds request reception before routing, JSON parsing or
