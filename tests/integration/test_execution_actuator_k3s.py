@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import shlex
 import ssl
 import subprocess
 import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -454,7 +456,70 @@ async def _wait_for_allowed_peer(
             return result
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise AssertionError(f"allowed Gateway Service did not become reachable: {result}")
+            raise AssertionError(f"allowed peer {namespace}/{name} {url} did not become reachable: {result}")
+        await asyncio.sleep(min(0.25, remaining))
+
+
+def _policy_programming_gaps(
+    saved_rules: str, expected: dict[str, tuple[str, tuple[str, ...]]]
+) -> list[str]:
+    """Observe pinned kube-router installation, independently of traffic outcomes."""
+    chains: dict[str, list[list[str]]] = {}
+    for line in saved_rules.splitlines():
+        if line.startswith("-A "):
+            rule = shlex.split(line)
+            chains.setdefault(rule[1], []).append(rule[2:])
+
+    def option(rule: list[str], name: str) -> str | None:
+        return rule[rule.index(name) + 1] if name in rule else None
+
+    if not any(option(rule, "-j") == "KUBE-ROUTER-FORWARD" for rule in chains.get("FORWARD", [])):
+        return ["FORWARD has no kube-router hook"]
+    missing = []
+    forward = chains.get("KUBE-ROUTER-FORWARD", [])
+    for name, (ip, policies) in expected.items():
+        candidates = {
+            option(rule, "-j") for rule in forward
+            if option(rule, "-s") == f"{ip}/32" and (option(rule, "-j") or "").startswith("KUBE-POD-FW-")
+        }
+        installed = False
+        for chain in candidates:
+            rules = chains.get(chain, [])
+            comments = {
+                option(rule, "--comment") for rule in rules
+                if (option(rule, "-j") or "").startswith("KUBE-NWPLCY-")
+            }
+            installed = (
+                any(option(rule, "-d") == f"{ip}/32" and option(rule, "-j") == chain for rule in forward)
+                and any(option(rule, "-j") == "REJECT" for rule in rules)
+                and all(f"run through nw policy {policy}" in comments for policy in policies)
+            )
+            if installed:
+                break
+        if not installed:
+            missing.append(f"{name} ({ip}): Pod hook/policy attachment not installed")
+    return missing
+
+
+async def _wait_for_policy_programming(
+    container: object, expected: dict[str, tuple[str, tuple[str, ...]]], *, timeout: float = 30,
+) -> None:
+    # Pod Ready does not acknowledge kube-router's asynchronous rule programming.
+    # This checks converged policy behavior, not isolation from Pod creation time.
+    deadline = time.monotonic() + timeout
+    while True:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(container.exec, ["iptables-save", "-t", "filter"]), timeout=5,
+        )
+        rules = result.output.decode("utf-8", errors="replace")
+        if result.exit_code != 0:
+            raise AssertionError(f"cannot inspect disposable k3s policy rules: {rules[-65536:]}")
+        gaps = _policy_programming_gaps(rules, expected)
+        if not gaps:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"kube-router programming did not converge: {gaps}\nlast filter snapshot:\n{rules[-65536:]}")
         await asyncio.sleep(min(0.25, remaining))
 
 
@@ -473,6 +538,50 @@ async def test_allowed_peer_failure_is_bounded_and_retains_cause(
     monkeypatch.setattr(__name__ + "._pod_probe", lambda *args: "exit:1 reason:timeout")
     with pytest.raises(AssertionError, match="reason:timeout"):
         await _wait_for_allowed_peer(None, "test", "client", "http://gateway", timeout=0.01)
+
+
+_PROGRAMMED_POLICY = '''-A FORWARD -j KUBE-ROUTER-FORWARD
+-A KUBE-ROUTER-FORWARD -s 10.42.0.8/32 -j KUBE-POD-FW-CLIENT
+-A KUBE-ROUTER-FORWARD -d 10.42.0.8/32 -j KUBE-POD-FW-CLIENT
+-A KUBE-POD-FW-CLIENT -m comment --comment "run through nw policy deny" -j KUBE-NWPLCY-DENY
+-A KUBE-POD-FW-CLIENT -m comment --comment "run through nw policy egress" -j KUBE-NWPLCY-EGRESS
+-A KUBE-POD-FW-CLIENT -m mark ! --mark 0x10000/0x10000 -j REJECT
+'''
+_EXPECTED_POLICY = {"client": ("10.42.0.8", ("deny", "egress"))}
+
+
+@pytest.mark.parametrize("missing", ["FORWARD", "-s 10.42", "-d 10.42", 'policy deny"', 'policy egress"', "-j REJECT"])
+def test_policy_readiness_rejects_partial_installation(missing: str) -> None:
+    incomplete = "\n".join(line for line in _PROGRAMMED_POLICY.splitlines() if missing not in line)
+    assert _policy_programming_gaps(incomplete, _EXPECTED_POLICY)
+    assert not _policy_programming_gaps(_PROGRAMMED_POLICY, _EXPECTED_POLICY)
+
+
+def test_policy_readiness_does_not_accept_another_pods_rules() -> None:
+    assert _policy_programming_gaps(_PROGRAMMED_POLICY.replace("10.42.0.8", "10.42.0.9"), _EXPECTED_POLICY)
+    assert _policy_programming_gaps(_PROGRAMMED_POLICY, {**_EXPECTED_POLICY, "other": ("10.42.0.9", ("deny",))})
+
+
+async def test_policy_readiness_waits_for_installation_without_traffic_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshots = iter((b"*filter\nCOMMIT", _PROGRAMMED_POLICY.encode()))
+
+    def inspect(command):
+        assert command == ["iptables-save", "-t", "filter"]
+        return SimpleNamespace(exit_code=0, output=next(snapshots))
+
+    def no_probe(*args):
+        pytest.fail("readiness must not learn by retrying forbidden traffic")
+
+    monkeypatch.setattr(__name__ + "._pod_probe", no_probe)
+    await _wait_for_policy_programming(SimpleNamespace(exec=inspect), _EXPECTED_POLICY, timeout=1)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_policy_readiness_failure_preserves_bounded_rules(exit_code: int) -> None:
+    container = SimpleNamespace(exec=lambda command: SimpleNamespace(exit_code=exit_code, output=b"#" * 70000 + b"tail-evidence"))
+    with pytest.raises(AssertionError, match="tail-evidence") as error:
+        await _wait_for_policy_programming(container, _EXPECTED_POLICY, timeout=0.01)
+    assert len(str(error.value)) < 67000
 
 
 async def test_actuator_api_converges_against_disposable_k3s() -> None:
@@ -714,6 +823,24 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
                 )
                 for item in pods
             }
+            attempt_policies = ("loom-execution-attempt-default-deny", "loom-execution-attempt-egress")
+            expected_policies = {
+                "execution-client": attempt_policies,
+                "execution-server": attempt_policies,
+                "gateway": ("loom-llm-gateway",),
+                "object-store": ("loom-minio",),
+            }
+            await _wait_for_policy_programming(container, {
+                name: (ready[name].status.pod_ip, policies) for name, policies in expected_policies.items()
+            })
+            # A denied connection is meaningful only when the target is serving.
+            # Loopback proves this without depending on the policy under test.
+            for name, namespace, port in (
+                ("object-store", platform_namespace, 9000),
+                ("blocked-service", platform_namespace, 8080),
+                ("execution-server", attempt_namespace, 8080),
+            ):
+                await _wait_for_allowed_peer(core, namespace, name, f"http://127.0.0.1:{port}")
             allowed = await _wait_for_allowed_peer(
                 core,
                 attempt_namespace,
@@ -745,6 +872,14 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
                 "http://blocked-service.loom.svc.cluster.local:8080",
             )
             assert "exit:0" not in blocked
+            # Also use Pod IPs: a Service with unprogrammed endpoints must not
+            # make the forbidden-peer assertions pass for the wrong reason.
+            for name, port in (("object-store", 9000), ("blocked-service", 8080)):
+                direct = await asyncio.to_thread(
+                    _pod_probe, core, attempt_namespace, "execution-client",
+                    f"http://{ready[name].status.pod_ip}:{port}",
+                )
+                assert "exit:0" not in direct, f"forbidden direct peer {name} was reachable: {direct}"
             public = await asyncio.to_thread(
                 _pod_probe,
                 core,
@@ -762,6 +897,16 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
                 f"http://{execution_ip}:8080",
             )
             assert "exit:0" not in ingress
+    except AssertionError as error:
+        if container is not None:
+            try:
+                snapshot = await asyncio.wait_for(
+                    asyncio.to_thread(container.exec, ["iptables-save", "-t", "filter"]), timeout=5,
+                )
+                error.add_note(f"filter snapshot exit={snapshot.exit_code}:\n{snapshot.output[-65536:].decode(errors='replace')}")
+            except Exception as diagnostic_error:
+                error.add_note(f"filter snapshot unavailable: {type(diagnostic_error).__name__}")
+        raise
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)
