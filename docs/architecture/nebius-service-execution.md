@@ -719,7 +719,11 @@ The independent verifier receives the same absolute paths, including deletions,
 mode and ownership, before running private tests. There are at most 16 roots,
 100,000 entries and 256 MiB aggregate archived/expanded content. Runtime and
 verifier roots, overlapping roots, symlink ancestors, escaping links, special
-files and cross-root hardlinks are rejected. Ownership that the verifier cannot
+files and cross-root hardlinks are rejected. Relative and absolute symlink
+targets must resolve within their own declared root; original target strings
+are preserved. Validation follows directory links before resolving `..` and
+rejects any intermediate private path, escape, cycle or chain over 40 links.
+Ownership that the verifier cannot
 restore is an explicit handoff failure. This does not copy an entire writable
 container layer or expose private verifier dependencies to task mutations.
 

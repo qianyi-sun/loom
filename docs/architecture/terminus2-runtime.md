@@ -31,9 +31,15 @@ worker also verifies the materialized task checksum before agent startup, keeps
 private tests/solutions/verifier files out of this agent runtime, and creates a
 fresh verifier-only driver after Terminus-2 exits. The public agent workspace
 is handed to that driver as a validated archive snapshot so directory layout,
-regular-file modes, safe workspace-relative symlinks, and hardlinks remain
-score-equivalent. Traversal, absolute/private link targets, devices, FIFOs, and
-sockets fail closed. Restoration replaces public workdir contents, including
+regular-file modes, safe relative and absolute symlinks, and hardlinks remain
+score-equivalent. Absolute symlink targets must stay inside the declared
+snapshot root, which is the same path in both sandboxes; their original strings
+are preserved. Link chains resolve in filesystem component order, before parent
+components (`..`), and every intermediate target must remain inside that root
+and outside private paths. Cross-root links, cycles, chains exceeding Linux's
+40-link limit, traversal, devices, FIFOs, and sockets fail closed. These checks
+also apply independently to each declared mutable directory snapshot.
+Restoration replaces public workdir contents, including
 deletions, while preserving freshly staged private verifier inputs and their
 parent directories. It rejects symlink destinations, incomplete inventories,
 and archive entries that would replace a parent of a preserved private input

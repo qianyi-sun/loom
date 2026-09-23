@@ -85,6 +85,48 @@ async def test_handoff_preserves_workspace_filesystem_semantics(
     assert checked.return_code == 0, checked.stderr
 
 
+async def test_handoff_preserves_absolute_link_targets_and_resolution(
+    docker_drivers: tuple[Driver, Driver],
+) -> None:
+    agent, verifier = docker_drivers
+    created = await agent.exec(
+        "mkdir -p /workspace/data/sub /workspace/tests && "
+        "printf answer > /workspace/data/file && "
+        "printf private > /workspace/tests/secret && "
+        "ln -s /workspace/data /workspace/absolute-dir && "
+        "ln -s /workspace/data/file /workspace/absolute-file && "
+        "ln -s /workspace/data/sub /workspace/nested && "
+        "ln -s nested/../file /workspace/chain && "
+        "ln -s /workspace/data/future /workspace/dangling",
+        user="root",
+    )
+    assert created.return_code == 0, created.stderr
+    assert (await verifier.exec(
+        "mkdir -p /workspace/tests && printf trusted > /workspace/tests/secret",
+        user="root",
+    )).return_code == 0
+
+    await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier,
+        workdir=PurePosixPath("/workspace"),
+        policy=WorkspaceStagingPolicy.from_provenance(TB21_AGENT_WORKSPACE_POLICY),
+    )
+
+    checked = await verifier.exec(
+        "set -eu; "
+        'test "$(readlink /workspace/absolute-dir)" = /workspace/data; '
+        'test "$(readlink /workspace/absolute-file)" = /workspace/data/file; '
+        'test "$(cat /workspace/absolute-dir/file)" = answer; '
+        'test "$(cat /workspace/absolute-file)" = answer; '
+        'test "$(readlink /workspace/chain)" = nested/../file; '
+        'test "$(cat /workspace/chain)" = answer; '
+        'test "$(readlink /workspace/dangling)" = /workspace/data/future; '
+        'test "$(cat /workspace/tests/secret)" = trusted',
+        user="root",
+    )
+    assert checked.return_code == 0, checked.stderr
+
+
 async def test_handoff_replaces_public_state_and_preserves_nested_private_files(
     docker_drivers: tuple[Driver, Driver],
 ) -> None:

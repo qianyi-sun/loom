@@ -218,7 +218,10 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(driver, task.environment.workdir, archive)
                         await asyncio.to_thread(_strip_private_entries, archive, _POLICY)
-                        await asyncio.to_thread(_validate_workspace_archive, archive, _POLICY)
+                        await asyncio.to_thread(
+                            _validate_workspace_archive, archive, _POLICY,
+                            root=task.environment.workdir,
+                        )
                         if task.environment.mutable_paths:
                             await export_mutable_paths(
                                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",

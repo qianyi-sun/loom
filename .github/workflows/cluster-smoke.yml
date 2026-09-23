@@ -221,6 +221,17 @@ jobs:
           uv sync --locked --all-packages --extra dev --extra cluster --extra rollout --python 3.11
           uv pip check --python .venv/bin/python
 
+      - name: Install pinned registry qualification tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          apt_sources=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=-)
+          sudo apt-get "${apt_sources[@]}" update
+          sudo apt-get "${apt_sources[@]}" install -y --no-install-recommends skopeo=1.13.3+ds1-2ubuntu0.24.04.3
+          test "$(dpkg-query -W -f='${Version}' skopeo)" = '1.13.3+ds1-2ubuntu0.24.04.3'
+          skopeo --version
+
       - name: Verify manifest-owned k3s and rollout candidate contracts
         env:
           LOOM_RUN_DISPOSABLE_K3S: "1"

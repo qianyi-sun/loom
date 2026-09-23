@@ -302,6 +302,21 @@ old Secrets. Never erase the intent or repeat a write to make it disappear; only
 exact readback can reconcile it. Renewal stays unscheduled until the protected
 issuance, delivery, reload and public-route qualification are connected.
 
+Initial resource staging and region-image publication have separate private
+primitives in `nebius_ingress_stage.py` and `nebius_ingress_image.py`; neither is
+a shared-cluster operator entrypoint. Staging freezes all eight renderer objects,
+their full defaulted configurations and returned UIDs. It preserves the existing
+public Service and refuses adoption or missing-resource recreation. Retain its
+initial journal unchanged when later using the TLS rotation operation.
+
+Image publication requires private, freshly minted auth scoped to the exact
+region registry. It copies only the pinned Traefik manifest, using a digest-only
+destination, and verifies raw manifest/configuration hashes plus architecture and
+version. Preserve `image-mirror.json` on any failure; an unresolved recorded copy
+is read back, not automatically repeated. `mirrored` is image-identity evidence,
+not a vulnerability scan, controller readiness or public cutover. The protected
+orchestrator still needs to connect these primitives to installation authority.
+
 ### Render management manifests
 
 Management HTTP requests default to a 1 MiB body limit, eight in-flight requests
