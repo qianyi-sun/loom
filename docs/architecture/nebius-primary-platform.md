@@ -158,9 +158,23 @@ current owned Pods, stable membership and an authenticated TLS fingerprint from
 each exact Pod through a bounded loopback-only port-forward. Disposable Kubernetes
 coverage proves fresh-Pod rotation and retained legacy HTTPS/TLS-ALPN passthrough.
 
-These primitives do not expose a protected installation operation. Initial
-resource staging, mirrored-image publication, guarded public selector/configuration
-cutover and renewal scheduling remain separate installation requirements.
+Initial staging in `scripts/ops/nebius_ingress_stage.py` journals the eight fixed
+renderer resources before any create. It rejects name collisions, freezes full
+server-defaulted configuration, and reconciles unknown outcomes by exact UID and
+configuration readback. Replay cannot adopt, recreate or update recorded resources.
+The initial staging journal is immutable; certificate rotation uses the separate
+controller-switch journal. `controller_staged` does not establish TLS readiness.
+
+`scripts/ops/nebius_ingress_image.py` copies the qualified single-platform Traefik
+manifest into the protected region registry by digest, without changing a mutable
+tag. Both manifest and raw configuration bytes must match their digests, platform
+and version. A private journal precedes the single copy; replay only rechecks the
+destination. The protected caller supplies short-lived registry-only auth. This
+publication primitive does not perform vulnerability scanning or install ingress.
+
+These primitives do not expose a protected installation operation. Connected
+transport, fresh foundation/capacity binding, guarded public selector/configuration
+cutover, DNS publication and renewal scheduling remain installation requirements.
 
 ## Independent management service runtime
 
