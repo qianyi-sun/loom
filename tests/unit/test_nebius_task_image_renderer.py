@@ -504,11 +504,15 @@ def test_native_selector_rejects_conflicting_target_constraints(inputs, constrai
 
 @pytest.mark.parametrize("export_format", ["archive", "directory"])
 @pytest.mark.parametrize("cache_enabled", [False, True])
-def test_generated_build_script_is_valid_posix_shell(inputs, export_format, cache_enabled) -> None:
+@pytest.mark.parametrize("component_count", [1, 2])
+def test_generated_build_script_is_valid_posix_shell(
+    inputs, export_format, cache_enabled, component_count,
+) -> None:
     inputs["config"] = replace(
         inputs["config"], oci_export_format=export_format,
         cache_secret_name="cache-access" if cache_enabled else None,
     )
+    inputs["components"] = inputs["components"][:component_count]
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
     result = subprocess.run(["sh", "-n"], input=script, text=True, capture_output=True)
@@ -517,8 +521,10 @@ def test_generated_build_script_is_valid_posix_shell(inputs, export_format, cach
 
 @pytest.mark.parametrize("export_format", ["archive", "directory"])
 @pytest.mark.parametrize(("build_exit", "expected_exit"), [(0, 0), (42, 1), (124, 124)])
+@pytest.mark.parametrize("component_count", [1, 2])
 def test_generated_build_script_preserves_outcomes_and_valid_stage_json(
     inputs, tmp_path: Path, export_format: str, build_exit: int, expected_exit: int,
+    component_count: int,
 ) -> None:
     # Execute the generated shell with a controlled external build command.
     # Redirect its two container-local directories into this test's own tree.
@@ -528,7 +534,7 @@ def test_generated_build_script_preserves_outcomes_and_valid_stage_json(
         inputs["config"], oci_export_format=export_format,
         max_processes=process_limit if process_limit > 0 else 1_000_000,
     )
-    inputs["components"] = inputs["components"][:1]
+    inputs["components"] = inputs["components"][:component_count]
     _, job = render_task_image_job(**inputs)
     script = job["spec"]["template"]["spec"]["initContainers"][1]["command"][-1]
     script = script.replace("/scratch", str(tmp_path / "scratch"))
@@ -559,16 +565,21 @@ esac
     )
     assert result.returncode == expected_exit, result.stderr
     events = [json.loads(line) for line in result.stdout.splitlines()]
-    solve_end = next(event for event in events
-                     if event["loom_task_image_stage"] == "solve" and event["event"] == "end")
-    assert isinstance(solve_end["duration_ms"], int) and solve_end["duration_ms"] >= 0
+    solve_ends = [event for event in events
+                  if event["loom_task_image_stage"] == "solve" and event["event"] == "end"]
+    for event in solve_ends:
+        assert isinstance(event["duration_ms"], int) and event["duration_ms"] >= 0
     if build_exit:
+        (solve_end,) = solve_ends
+        assert solve_end["component_index"] == 0
         assert solve_end["failed"] is True
         assert solve_end["exit"] == build_exit
         assert len(events) == 2
     else:
-        assert "failed" not in solve_end
-        exported = next(event for event in events if event["loom_task_image_stage"] == "oci_export")
-        assert exported["bytes"] == 7
+        assert [event["component_index"] for event in solve_ends] == list(range(component_count))
+        assert all("failed" not in event for event in solve_ends)
+        exported = [event for event in events if event["loom_task_image_stage"] == "oci_export"]
+        assert [event["bytes"] for event in exported] == [7] * component_count
+        assert len(events) == 5 * component_count
         assert events[-1]["loom_task_image_stage"] == "cleanup"
         assert events[-1]["event"] == "end"
