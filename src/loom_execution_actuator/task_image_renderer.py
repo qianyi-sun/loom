@@ -49,6 +49,8 @@ class TaskImageJobConfig:
     max_processes: int = 512
     active_deadline_seconds: int = 1800
     snapshotter: Literal["overlayfs", "native"] = "overlayfs"
+    export_cache_mode: Literal["max", "min"] = "max"
+    oci_export_format: Literal["archive", "directory"] = "archive"
 
     def __post_init__(self) -> None:
         for image in (self.service_image, self.buildkit_image):
@@ -71,6 +73,10 @@ class TaskImageJobConfig:
             raise ValueError("native task-image builds require at least 16 GiB ephemeral storage")
         if self.snapshotter not in {"overlayfs", "native"}:
             raise ValueError("task-image snapshotter must be overlayfs or native")
+        if self.export_cache_mode not in {"max", "min"}:
+            raise ValueError("task-image export_cache_mode must be max or min")
+        if self.oci_export_format not in {"archive", "directory"}:
+            raise ValueError("task-image oci_export_format must be archive or directory")
 
 
 def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
@@ -95,6 +101,8 @@ def _build_script(
     build_timeout_seconds: int,
     build_args: dict[str, str] | None = None,
     build_target: str | None = None,
+    export_cache_mode: Literal["max", "min"] = "max",
+    oci_export_format: Literal["archive", "directory"] = "archive",
 ) -> str:
     lines = [
         "set -eu",
@@ -109,7 +117,18 @@ def _build_script(
         dockerfile_dir = PurePosixPath(_BUILD, "context", dockerfile.parent).as_posix()
         cache_in = f"{_BUILD}/cache-in/{index}"
         cache_out = f"{_BUILD}/cache-out/{index}"
-        output = f"{_BUILD}/{component.oci_output_path}"
+        if oci_export_format == "directory":
+            relative = component.oci_output_path.removesuffix(".tar")
+            output = f"{_BUILD}/{relative}"
+            output_spec = f"type=oci,dest={output},tar=false"
+            bytes_expr = (
+                f"$(find {shlex.quote(output)} -type f -exec wc -c {{}} + 2>/dev/null "
+                "| awk 'END {print $1+0}')"
+            )
+        else:
+            output = f"{_BUILD}/{component.oci_output_path}"
+            output_spec = f"type=oci,dest={output}"
+            bytes_expr = f"$(wc -c < {shlex.quote(output)})"
         argv = [
             "timeout", "-s", "TERM", "-k", "10", str(build_timeout_seconds),
             # BusyBox passes through child signal exits; the waiting shell marks
@@ -130,7 +149,7 @@ def _build_script(
             "--opt",
             f"platform={platform}",
             "--output",
-            f"type=oci,dest={output}",
+            output_spec,
         ]
         if component.name == "task":
             for key, value in sorted((build_args or {}).items()):
@@ -139,13 +158,17 @@ def _build_script(
                 argv.extend(["--opt", f"target={build_target}"])
         lines.append("set --")
         if cache_enabled:
-            argv.extend(["--export-cache", f"type=local,dest={cache_out},mode=max"])
+            argv.extend(
+                [
+                    "--export-cache",
+                    f"type=local,dest={cache_out},mode={export_cache_mode}",
+                ]
+            )
             lines.append(
                 f"if [ -f {shlex.quote(cache_in + '/index.json')} ]; then set -- --import-cache {shlex.quote('type=local,src=' + cache_in)}; fi"
             )
-        # Stage timing (Phase 2): solve covers buildctl LLB solve + OCI archive
-        # write (--output type=oci). oci_export records resulting bytes only;
-        # separate wall time needs an export-path change (Phase 5).
+        # Stage timing (Phase 2/5): solve covers buildctl LLB solve + OCI write.
+        # oci_export records resulting bytes (archive size or directory sum).
         lines.extend(
             [
                 (
@@ -161,7 +184,7 @@ def _build_script(
                 ),
                 (
                     '  echo \'{"loom_task_image_stage":"oci_export","event":"end",'
-                    f'"component_index":{index},"included_in":"solve","bytes":\'"$(wc -c < {shlex.quote(output)})"\'}}\''
+                    f'"component_index":{index},"included_in":"solve","bytes":\'"{bytes_expr}"\'}}\''
                 ),
                 (
                     '  echo \'{"loom_task_image_stage":"cleanup","event":"start",'
@@ -222,6 +245,9 @@ def render_task_image_job(
         for index, component in enumerate(checked)
     ):
         raise ValueError("task-image components must retain canonical unique output identities")
+    # Directory export rewrites dests in the Job claim JSON only; plan schema and
+    # TaskImageBuildComponentV1 still use oci/NNNN.tar. The build script strips
+    # .tar when oci_export_format=directory.
     frozen = copy.deepcopy(claim)
     environment = (
         TaskConfig.model_validate(frozen["task_config"]).environment
@@ -235,7 +261,12 @@ def render_task_image_job(
     architecture = frozen.get("cpu_arch")
     if architecture not in {"x86_64", "arm64"}:
         raise ValueError("task-image claim requires an explicit supported architecture")
-    frozen["components"] = [component.model_dump(mode="json") for component in checked]
+    frozen["components"] = []
+    for index, component in enumerate(checked):
+        payload = component.model_dump(mode="json")
+        if config.oci_export_format == "directory":
+            payload["oci_output_path"] = f"oci/{index:04d}"
+        frozen["components"].append(payload)
     claim_body = json.dumps(frozen, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(claim_body.encode()) > 256 * 1024:
         raise ValueError("task-image claim exceeds the ConfigMap limit")
@@ -327,6 +358,8 @@ def render_task_image_job(
                 ),
                 build_args=environment.docker_build_args if environment else None,
                 build_target=environment.docker_build_target if environment else None,
+                export_cache_mode=config.export_cache_mode,
+                oci_export_format=config.oci_export_format,
             ),
         ],
         "env": [

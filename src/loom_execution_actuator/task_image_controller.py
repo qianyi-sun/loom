@@ -40,6 +40,7 @@ from loom_control_plane.task_image_materializations import (
     fail_task_image_materialization,
     has_nebius_task_image_demand,
     heartbeat_task_image_materialization,
+    same_task_compatible_cache_key,
     start_task_image_materialization,
     task_image_materialization_payload,
 )
@@ -433,6 +434,18 @@ class NativeTaskImageController:
         assert attempt is not None
         try:
             claim = {**task_image_materialization_payload(row), **self.settings.runtime_configuration()}
+            if (
+                self.settings.compatible_revision_cache == "same_task"
+                and self.settings.cache_bucket is not None
+            ):
+                donor = await same_task_compatible_cache_key(
+                    session,
+                    task_id=row.task_id,
+                    cpu_arch=row.cpu_arch,
+                    exclude_materialization_key=row.materialization_key,
+                )
+                if donor is not None:
+                    claim["cache_import_materialization_key"] = donor
             components = derive_task_image_build_components(row.task_config)
             cm, job = render_task_image_job(materialization_id=row.id, lease_epoch=row.lease_epoch,
                                            claim=claim, components=components, target=self.target,

@@ -42,6 +42,7 @@ from loom.trajectory.storage import (
 from loom_execution_actuator.task_image_oci import (
     NativeOCIArchiveError,
     validate_native_oci_archive,
+    validate_native_oci_directory,
 )
 
 _FILE_LIMIT = 2000
@@ -105,6 +106,17 @@ def load_claim(path: Path) -> dict[str, Any]:
         raise BuildPreparationError("task image repository exceeds receipt size budget")
     if len(derive_task_image_build_components(claim["task_config"])) > 8:
         raise BuildPreparationError("native build supports at most eight image components")
+    hint = claim.get("cache_import_materialization_key")
+    if hint is not None and (
+        not isinstance(hint, str) or not _KEY.fullmatch(hint)
+    ):
+        raise BuildPreparationError("invalid compatible cache import identity")
+    transfer = claim.get("cache_transfer", "blobs")
+    if transfer not in {"tar", "blobs"}:
+        raise BuildPreparationError("invalid cache transfer mode")
+    export_format = claim.get("oci_export_format", "archive")
+    if export_format not in {"archive", "directory"}:
+        raise BuildPreparationError("invalid OCI export format")
     return claim
 
 
@@ -253,6 +265,366 @@ def _cache_prefix(claim: dict[str, Any]) -> str:
     return f"task-build-cache/{claim['materialization_key']}/"
 
 
+def _cache_transfer_mode(claim: dict[str, Any]) -> str:
+    mode = claim.get("cache_transfer", "blobs")
+    return mode if mode in {"tar", "blobs"} else "blobs"
+
+
+def _oci_export_format(claim: dict[str, Any]) -> str:
+    mode = claim.get("oci_export_format", "archive")
+    return mode if mode in {"archive", "directory"} else "archive"
+
+
+def _v2_manifest_key(materialization_key: str, index: int) -> str:
+    return f"task-build-cache/v2/{materialization_key}/{index}/manifest.json"
+
+
+def _v2_blob_key(digest: str) -> str:
+    return f"task-build-cache/v2/blobs/{digest}"
+
+
+_LEGACY_TAR = re.compile(r"task-build-cache/[0-9a-f]{64}/[0-7]\.tar\Z")
+_V2_MANIFEST = re.compile(r"task-build-cache/v2/[0-9a-f]{64}/[0-7]/manifest\.json\Z")
+_V2_BLOB = re.compile(r"task-build-cache/v2/blobs/[0-9a-f]{64}\Z")
+
+
+def _cache_import_candidates(claim: dict[str, Any]) -> list[tuple[str, str]]:
+    """Ordered (source, materialization_key) pairs for BuildKit cache import.
+
+    Exact key first; optional same-task prior key only when the controller set a
+    claim hint. Publish always writes under the claim's own materialization_key.
+    """
+    current = claim["materialization_key"]
+    candidates = [("exact", current)]
+    hint = claim.get("cache_import_materialization_key")
+    if isinstance(hint, str) and _KEY.fullmatch(hint) and hint != current:
+        candidates.append(("compatible", hint))
+    return candidates
+
+
+def _object_absent(error: ClientError) -> bool:
+    return error.response.get("Error", {}).get("Code") in {
+        "NoSuchKey",
+        "404",
+        "NotFound",
+        "NoSuchBucket",
+    }
+
+
+def _parse_cache_manifest(body: bytes) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(body)
+    except ValueError as error:
+        raise BuildPreparationError("cache manifest is malformed") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or not isinstance(payload.get("files"), list)
+        or len(payload["files"]) > 10000
+    ):
+        raise BuildPreparationError("cache manifest is unsupported")
+    entries: list[dict[str, Any]] = []
+    total = 0
+    for item in payload["files"]:
+        if not isinstance(item, dict):
+            raise BuildPreparationError("cache manifest entry is invalid")
+        path, digest, size = item.get("path"), item.get("sha256"), item.get("size")
+        if (
+            not isinstance(path, str)
+            or not isinstance(digest, str)
+            or not _KEY.fullmatch(digest)
+            or type(size) is not int
+            or size < 0
+        ):
+            raise BuildPreparationError("cache manifest entry is invalid")
+        _validate_bundle_relative_path(path)
+        total += size
+        if total > _CACHE_BYTES:
+            raise BuildPreparationError("build cache exceeds byte limit")
+        entries.append({"path": path, "sha256": digest, "size": size})
+    return entries
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _inventory_cache_directory(directory: Path) -> list[dict[str, Any]]:
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise BuildPreparationError("cache root must be a real directory")
+    entries: list[dict[str, Any]] = []
+    total = 0
+    files = 0
+    for path in sorted(directory.rglob("*")):
+        mode = path.lstat().st_mode
+        if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise BuildPreparationError("build cache contains unsupported content")
+        if path.is_dir():
+            continue
+        files += 1
+        if files > 10000:
+            raise BuildPreparationError("build cache exceeds file limit")
+        relative = path.relative_to(directory).as_posix()
+        _validate_bundle_relative_path(relative)
+        size = path.stat().st_size
+        total += size
+        if total > _CACHE_BYTES:
+            raise BuildPreparationError("build cache exceeds byte limit")
+        entries.append(
+            {
+                "path": relative,
+                "sha256": _sha256_file(path),
+                "size": size,
+                "local": path,
+            }
+        )
+    return entries
+
+
+def _materialize_cache_blobs(
+    client: Any,
+    claim: dict[str, Any],
+    *,
+    materialization_key: str,
+    index: int,
+    destination: Path,
+) -> None:
+    """Import a v2 manifest + content-addressed blobs into cache-in/{index}."""
+    with tempfile.TemporaryDirectory(prefix="loom-cache-manifest-") as temporary:
+        manifest_path = Path(temporary) / "manifest.json"
+        try:
+            _download(
+                client,
+                bucket=claim["cache_bucket"],
+                key=_v2_manifest_key(materialization_key, index),
+                destination=manifest_path,
+                limit=4 * 1024 * 1024,
+            )
+        except ClientError as error:
+            if _object_absent(error):
+                raise FileNotFoundError from error
+            raise
+        entries = _parse_cache_manifest(manifest_path.read_bytes())
+    destination.mkdir(parents=True, exist_ok=False)
+    try:
+        with tempfile.TemporaryDirectory(prefix="loom-cache-blob-") as blob_tmp:
+            for entry in entries:
+                target = destination / entry["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary_path = Path(blob_tmp) / entry["sha256"]
+                temporary_path.unlink(missing_ok=True)
+                _download(
+                    client,
+                    bucket=claim["cache_bucket"],
+                    key=_v2_blob_key(entry["sha256"]),
+                    destination=temporary_path,
+                    limit=max(entry["size"], 1),
+                )
+                if temporary_path.stat().st_size != entry["size"]:
+                    raise BuildPreparationError("cache blob size mismatch")
+                if _sha256_file(temporary_path) != entry["sha256"]:
+                    raise BuildPreparationError("cache blob digest mismatch")
+                shutil.copyfile(temporary_path, target)
+                temporary_path.unlink(missing_ok=True)
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=False)
+        raise
+
+
+def _blob_exists(client: Any, bucket: str, key: str) -> bool:
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as error:
+        if _object_absent(error):
+            return False
+        raise
+
+
+def _publish_cache_blobs(
+    client: Any,
+    claim: dict[str, Any],
+    *,
+    index: int,
+    cache_dir: Path,
+) -> None:
+    entries = _inventory_cache_directory(cache_dir)
+    manifest = {
+        "version": 1,
+        "files": [
+            {"path": item["path"], "sha256": item["sha256"], "size": item["size"]}
+            for item in entries
+        ],
+    }
+    manifest_body = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
+    incoming = len(manifest_body)
+    for item in entries:
+        key = _v2_blob_key(item["sha256"])
+        if not _blob_exists(client, claim["cache_bucket"], key):
+            incoming += item["size"]
+    trim_cache(client, claim["cache_bucket"], incoming)
+    for item in entries:
+        key = _v2_blob_key(item["sha256"])
+        if _blob_exists(client, claim["cache_bucket"], key):
+            continue
+        client.upload_file(str(item["local"]), claim["cache_bucket"], key)
+    client.put_object(
+        Bucket=claim["cache_bucket"],
+        Key=_v2_manifest_key(claim["materialization_key"], index),
+        Body=manifest_body,
+    )
+
+
+def _try_import_legacy_tar(
+    cache: Any,
+    claim: dict[str, Any],
+    *,
+    source: str,
+    key: str,
+    index: int,
+    work: Path,
+    archive_parent: Path,
+) -> bool:
+    archive = archive_parent / f"{source}.tar"
+    try:
+        _download(
+            cache,
+            bucket=claim["cache_bucket"],
+            key=f"task-build-cache/{key}/{index}.tar",
+            destination=archive,
+            limit=_CACHE_BYTES,
+        )
+    except ClientError as error:
+        if _object_absent(error):
+            emit_stage(
+                "cache_import",
+                "miss",
+                component_index=index,
+                reason="absent",
+                source=source,
+                format="tar",
+            )
+            return False
+        raise
+    cache_directory = work / "cache-in" / str(index)
+    try:
+        unpack_cache(archive, cache_directory)
+    except (BuildPreparationError, tarfile.TarError):
+        shutil.rmtree(cache_directory, ignore_errors=False)
+        emit_stage(
+            "cache_import",
+            "miss",
+            component_index=index,
+            reason="invalid_archive",
+            source=source,
+            format="tar",
+        )
+        print(
+            json.dumps(
+                {
+                    "cache": "miss",
+                    "reason": "invalid_archive",
+                    "component_index": index,
+                    "source": source,
+                }
+            ),
+            flush=True,
+        )
+        return False
+    emit_stage(
+        "cache_import",
+        "hit",
+        component_index=index,
+        source=source,
+        format="tar",
+    )
+    return True
+
+
+def _try_import_cache(
+    cache: Any,
+    claim: dict[str, Any],
+    *,
+    index: int,
+    work: Path,
+) -> None:
+    transfer = _cache_transfer_mode(claim)
+    archive_parent = Path(tempfile.mkdtemp(prefix="loom-cache-"))
+    try:
+        for source, key in _cache_import_candidates(claim):
+            if transfer == "blobs":
+                cache_directory = work / "cache-in" / str(index)
+                try:
+                    _materialize_cache_blobs(
+                        cache,
+                        claim,
+                        materialization_key=key,
+                        index=index,
+                        destination=cache_directory,
+                    )
+                except FileNotFoundError:
+                    emit_stage(
+                        "cache_import",
+                        "miss",
+                        component_index=index,
+                        reason="absent",
+                        source=source,
+                        format="blobs",
+                    )
+                except (BuildPreparationError, ClientError) as error:
+                    shutil.rmtree(cache_directory, ignore_errors=True)
+                    reason = (
+                        "invalid_blobs"
+                        if isinstance(error, BuildPreparationError)
+                        else "unavailable"
+                    )
+                    emit_stage(
+                        "cache_import",
+                        "miss",
+                        component_index=index,
+                        reason=reason,
+                        source=source,
+                        format="blobs",
+                    )
+                else:
+                    emit_stage(
+                        "cache_import",
+                        "hit",
+                        component_index=index,
+                        source=source,
+                        format="blobs",
+                    )
+                    return
+                # Dual-read: warm legacy donors and mixed rollouts after a blob miss.
+                if _try_import_legacy_tar(
+                    cache,
+                    claim,
+                    source=source,
+                    key=key,
+                    index=index,
+                    work=work,
+                    archive_parent=archive_parent,
+                ):
+                    return
+                continue
+            if _try_import_legacy_tar(
+                cache,
+                claim,
+                source=source,
+                key=key,
+                index=index,
+                work=work,
+                archive_parent=archive_parent,
+            ):
+                return
+    finally:
+        shutil.rmtree(archive_parent, ignore_errors=True)
+
+
 def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
     with stage_span("prepare"):
         source = _client(claim, secrets / "source")
@@ -267,59 +639,7 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
         try:
             for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
                 with stage_span("cache_import", component_index=index):
-                    with tempfile.TemporaryDirectory() as temporary:
-                        archive = Path(temporary) / "cache.tar"
-                        try:
-                            _download(
-                                cache,
-                                bucket=claim["cache_bucket"],
-                                key=_cache_prefix(claim) + f"{index}.tar",
-                                destination=archive,
-                                limit=_CACHE_BYTES,
-                            )
-                        except ClientError as error:
-                            if error.response.get("Error", {}).get("Code") in {
-                                "NoSuchKey",
-                                "404",
-                            }:
-                                emit_stage(
-                                    "cache_import",
-                                    "miss",
-                                    component_index=index,
-                                    reason="absent",
-                                )
-                                continue
-                            raise
-                        cache_directory = work / "cache-in" / str(index)
-                        try:
-                            unpack_cache(archive, cache_directory)
-                        except (BuildPreparationError, tarfile.TarError):
-                            # Disposable cache must not permanently poison this
-                            # source revision. No links are extracted by unpack_cache.
-                            shutil.rmtree(cache_directory, ignore_errors=False)
-                            emit_stage(
-                                "cache_import",
-                                "miss",
-                                component_index=index,
-                                reason="invalid_archive",
-                            )
-                            # Keep legacy field for existing log greps.
-                            print(
-                                json.dumps(
-                                    {
-                                        "cache": "miss",
-                                        "reason": "invalid_archive",
-                                        "component_index": index,
-                                    }
-                                ),
-                                flush=True,
-                            )
-                        else:
-                            emit_stage(
-                                "cache_import",
-                                "hit",
-                                component_index=index,
-                            )
+                    _try_import_cache(cache, claim, index=index, work=work)
         finally:
             cache.close()
 
@@ -342,20 +662,47 @@ def pack_cache(directory: Path, archive: Path) -> None:
 
 def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
     """Bound disposable cache size and age without a second GC service."""
-    items = []
+    legacy_or_manifest: list[dict[str, Any]] = []
+    blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
         Bucket=bucket, Prefix="task-build-cache/"
     ):
         for item in page.get("Contents", []):
-            if re.fullmatch(r"task-build-cache/[0-9a-f]{64}/[0-7]\.tar", item["Key"]):
-                items.append(item)
-    total = sum(item["Size"] for item in items) + incoming_bytes
+            key = item["Key"]
+            if _LEGACY_TAR.fullmatch(key) or _V2_MANIFEST.fullmatch(key):
+                legacy_or_manifest.append(item)
+            elif _V2_BLOB.fullmatch(key):
+                blobs.append(item)
+    total = (
+        sum(item["Size"] for item in legacy_or_manifest)
+        + sum(item["Size"] for item in blobs)
+        + incoming_bytes
+    )
     cutoff = datetime.now(UTC) - timedelta(days=7)
-    for item in sorted(items, key=lambda row: row["LastModified"]):
+    remaining: list[dict[str, Any]] = []
+    for item in sorted(legacy_or_manifest, key=lambda row: row["LastModified"]):
         if total <= _CACHE_TOTAL_BYTES and item["LastModified"] >= cutoff:
-            break
+            remaining.append(item)
+            continue
         client.delete_object(Bucket=bucket, Key=item["Key"])
         total -= item["Size"]
+    referenced: set[str] = set()
+    for item in remaining:
+        if not _V2_MANIFEST.fullmatch(item["Key"]):
+            continue
+        try:
+            response = client.get_object(Bucket=bucket, Key=item["Key"])
+            body = response["Body"].read()
+            response["Body"].close()
+            for entry in _parse_cache_manifest(body):
+                referenced.add(entry["sha256"])
+        except (ClientError, BuildPreparationError, OSError):
+            continue
+    for item in sorted(blobs, key=lambda row: row["LastModified"]):
+        digest = item["Key"].rsplit("/", 1)[-1]
+        if digest in referenced or item["LastModified"] >= cutoff:
+            continue
+        client.delete_object(Bucket=bucket, Key=item["Key"])
 
 
 def _output_path(work: Path, relative: str, *, directory: bool = False) -> Path:
@@ -382,6 +729,8 @@ def publish(
     images: dict[str, str] = {}
     cache = _client(claim, secrets / "cache") if (secrets / "cache").is_dir() else None
     auth_directory = tempfile.TemporaryDirectory()
+    export_format = _oci_export_format(claim)
+    transfer = _cache_transfer_mode(claim)
     try:
         registry_auth = secrets / "registry" / "config.json"
         credentials = secrets / "registry" / "credentials.json"
@@ -393,10 +742,18 @@ def publish(
                 credentials, "/".join(claim["registry_repository"].split("/")[:2]), registry_auth
             )
         for index, component in enumerate(derive_task_image_build_components(claim["task_config"])):
-            archive = _output_path(work, component.oci_output_path)
-            if archive.stat().st_size > 3 * _CACHE_BYTES:
-                raise BuildPreparationError("build output is not a bounded regular OCI archive")
-            validate_native_oci_archive(archive)
+            if export_format == "directory":
+                # Plan schema still emits oci/NNNN.tar; directory Jobs rewrite dest.
+                relative = component.oci_output_path.removesuffix(".tar")
+                output = _output_path(work, relative, directory=True)
+                validate_native_oci_directory(output)
+                skopeo_source = f"oci:{output}"
+            else:
+                archive = _output_path(work, component.oci_output_path)
+                if archive.stat().st_size > 3 * _CACHE_BYTES:
+                    raise BuildPreparationError("build output is not a bounded regular OCI archive")
+                validate_native_oci_archive(archive)
+                skopeo_source = f"oci-archive:{archive}"
             tag = f"{claim['registry_repository']}:{claim['materialization_key']}-{claim['lease_epoch']}-{index}"
             with tempfile.TemporaryDirectory() as temporary:
                 digest_file = Path(temporary) / "digest"
@@ -412,7 +769,7 @@ def publish(
                             "--preserve-digests",
                             "--digestfile",
                             str(digest_file),
-                            f"oci-archive:{archive}",
+                            skopeo_source,
                             f"docker://{tag}",
                         ],
                         check=True,
@@ -437,14 +794,19 @@ def publish(
                 if cache is not None and (cache_dir.exists() or cache_dir.is_symlink()):
                     with stage_span("cache_export", component_index=index):
                         cache_dir = _output_path(work, f"cache-out/{index}", directory=True)
-                        cache_archive = Path(temporary) / "cache.tar"
-                        pack_cache(cache_dir, cache_archive)
-                        trim_cache(cache, claim["cache_bucket"], cache_archive.stat().st_size)
-                        cache.upload_file(
-                            str(cache_archive),
-                            claim["cache_bucket"],
-                            _cache_prefix(claim) + f"{index}.tar",
-                        )
+                        if transfer == "blobs":
+                            _publish_cache_blobs(
+                                cache, claim, index=index, cache_dir=cache_dir
+                            )
+                        else:
+                            cache_archive = Path(temporary) / "cache.tar"
+                            pack_cache(cache_dir, cache_archive)
+                            trim_cache(cache, claim["cache_bucket"], cache_archive.stat().st_size)
+                            cache.upload_file(
+                                str(cache_archive),
+                                claim["cache_bucket"],
+                                _cache_prefix(claim) + f"{index}.tar",
+                            )
     finally:
         if cache is not None:
             cache.close()

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import and_, exists, or_, select, text, update
@@ -942,3 +942,34 @@ def task_image_materialization_payload(
         "failure_reason": row.failure_reason,
         "failure_message": row.failure_message,
     }
+
+
+async def same_task_compatible_cache_key(
+    session: AsyncSession,
+    *,
+    task_id: str,
+    cpu_arch: str,
+    exclude_materialization_key: str,
+) -> str | None:
+    """Return a prior ready same-task materialization_key for BuildKit cache import.
+
+    Cross-task keys are never returned. Results still publish under the current
+    materialization; this only seeds disposable layer cache.
+    """
+    return cast(
+        str | None,
+        await session.scalar(
+            select(TaskImageMaterialization.materialization_key)
+            .where(
+                TaskImageMaterialization.task_id == task_id,
+                TaskImageMaterialization.cpu_arch == cpu_arch,
+                TaskImageMaterialization.materialization_key != exclude_materialization_key,
+                TaskImageMaterialization.state == "ready",
+            )
+            .order_by(
+                TaskImageMaterialization.ready_at.desc().nulls_last(),
+                TaskImageMaterialization.created_at.desc(),
+            )
+            .limit(1)
+        ),
+    )
