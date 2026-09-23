@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tarfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from loom.models.verifier import VerifierResult
+from loom.nebius_terminus_image import prepare_nebius_terminus_image
 from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(60)]
@@ -86,3 +89,61 @@ def test_missing_or_invalid_harbor_reward_still_fails_without_result(run_wrapper
     status, result = run_wrapper(script)
     assert status != 0
     assert result is None
+
+
+@pytest.mark.timeout(600)
+def test_prepared_image_preserves_task_shell_and_python_alias(tmp_path: Path):
+    import docker
+
+    shell_setup = (
+        "printf '#!/bin/sh\\necho called >> /authored-shell.log\\nexec /bin/sh \"$@\"\\n' "
+        "> /task-shell && chmod +x /task-shell && "
+        "ln -s /usr/local/bin/python /usr/bin/python"
+    )
+    original = (
+        "FROM python:3.11-slim\n"
+        "RUN " + json.dumps(["/bin/sh", "-c", shell_setup]) + "\n"
+        'SHELL ["/task-shell", "-c"]\n'
+        "RUN touch /authored-run\nWORKDIR /app\n"
+    )
+    (tmp_path / "Dockerfile").write_text(original)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test.sh").write_text(
+        "pip install pytest==8.4.1\npytest /tests/test_example.py\n"
+    )
+    environment = {"dockerfile": "Dockerfile", "docker_build_context": ".", "workdir": "/app"}
+    prepare_nebius_terminus_image(tmp_path, environment)
+    tag = "loom-preparation-shell-test:" + uuid4().hex
+    client = docker.from_env()
+    container = None
+    try:
+        result = subprocess.run(
+            ["docker", "build", "--tag", tag, "--file", str(tmp_path / environment["dockerfile"]), str(tmp_path)],
+            capture_output=True, text=True, timeout=480,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        built = client.images.get(tag)
+        assert built.attrs["Config"]["Shell"] == ["/task-shell", "-c"]
+        container = client.containers.run(
+            tag, entrypoint="/bin/sh", command=["-exc", (
+                'test "$(id -u)" = 65532; test -f /authored-run; '
+                'test "$(cat /authored-shell.log)" = called; '
+                'test "$(readlink /usr/bin/python)" = /usr/local/bin/python; '
+                'test "$(python -c \'import sys; print(sys.version_info[:2])\')" = "(3, 11)"; '
+                '/opt/verifier/bin/python -m pytest --version'
+            )],
+            network_mode="none", cap_drop=["ALL"],
+            security_opt=["no-new-privileges"], detach=True,
+        )
+        status = container.wait(timeout=30)["StatusCode"]
+        assert status == 0, container.logs().decode(errors="replace")
+        assert b"pytest 8.4.1" in container.logs()
+        assert (tmp_path / "Dockerfile").read_text() == original
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        try:
+            client.images.remove(tag, force=True)
+        except docker.errors.ImageNotFound:
+            pass
+        client.close()

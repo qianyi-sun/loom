@@ -1,5 +1,6 @@
 """Behavioral boundaries for the bounded Harbor image preparation adapter."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -420,7 +421,7 @@ def test_preparation_identifies_final_stage_without_changing_task_python(
     [
         ("FROM python:3.13-slim\nRUN cat <<EOF\nFROM ubuntu:24.04\n", "unterminated heredoc"),
         ("FROM ubuntu:24.04 AS base\nFROM alpine:3.20\n", "Debian/Ubuntu"),
-        ("FROM python:3.13-slim\nSHELL [\"bash\", \"-c\"]\n", "SHELL"),
+        ("FROM python:3.13-slim\nSHELL bash -c\n", "SHELL"),
         ("ARG BASE=ubuntu:24.04\nFROM ${BASE}\n", "Debian/Ubuntu"),
     ],
 )
@@ -433,6 +434,22 @@ def test_ambiguous_or_unsupported_image_preparation_does_not_write_outputs(
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
     assert not (tmp_path / "environment/Dockerfile.loom-nebius").exists()
+
+
+@pytest.mark.parametrize("shell", [["/bin/bash", "-e", "-c"], ["/bin/zsh", "-c"]])
+def test_preparation_uses_explicit_sh_without_replacing_authored_shell(tmp_path, shell):
+    environment = bundle(tmp_path)
+    original = "FROM python:3.13-slim\nSHELL " + json.dumps(shell) + "\nWORKDIR /app\n"
+    (tmp_path / "environment/Dockerfile").write_text(original)
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert derived.startswith(original)
+    appended = derived[len(original):]
+    assert "SHELL " not in appended
+    commands = [json.loads(line[4:]) for line in appended.splitlines() if line.startswith("RUN ")]
+    assert commands and all(command[:2] == ["/bin/sh", "-c"] for command in commands)
+    assert "loom-nebius-uv python install 3.13" in commands[0][2]
+    assert (tmp_path / "environment/Dockerfile").read_text() == original
 
 
 @pytest.mark.parametrize("user,home,expected", [

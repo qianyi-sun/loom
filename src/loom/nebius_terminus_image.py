@@ -6,6 +6,7 @@ base-image programs, and original source files remain unchanged.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -362,8 +363,26 @@ def _preparation_dockerfile(
         raise ValueError(
             "nebius-terminus: image preparation supports Debian/Ubuntu final base images only"
         )
-    if any(instruction.keyword == "SHELL" for instruction in instructions):
-        raise ValueError("nebius-terminus: custom Dockerfile SHELL requires explicit adaptation")
+    custom_shell = False
+    for instruction in instructions:
+        if instruction.keyword != "SHELL":
+            continue
+        try:
+            shell = json.loads(instruction.arguments)
+        except ValueError as exc:
+            raise ValueError("nebius-terminus: Dockerfile SHELL must be a JSON array") from exc
+        if not isinstance(shell, list) or not shell or any(
+            not isinstance(part, str) or not part for part in shell
+        ):
+            raise ValueError("nebius-terminus: Dockerfile SHELL must contain command strings")
+        custom_shell = True
+
+    def run(command: str) -> str:
+        if custom_shell:
+            # Override only our build-time command, leaving the authored
+            # image's SHELL configuration and preceding RUN behavior intact.
+            return "RUN " + json.dumps(["/bin/sh", "-c", command.replace("\\\n", "\n")]) + "\n"
+        return "RUN " + command + "\n"
     packages = sorted(
         {
             "ca-certificates",
@@ -373,7 +392,6 @@ def _preparation_dockerfile(
             "asciinema",
             "passwd",
             "python3",
-            "python-is-python3",
             *bootstrap.apt_packages,
         }
     )
@@ -389,7 +407,7 @@ def _preparation_dockerfile(
             f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv venv --python {bootstrap.python_version} /opt/verifier"
         )
     assets = "".join(
-        f"RUN mkdir -p /opt/verifier-assets && curl --fail --location {shlex.quote(url)} -o /opt/verifier-assets/{name} && chmod 644 /opt/verifier-assets/{name}\n"
+        run(f"mkdir -p /opt/verifier-assets && curl --fail --location {shlex.quote(url)} -o /opt/verifier-assets/{name} && chmod 644 /opt/verifier-assets/{name}")
         for url, name in bootstrap.downloads
     )
     uid, gid, home = identity.run_as_user, identity.run_as_group, identity.home
@@ -413,17 +431,19 @@ def _preparation_dockerfile(
             f"mkdir -p /tests /logs/verifier /loom/verifier && "
             f"chown -R {uid}:{gid} /tests /logs/verifier /loom/verifier"
         )
-    return (
-        original.rstrip()
-        + f"""\n\n# Loom Nebius: build-only harness/verifier preparation; original task above.
-USER root
-COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/loom-nebius-uv
-RUN apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
+    preparation = run(f"""apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
     {python_setup} && \\
     loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
     {identity_setup} && \\
     {workspace_setup} && \\
-    rm -rf /var/lib/apt/lists/* /root/.cache
+    rm -rf /var/lib/apt/lists/* /root/.cache""")
+    return (
+        original.rstrip()
+        + "\n\n# Loom Nebius: build-only harness/verifier preparation; original task above.\n"
+        + "USER root\n"
+        + "COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/loom-nebius-uv\n"
+        + preparation
+        + f"""
 {assets}ENV HOME={home}
 # Preserve the base image PATH and agent interpreter; verifier uses its own venv.
 USER {uid}:{gid}
