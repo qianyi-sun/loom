@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def management_inputs(platform_inputs):
     config, candidate, profile = platform_inputs
     candidate["source_ref"] = "refs/heads/dev"
+    candidate.update(schema_version="loom.nebius-candidate.v1", workflow_path=".github/workflows/nebius-candidate.yml",
+                     run_id=123, registry_prefix="cr.eu-north1.nebius.cloud/test")
     installation = {
         "schema_version": "loom.nebius-management-installation.v1",
         "foundation": foundation_from(config).model_dump(mode="json"),
@@ -47,7 +49,10 @@ def management_inputs(platform_inputs):
 
 
 def render(inputs):
-    from loom_service.environment_management.deployment import ManagementDeployment, render_management
+    from loom_service.environment_management.deployment import (
+        ManagementDeployment,
+        render_management,
+    )
 
     config, candidate, profile = inputs
     return render_management(ManagementDeployment.model_validate(config), candidate=candidate,
@@ -219,3 +224,12 @@ def test_management_material_is_fresh_and_does_not_include_worker_or_cloud_crede
     assert first["loom-platform-auth"] != second["loom-platform-auth"]
     assert first["loom-admin-secret"] != second["loom-admin-secret"]
     assert first["loom-platform-db"]["service-password"] != second["loom-platform-db"]["service-password"]
+
+
+@pytest.mark.parametrize("image", ["cr.eu-north1.nebius.cloud/test/service:dev",
+                                  "cr.eu-north1.nebius.cloud/other/service@sha256:" + "b" * 64])
+def test_management_image_requires_bound_registry_and_immutable_digest(management_inputs, image):
+    management_inputs[1]["images"]["service"]["image_ref"] = image
+    management_inputs[2]["task_image_ref"] = image
+    with pytest.raises(ValueError, match="management image"):
+        render(management_inputs)
