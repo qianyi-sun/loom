@@ -3402,6 +3402,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     rewards: dict[str, float],
     aggregate_reward: float,
     runtime_status: str = "succeeded",
+    late_cancellation: str | None = None,
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -3646,16 +3647,55 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             upload_token=upload_token,
         )
 
-        async with sessions() as session:
-            current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
-            assert current is not None
-            current.observed_state = "finalizing"
-            assert await finalize_committed_service_execution(
-                session,
-                lease_id=current.id,
-                observed_at=now + timedelta(seconds=4),
+        if late_cancellation is None:
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
+                assert current is not None
+                current.observed_state = "finalizing"
+                assert await finalize_committed_service_execution(
+                    session,
+                    lease_id=current.id,
+                    observed_at=now + timedelta(seconds=4),
+                )
+                await session.commit()
+        else:
+            # The result commits before cancellation revokes generation 1.
+            # Archival must preserve it when the deleted Job is observed.
+            async with sessions() as session:
+                command = await request_trial_execution_cancellation(
+                    session, trial_id=trial_id, now=now + timedelta(seconds=3)
+                )
+                assert command is not None and command.generation == 2
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current is not None and current.finalized_at is None
+                if late_cancellation == "already_deleted":
+                    await record_execution_event(
+                        session,
+                        lease_id=current.id,
+                        generation=2,
+                        ordinal=current.last_event_ordinal + 1,
+                        event_kind="deleted",
+                        payload={},
+                        observed_at=now + timedelta(seconds=4),
+                    )
+                await session.commit()
+            actuator = ExecutionActuator(
+                sessions=sessions,
+                kubernetes=_FakeKubernetesJobApi(),
+                target=ExecutionTargetRuntime(
+                    target_id=target.target_id, namespace=target.namespace_name
+                ),
+                controller_id="late-cancellation-recovery",
             )
-            await session.commit()
+            await actuator.reconcile_full_once(now=now + timedelta(seconds=5))
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current is not None
+                assert current.finalized_at is not None
+                assert current.desired_state == current.observed_state == "deleted"
+                assert current.cleanup_state == "complete"
+                assert current.generation == 2
+            assert await actuator.reconcile_full_once(now=now + timedelta(seconds=6)) == 0
         async with sessions() as session:
             current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
             trial = await session.get(Trial, trial_id)
@@ -3865,6 +3905,21 @@ async def test_timeout_preserves_zero_verifier_reward_through_canonical_cleanup(
         rewards={"passed": 0.0},
         aggregate_reward=0.0,
         runtime_status="timed_out",
+    )
+
+
+@pytest.mark.parametrize("late_cancellation", ["before_deleted", "already_deleted"])
+@pytest.mark.parametrize("runtime_status", ["succeeded", "timed_out"])
+async def test_late_cancellation_preserves_committed_result_through_archival(
+    postgres_url: str, late_cancellation: str, runtime_status: str,
+) -> None:
+    await test_materializer_commits_complete_bundle_after_execution_cleanup(
+        postgres_url=postgres_url,
+        source_task_id=None,
+        rewards={"passed": 0.0},
+        aggregate_reward=0.0,
+        runtime_status=runtime_status,
+        late_cancellation=late_cancellation,
     )
 
 
