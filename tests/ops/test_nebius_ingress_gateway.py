@@ -284,3 +284,21 @@ def test_controller_qualification_rejects_stale_mixed_or_unverified_pods(control
         module().qualify_controller(**arguments)
     if case not in {"tls-mismatch", "pod-recreated"}:
         assert not probes
+
+
+def test_new_selected_pod_during_tls_probe_prevents_qualification(controller):
+    arguments, _deployment, _replicas, pods, _probes = controller
+    api = arguments["api"]
+    original_probe = api.probe_tls
+
+    def probe(*args):
+        result = original_probe(*args)
+        extra = copy.deepcopy(pods[0])
+        extra["metadata"]["name"] = "unqualified-new-pod"
+        extra["metadata"]["uid"] = str(uuid4())
+        pods.append(extra)
+        return result
+
+    api.probe_tls = probe
+    with pytest.raises(module().IngressError):
+        module().qualify_controller(**arguments)
