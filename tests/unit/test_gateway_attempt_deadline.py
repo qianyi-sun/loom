@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -119,6 +120,34 @@ async def test_provider_error_cannot_win_deadline_race() -> None:
 
     with pytest.raises(AttemptDeadlineReachedError):
         await deadline.run(fail_after_deadline)
+
+
+@pytest.mark.asyncio
+async def test_timeout_context_expiry_wins_when_deadline_clock_lags() -> None:
+    # The event loop owns cancellation. Its timer may fire before a separate
+    # monotonic observation reaches the cutoff; do not lose the timeout cause.
+    deadline = GatewayAttemptDeadline(0.01, clock=_Clock())
+
+    async def hold() -> None:
+        await asyncio.Event().wait()
+
+    with pytest.raises(AttemptDeadlineReachedError):
+        await deadline.run(hold)
+    assert deadline.deadline_observed
+
+
+@pytest.mark.asyncio
+async def test_upstream_timeout_before_attempt_deadline_keeps_its_cause() -> None:
+    deadline = GatewayAttemptDeadline(10, clock=_Clock())
+    failure = TimeoutError("provider timeout before the attempt deadline")
+
+    async def fail() -> None:
+        raise failure
+
+    with pytest.raises(TimeoutError) as caught:
+        await deadline.run(fail)
+    assert caught.value is failure
+    assert not deadline.deadline_observed
 
 
 @pytest.mark.asyncio

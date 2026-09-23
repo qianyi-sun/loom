@@ -36,6 +36,42 @@ def test_unapproved_request_cannot_select_hold_or_success() -> None:
     assert ledger.snapshot()["full_canary_passed"] is False
 
 
+def test_native_receipt_binds_lease_generation_without_legacy_attempt() -> None:
+    binding = CanaryBinding(case="A", team_id=uuid4(), provider_connection_id=uuid4())
+    ledger = FaultLedger(binding)
+    trial = uuid4()
+    ledger.arm(trial_id=trial, step_id="agent")
+    receipt = ReceiptApproval(
+        receipt_id=uuid4(),
+        team_id=binding.team_id,
+        trial_id=trial,
+        provider_connection_id=binding.provider_connection_id,
+        step_id="agent",
+        service_execution_lease_id=uuid4(),
+        service_execution_generation=1,
+        step_jwt_id=uuid4(),
+        deadline=datetime.now(UTC) + timedelta(seconds=10),
+    )
+    ledger.queue(receipt.receipt_id)
+    assert ledger.approve(receipt) == "hold"
+    for update in ({"agent_attempt_id": uuid4()}, {"service_execution_generation": None}):
+        with pytest.raises(ValueError):
+            ReceiptApproval.model_validate({**receipt.model_dump(), **update})
+
+
+def test_fixture_renderer_supports_bounded_native_namespace() -> None:
+    docs = render_fixture_resources(
+        run_id=uuid4(),
+        binding=CanaryBinding(case="A", team_id=uuid4(), provider_connection_id=uuid4()),
+        candidate_sha="a" * 40,
+        gateway_image="registry.invalid/loom-llm-gateway@sha256:" + "b" * 64,
+        namespace="loom-nebius-platform",
+        lifetime_seconds=300,
+    )
+    assert all(doc["metadata"]["namespace"] == "loom-nebius-platform" for doc in docs)
+    assert docs[1]["spec"]["activeDeadlineSeconds"] == 310
+
+
 def test_retry_requires_new_attempt_and_new_grant_after_first_deadline() -> None:
     binding = CanaryBinding(case="B", team_id=uuid4(), provider_connection_id=uuid4())
     ledger = FaultLedger(binding)

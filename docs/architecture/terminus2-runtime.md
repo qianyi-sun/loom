@@ -281,6 +281,8 @@ checks. The retired worker-pool smoke is not hosted release evidence.
 
 ## Ten-second production-equivalent deadline canary (#1748)
 
+For current hosted Nebius acceptance, use the [native lease-based qualification](../runbooks/isolated-deadline-canary.md#current-nebius-qualification). The worker/pool and within-worker Case A/B details below describe the legacy implementation. They do not override native credential rotation, phase supervision, result vocabulary or scoped Pod isolation.
+
 This canary is a post-deployment acceptance action, not a local test. Run it
 only in an explicitly authorized production-equivalent environment with a
 dedicated canary task, team/provider connection, worker pool, and fault
