@@ -69,6 +69,16 @@ It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
+For up to three newest failed bootstrap Pods in the selected platform namespace,
+inspection checks the exact Job owner UID, terminal failure and expected bootstrap
+command before reading at most 50 log lines / 16 KiB per Pod. The artifact adds
+`failed_bootstrap_jobs`: Job/Pod identities plus allowlisted phase/error type and,
+for configuration HTTP errors, method, status and a fixed operation category.
+No raw logs, arbitrary reason strings, route identifiers, SQL or credential values
+are exported. Missing/unsupported logs are explicitly `unavailable`; they do not
+turn a failed Job into success. This diagnosis grants no Job retry, dispatch-unpause
+or rollback authority.
+
 `observed` means inventory succeeded, not that personal environments are ready.
 The configured candidate is read from the platform ConfigMap, which rollout can
 update before migrations and workload replacement complete. It is not proof of
