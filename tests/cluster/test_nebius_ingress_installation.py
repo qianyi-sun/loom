@@ -186,10 +186,6 @@ def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secre
     """Local image alias is not live registry mirroring or public cutover evidence."""
     config, fixture_binding, _fake, roots, _selected, root = inputs
     namespace = ingress_input["foundation"]["ingress_namespace"]
-    archive = tmp_path / "traefik.tar"
-    subprocess.run(["docker", "pull", TRAEFIK], capture_output=True, check=True, timeout=120)
-    subprocess.run(["docker", "pull", PYTHON], capture_output=True, check=True, timeout=120)
-    subprocess.run(["docker", "save", "-o", str(archive), TRAEFIK, PYTHON], capture_output=True, check=True, timeout=120)
     container = _start_k3s(node_name="loom-tls-rotation", ephemeral_storage_floor="2Gi")
     try:
         from kubernetes import client
@@ -198,13 +194,13 @@ def test_real_traefik_rotation_qualifies_fresh_pods_and_preserves_previous_secre
         binding = replace(fixture_binding, namespace=namespace, namespace_uid=ns.metadata.uid,
                           kube_system_uid=core.read_namespace("kube-system").metadata.uid)
         ident = container.get_wrapped_container().id
-        subprocess.run(["docker", "cp", str(archive), ident + ":/tmp/traefik.tar"],
-                       capture_output=True, check=True, timeout=60)
-        # A digest-only Docker save may have no OCI ref-name annotation. Import
-        # its digest explicitly rather than assume the upstream name survived.
-        _run(container, "ctr", "images", "import", "--digests", "--base-name",
-             "cr.eu-north1.nebius.cloud/test/traefik", "/tmp/traefik.tar")
+        # Docker's classic archive can rebuild the manifest with a different
+        # digest. Pull the pinned manifest in containerd itself; this preserves
+        # the qualified registry identity on both local and CI Docker backends.
+        _run(container, "ctr", "images", "pull", TRAEFIK)
+        _run(container, "ctr", "images", "pull", PYTHON)
         image = "cr.eu-north1.nebius.cloud/test/traefik@" + TRAEFIK.split("@", 1)[1]
+        _run(container, "ctr", "images", "tag", TRAEFIK, image)
         assert image in _run(container, "ctr", "images", "ls", "-q").splitlines()
         _run(container, "kubectl", "wait", "--for=create", "node/loom-tls-rotation", "--timeout=60s")
         _run(container, "kubectl", "label", "nodes", "--all", "loom.nebius/node-role=system", "loom.nebius/platform=integration")
