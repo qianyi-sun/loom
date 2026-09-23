@@ -206,7 +206,7 @@ host. Use an operator contact email, or explicitly set `email` to `null` for an
 ACME account without email. Arrange PAT rotation before its recorded expiry;
 certificate lifetime does not extend credential lifetime.
 
-The protected runner sends only two reviewed scripts, deterministic configuration,
+The protected runner sends only the reviewed issuer, DNS hook and gateway watchdog, deterministic configuration,
 the pinned uv executable and hash-locked wheel requirements. Certbot 5.8.0 is
 installed in an isolated gateway virtual environment. DNS credentials, ACME
 account keys, certificate keys, journals and private logs stay on the gateway;
@@ -222,10 +222,17 @@ a different challenge value. Failure retains its intent and previous selected
 certificate. Do not delete `issuance.json` or retry until private process state,
 ACME outcome and exact DNS record ownership have been reconciled. Automated
 recovery of ambiguous issuance is not provided by this operation.
+An independent Linux watchdog follows controller liveness through a private
+pipe and terminates the command group on timeout, owner death or cancellation.
+The persisted intent still fences recovery while descendant cleanup completes.
 
 Successful issuance validates the leaf/key pair, exact two SANs, public trust
 chain, server authentication, non-CA leaf and at least seven days of remaining
-validity. A private generation is fsynced before atomic `selected.json` publication;
+validity measured after the client finishes. Persisted ACME, work and log trees
+are bounded and checked for private ownership before client writes; only exact
+Certbot lineage links are allowed. Account keys/registration, renewal and lineage
+files/directories are fsynced before qualification. A private generation is
+fsynced before atomic `selected.json` publication;
 the prior generation remains available. Certbot's original account/lineage and
 the challenge journal also remain private for recovery. Public evidence contains
 only installation ID, generation/fingerprint, SANs, expiry and a fixed status.

@@ -13,7 +13,6 @@ import json
 import os
 import re
 import shlex
-import signal
 import ssl
 import stat
 import subprocess
@@ -161,7 +160,10 @@ def _selected(root: Path) -> dict[str, Any] | None:
     try:
         value = json.loads(_private_read(path))
         if (not isinstance(value, dict) or value.get("schema") != "loom.nebius-certificate.v1"
+                or set(value) != {"schema", "generation", "previous_generation", "sans", "expires_at", "fingerprint_sha256"}
                 or not isinstance(value.get("generation"), str) or not _GENERATION.fullmatch(value["generation"])
+                or (value["previous_generation"] is not None and (
+                    not isinstance(value["previous_generation"], str) or not _GENERATION.fullmatch(value["previous_generation"])))
                 or not isinstance(value.get("sans"), list)):
             raise CertificateError("invalid certificate selection")
         return value
@@ -208,6 +210,8 @@ def _publish(root: Path, chain: bytes, key: bytes, report: dict[str, Any]) -> di
         os.rename(temporary, generation)
         _sync_directory(generations)
     if previous is not None and previous["generation"] == generation_id:
+        if any(previous[key] != value for key, value in report.items()):
+            raise CertificateError("persisted certificate metadata differs from validated generation")
         return previous
     selected = {"schema": "loom.nebius-certificate.v1", "generation": generation_id,
                 "previous_generation": previous["generation"] if previous else None, **report}
@@ -305,21 +309,12 @@ def _run_client(args: list[str], *, timeout: int, start_new_session: bool,
                 stdout: int, stderr: int) -> subprocess.CompletedProcess[bytes]:
     # No ambient proxy, Python module path or TLS-root override reaches Certbot
     # or its hooks. Logs are private files controlled by --logs-dir.
-    environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
-    process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                               env=environment, start_new_session=start_new_session, umask=0o077)
-    try:
-        result = process.wait(timeout=timeout)
-    except BaseException:
-        # Certbot invokes child hooks. Kill the entire process group before
-        # releasing our lock, including after timeout or operator interruption.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise
-    return subprocess.CompletedProcess(args, result)
+    from scripts.ops.nebius_certificate_gateway import run_private
+
+    if not start_new_session or stdout != subprocess.DEVNULL or stderr != subprocess.DEVNULL:
+        raise CertificateError("certificate client requires isolated private execution")
+    run_private(args, timeout=timeout)
+    return subprocess.CompletedProcess(args, 0)
 
 
 def _lineage_material(root: Path) -> tuple[bytes, bytes]:
@@ -336,11 +331,77 @@ def _lineage_material(root: Path) -> tuple[bytes, bytes]:
     return result[0], result[1]
 
 
+def _audit_recovery(root: Path, *, sync: bool) -> None:
+    """Reject unsafe persisted paths before client writes; sync recovery after.
+
+    Certbot's normal live links are the only allowed symlinks. The gateway
+    account is trusted; this is not a sandbox against hostile same-UID races.
+    """
+    files: list[Path] = []
+    directories: list[Path] = []
+    total = 0
+    pending = [root / name for name in ("acme", "work", "logs")]
+    while pending:
+        path = pending.pop()
+        if len(files) + len(directories) > 4096:
+            raise CertificateError("certificate recovery tree exceeds entry bound")
+        info = path.lstat()
+        if info.st_uid != os.getuid():
+            raise CertificateError("certificate recovery state has a foreign owner")
+        if stat.S_ISLNK(info.st_mode):
+            relative = path.relative_to(root)
+            if not re.fullmatch(r"acme/live/loom-managed/(?:cert|chain|fullchain|privkey)\.pem", relative.as_posix()):
+                raise CertificateError("certificate recovery state has an unexpected link")
+            target = path.resolve(strict=True)
+            if (target.parent != root / "acme" / "archive" / "loom-managed"
+                    or not re.fullmatch(path.stem + r"[1-9][0-9]*\.pem", target.name)):
+                raise CertificateError("certificate recovery link escapes its lineage")
+            files.append(path)  # Count links but sync their regular target below.
+        elif stat.S_ISDIR(info.st_mode):
+            if info.st_mode & 0o077:
+                raise CertificateError("certificate recovery directory is not private")
+            directories.append(path)
+            for child in path.iterdir():
+                if len(pending) + len(files) + len(directories) >= 4096:
+                    raise CertificateError("certificate recovery tree exceeds entry bound")
+                pending.append(child)
+        elif stat.S_ISREG(info.st_mode):
+            if info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 8 * 1024 * 1024:
+                raise CertificateError("certificate recovery file exceeds private boundary")
+            total += info.st_size
+            if total > 32 * 1024 * 1024:
+                raise CertificateError("certificate recovery data exceeds byte bound")
+            files.append(path)
+        else:
+            raise CertificateError("certificate recovery state contains a special file")
+    if not sync:
+        return
+    accounts: dict[str, set[str]] = {}
+    for path in files:
+        match = re.fullmatch(r"acme/accounts/acme-v02\.api\.letsencrypt\.org/directory/([0-9a-f]{32})/(private_key|regr|meta)\.json",
+                             path.relative_to(root).as_posix())
+        if match:
+            accounts.setdefault(match[1], set()).add(match[2])
+    if (len(accounts) != 1 or next(iter(accounts.values())) != {"private_key", "regr", "meta"}
+            or root / "acme" / "renewal" / "loom-managed.conf" not in files):
+        raise CertificateError("ACME account or renewal recovery state is incomplete")
+    for path in files:
+        if path.is_symlink():
+            continue
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for path in sorted(directories, key=lambda value: len(value.parts), reverse=True):
+        _sync_directory(path)
+    _sync_directory(root)
+
+
 def issue_certificate(config_path: Path, *, now: datetime | None = None,
                       roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
     config = load_installation(config_path)
     root = Path(config["state_dir"])
-    now = now or datetime.now(UTC)
     try:
         with _locked_state(root):
             _bind_installation(root, config)
@@ -355,6 +416,7 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
             _clean_challenges(root, config)
             for directory in ("acme", "work", "logs"):
                 _private_directory(root / directory)
+            _audit_recovery(root, sync=False)
             hook = [sys.executable, str(Path(__file__).resolve()), "hook"]
             args = [sys.executable, "-c", "from certbot.main import main; raise SystemExit(main())",
                     "certonly", "--config", "/dev/null", "--non-interactive",
@@ -367,7 +429,7 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
             args += ["--email", config["email"]] if config["email"] else ["--register-unsafely-without-email"]
             for name in certificate_names(config["child_domain"], config["management_host"]):
                 args += ["--domain", name]
-            intent = {"schema": "loom.nebius-issuance.v1", "stage": "running", "started_at": now.isoformat()}
+            intent = {"schema": "loom.nebius-issuance.v1", "stage": "running", "started_at": (now or datetime.now(UTC)).isoformat()}
             _atomic_json(journal, intent)
             # A failed process or failed validation deliberately leaves running
             # intent. A later run must reconcile, never silently repeat a write.
@@ -376,6 +438,7 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
             if result.returncode:
                 raise CertificateError("ACME client failed; preserve private logs and reconcile")
             _clean_challenges(root, config)
+            _audit_recovery(root, sync=True)
             chain, key = _lineage_material(root)
             report = validate_certificate(chain, key, child_domain=config["child_domain"],
                                           management_host=config["management_host"], now=now, roots=roots)

@@ -23,8 +23,63 @@ from uuid import UUID
 LIMITS = {"uv": 80 * 1024 * 1024, "requirements.txt": 262_144,
           "scripts/ops/nebius_certificates.py": 262_144,
           "scripts/ops/nebius_dns_challenge.py": 262_144,
+          "scripts/ops/nebius_certificate_gateway.py": 262_144,
           "installation.json": 16_384, "manifest.json": 16_384}
 MAX_BUNDLE = 90 * 1024 * 1024
+
+# Separate sessions keep the watchdog alive if its caller is SIGKILLed. Its
+# stdin is an owner-liveness pipe, never command input. WNOWAIT preserves the
+# dead command leader's PID until group cleanup, preventing group-ID reuse.
+_WATCHDOG = r'''
+import json, os, select, signal, subprocess, sys, time
+args, timeout = json.loads(sys.argv[1]), float(sys.argv[2])
+stopping = False
+def stop(signum, frame):
+    global stopping
+    stopping = True
+for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(signum, stop)
+if select.select([0], [], [], 0)[0] and os.read(0, 1) == b'':
+    raise SystemExit(1)
+child = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+os.set_blocking(child.stdout.fileno(), False)
+output = bytearray()
+deadline, reason = time.monotonic() + timeout, 'complete'
+try:
+    while True:
+        if stopping:
+            reason = 'owner-dead'
+            break
+        if time.monotonic() >= deadline:
+            reason = 'timeout'
+            break
+        if select.select([0], [], [], 0)[0] and os.read(0, 1) == b'':
+            reason = 'owner-dead'
+            break
+        exited = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        while True:
+            try:
+                chunk = os.read(child.stdout.fileno(), 16384)
+            except BlockingIOError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > 65536:
+                reason = 'output-limit'
+                break
+        if exited is not None or reason != 'complete':
+            break
+        select.select([0], [], [], min(0.05, max(0, deadline - time.monotonic())))
+finally:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    code = child.wait()
+print(json.dumps({'reason': reason, 'code': code, 'output': bytes(output[:65536]).hex()}))
+'''
 
 
 class GatewayError(RuntimeError):
@@ -32,11 +87,31 @@ class GatewayError(RuntimeError):
 
 
 def run_private(args: list[str], *, timeout: int) -> bytes:
-    result = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
-                            env={"PATH": os.defpath, "LANG": "C.UTF-8"}, umask=0o077, check=False)
-    if result.returncode or len(result.stdout) > 65_536:
-        raise GatewayError("private tooling command failed")
-    return result.stdout
+    process = subprocess.Popen([sys.executable, "-c", _WATCHDOG, json.dumps(args), str(timeout)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                               start_new_session=True, env={"PATH": os.defpath, "LANG": "C.UTF-8"}, umask=0o077)
+    assert process.stdin is not None and process.stdout is not None
+    try:
+        # communicate() closes the liveness writer prematurely; keep it open
+        # while receiving the watchdog's bounded report.
+        raw = process.stdout.read(150_001)
+        process.wait(timeout=5)
+    finally:
+        process.stdin.close()
+        process.stdout.close()
+        process.wait(timeout=5)
+    try:
+        value = json.loads(raw)
+        if value["reason"] == "timeout":
+            raise subprocess.TimeoutExpired(args, timeout)
+        if process.returncode or value["reason"] != "complete" or value["code"] != 0:
+            raise GatewayError("private tooling command failed")
+        output = bytes.fromhex(value["output"])
+        if len(output) > 65_536:
+            raise GatewayError("private tooling output exceeds bound")
+        return output
+    except (ValueError, KeyError, TypeError):
+        raise GatewayError("private tooling report unavailable") from None
 
 
 def _directory(path: Path) -> None:

@@ -32,7 +32,8 @@ class RolloutError(RuntimeError):
 def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path) -> bytes:
     files = {"uv": uv.read_bytes(), "requirements.txt": requirements.read_bytes(),
              "installation.json": json.dumps(config, sort_keys=True).encode()}
-    for name in ("scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py"):
+    for name in ("scripts/ops/nebius_certificates.py", "scripts/ops/nebius_dns_challenge.py",
+                 "scripts/ops/nebius_certificate_gateway.py"):
         files[name] = (ROOT / name).read_bytes()
     files["manifest.json"] = json.dumps({name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
                                        sort_keys=True).encode()
