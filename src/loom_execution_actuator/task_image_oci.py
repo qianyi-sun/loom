@@ -11,7 +11,7 @@ import re
 import stat
 import tarfile
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 _MAX_BYTES = 3 * 1024**3
 _MAX_MEMBERS = 10000
@@ -69,7 +69,7 @@ def _json(archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo], name: s
     return _json_bytes(data)
 
 
-def _descriptor(value: Any, members: dict[str, _BlobMember], media_types: set[str]) -> str:
+def _descriptor(value: Any, members: Mapping[str, _BlobMember], media_types: set[str]) -> str:
     if (not isinstance(value, dict) or not isinstance(value.get("mediaType"), str)
             or value["mediaType"] not in media_types):
         raise NativeOCIArchiveError("OCI descriptor has an unsupported media type")
@@ -90,7 +90,7 @@ def _descriptor(value: Any, members: dict[str, _BlobMember], media_types: set[st
 
 def _validate_image(
     *,
-    members: dict[str, _BlobMember],
+    members: Mapping[str, _BlobMember],
     read_json: Any,
 ) -> None:
     layout = read_json("oci-layout")
