@@ -230,15 +230,24 @@ def _host_memory_bytes() -> int:
 def _trial_execution_registration_payload(settings: WorkerSettings) -> dict[str, Any]:
     """Measure an ordinary reader without enabling Pipeline, GPU or input-cache work."""
     snapshot = build_worker_capability_snapshot(
-        cpu_arch=_host_cpu_arch(), cpu_cores=max(1, os.cpu_count() or 1),
-        memory_bytes=_host_memory_bytes(), scratch_bytes=shutil.disk_usage(settings.trajectory_cache_dir).total,
-        network_profiles=["gateway", "none"], container_runtime_features=[], gpu_devices=(),
-        input_cache_capacity_bytes=0, input_cache_reserved_bytes=0, input_cache_ready_bytes=0,
+        cpu_arch=_host_cpu_arch(),
+        cpu_cores=max(1, os.cpu_count() or 1),
+        memory_bytes=_host_memory_bytes(),
+        scratch_bytes=shutil.disk_usage(settings.trajectory_cache_dir).total,
+        network_profiles=["gateway", "none"],
+        container_runtime_features=[],
+        gpu_devices=(),
+        input_cache_capacity_bytes=0,
+        input_cache_reserved_bytes=0,
+        input_cache_ready_bytes=0,
     )
     capabilities = _worker_capabilities(settings)
     capabilities[0].update(cpu_arch=snapshot.cpu_arch, gpu_vendor="none")
-    return {"capabilities": capabilities, "capability_snapshot": snapshot.model_dump(mode="json"),
-            "capability_snapshot_digest": snapshot.digest}
+    return {
+        "capabilities": capabilities,
+        "capability_snapshot": snapshot.model_dump(mode="json"),
+        "capability_snapshot_digest": snapshot.digest,
+    }
 
 
 def _pipeline_registration_payload(
@@ -429,8 +438,11 @@ async def run_worker(
         if execution_trust is not None:
             raise ValueError("execution configuration conflicts with injected trust")
         release = load_execution_reader_settings(execution_config)
-        execution_trust = WorkerExecutionTrust(root=release.root.trust_root(), purpose=release.purpose,
-                                               shadow_campaign_id=release.shadow_campaign_id)
+        execution_trust = WorkerExecutionTrust(
+            root=release.root.trust_root(),
+            purpose=release.purpose,
+            shadow_campaign_id=release.shadow_campaign_id,
+        )
     if execution_trust is not None:
         # Protect registration/claim bearer credentials as well as the later
         # online receipt. Enabling V2 on the legacy HTTP default is forbidden.
@@ -629,7 +641,9 @@ async def _register_worker_with_retry(
         execution_trust.__post_init__()
         validate_task_image_execution_origin(str(settings.control_plane_url))
         if settings.executor_worker_credential is not None:
-            raise ValueError("execution reader requires the authenticated legacy shared-queue assembly")
+            raise ValueError(
+                "execution reader requires the authenticated legacy shared-queue assembly"
+            )
     register_kwargs: dict[str, Any] = {
         "hostname": _worker_hostname(settings.hostname),
         "version": "0.0.1",
@@ -642,7 +656,9 @@ async def _register_worker_with_retry(
             settings.executor_worker_credential.get_secret_value()
         )
     if pipeline_enabled or execution_trust is not None:
-        register_kwargs["supported_work_kinds"] = ["trial", "execution_attempt"] if pipeline_enabled else ["trial"]
+        register_kwargs["supported_work_kinds"] = (
+            ["trial", "execution_attempt"] if pipeline_enabled else ["trial"]
+        )
         if not pipeline_enabled:
             registration = _trial_execution_registration_payload(settings)
         else:
@@ -650,9 +666,12 @@ async def _register_worker_with_retry(
         register_kwargs.update(registration)
         if execution_trust is not None:
             raw_snapshot = dict(registration["capability_snapshot"])
-            raw_snapshot["container_runtime_features"] = sorted({
-                *raw_snapshot["container_runtime_features"], "task-image-execution-v2",
-            })
+            raw_snapshot["container_runtime_features"] = sorted(
+                {
+                    *raw_snapshot["container_runtime_features"],
+                    "task-image-execution-v2",
+                }
+            )
             snapshot = WorkerCapabilitySnapshotV1.model_validate_json(json.dumps(raw_snapshot))
             register_kwargs["capability_snapshot"] = snapshot.model_dump(mode="json")
             register_kwargs["capability_snapshot_digest"] = snapshot.digest
@@ -909,7 +928,9 @@ async def _claim_available_work(
                 worker_id=worker_id,
                 capability_snapshot_digest=capability_snapshot_digest,
                 free_slots=settings.max_concurrent - pool.in_flight,
-                supported_work_kinds=["trial", "execution_attempt"] if pipeline_run is not None else ["trial"],
+                supported_work_kinds=["trial", "execution_attempt"]
+                if pipeline_run is not None
+                else ["trial"],
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -1102,20 +1123,28 @@ async def _spawn_trial(
             delivery: TaskImageExecutionDelivery | None = None
             if raw_execution is not None:
                 if execution_trust is None or task_image_materialization is not None:
-                    raise ValueError("signed execution requires release trust and forbids V1 fallback")
+                    raise ValueError(
+                        "signed execution requires release trust and forbids V1 fallback"
+                    )
                 delivery = TaskImageExecutionDelivery.model_validate_json(json.dumps(raw_execution))
                 expected = delivery.claim
                 if (
-                    expected.trial_id != str(trial_id) or expected.team_id != str(team_id)
+                    expected.trial_id != str(trial_id)
+                    or expected.team_id != str(team_id)
                     or expected.worker_id != str(worker_id)
                     or expected.trial_attempt_count != attempt_count
                 ):
-                    raise ValueError("signed execution delivery differs from authenticated worker claim")
+                    raise ValueError(
+                        "signed execution delivery differs from authenticated worker claim"
+                    )
                 verified = verify_execution_grant(
-                    wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                    wire=delivery.grant_envelope.encode(),
+                    plan_wire=delivery.frozen_plan.encode(),
                     publication_wires=tuple(item.encode() for item in delivery.publications),
-                    keyset_wire=delivery.keyset.encode(), trust_root=execution_trust.root,
-                    expected_claim=expected, expected_purpose=execution_trust.purpose,
+                    keyset_wire=delivery.keyset.encode(),
+                    trust_root=execution_trust.root,
+                    expected_claim=expected,
+                    expected_purpose=execution_trust.purpose,
                     expected_shadow_campaign_id=execution_trust.shadow_campaign_id,
                     now=execution_trust.clock(),
                 )
@@ -1125,15 +1154,19 @@ async def _spawn_trial(
                 # Reuse the existing pull-only preparation adapter, retaining
                 # the full signed evidence separately for the online start.
                 # This object is never the V2 runtime's start authority.
-                task_image_materialization = TaskImageExecutionGrantV1.model_validate(dict(
-                    schema_version="loom.task-image-execution-grant.v1",
-                    materialization_id=verified.grant.materialization_id,
-                    materialization_key=verified.grant.materialization_key,
-                    cpu_arch=verified.grant.cpu_arch, task_checksum=verified.grant.task_checksum,
-                    task_config=frozen_task, task_source=verified.grant.task_source,
-                    task_source_provenance=frozen_provenance,
-                    registry_images=dict(verified.registry_images),
-                ))
+                task_image_materialization = TaskImageExecutionGrantV1.model_validate(
+                    dict(
+                        schema_version="loom.task-image-execution-grant.v1",
+                        materialization_id=verified.grant.materialization_id,
+                        materialization_key=verified.grant.materialization_key,
+                        cpu_arch=verified.grant.cpu_arch,
+                        task_checksum=verified.grant.task_checksum,
+                        task_config=frozen_task,
+                        task_source=verified.grant.task_source,
+                        task_source_provenance=frozen_provenance,
+                        registry_images=dict(verified.registry_images),
+                    )
+                )
             if task_image_materialization is None:
                 bundle = await cp_client.get_task_bundle(str(payload["task_id"]))
             else:
@@ -1184,7 +1217,9 @@ async def _spawn_trial(
                 timeout_sec=settings.task_materialize_timeout_sec,
             )
             image_cache_checksum = verified_task_image_cache_identity(
-                task_dir, task_checksum=task_checksum, source_provenance=provenance,
+                task_dir,
+                task_checksum=task_checksum,
+                source_provenance=provenance,
             )
             # A different cache identity means strong capture already verified
             # the full files/checksum/modes. Legacy grants retain their old checks.
@@ -1259,13 +1294,19 @@ async def _spawn_trial(
             else:
                 assert execution_trust is not None
                 trusted_execution = WorkerTaskImageExecution(
-                    wire=delivery.grant_envelope.encode(), plan_wire=delivery.frozen_plan.encode(),
+                    wire=delivery.grant_envelope.encode(),
+                    plan_wire=delivery.frozen_plan.encode(),
                     publication_wires=tuple(item.encode() for item in delivery.publications),
-                    keyset_wire=delivery.keyset.encode(), trust_root=execution_trust.root,
-                    expected_claim=delivery.claim, expected_purpose=execution_trust.purpose,
+                    keyset_wire=delivery.keyset.encode(),
+                    trust_root=execution_trust.root,
+                    expected_claim=delivery.claim,
+                    expected_purpose=execution_trust.purpose,
                     expected_shadow_campaign_id=execution_trust.shadow_campaign_id,
-                    task_dir=task_dir, task_config=task_config, task_checksum=task_checksum,
-                    cpu_arch=_host_cpu_arch(), task_image=task_image,
+                    task_dir=task_dir,
+                    task_config=task_config,
+                    task_checksum=task_checksum,
+                    cpu_arch=_host_cpu_arch(),
+                    task_image=task_image,
                     consume=cp_client.consume_task_image_execution_start,
                     refresh=cp_client.refresh_task_image_execution,
                     clock=execution_trust.clock,
@@ -1511,7 +1552,9 @@ async def _spawn_trial(
             container_cgroup_parent=_worker_cgroup_parent(settings),
             runtime_identity_labels=_runtime_identity_labels(settings),
             sidecar_runtime_factory=_docker_sidecar_runtime,
-            start_authorization=(trusted_execution.authorize if trusted_execution is not None else None),
+            start_authorization=(
+                trusted_execution.authorize if trusted_execution is not None else None
+            ),
         )
 
         # #360 + #378: wrap the runner with the cancellation watchdog so

@@ -25,7 +25,8 @@ def test_dev_compose_gateway_has_minio_credentials() -> None:
     """GatewaySettings requires MinIO keys; keep local Compose aligned (#1462)."""
     compose = (REPO_ROOT / "deploy" / "docker-compose.dev.yml").read_text()
     gateway_block = compose.split("\n  llm-gateway:\n", 1)[1].split(
-        "\n\n  control-plane:\n", 1,
+        "\n\n  control-plane:\n",
+        1,
     )[0]
     assert "LOOM_GW_MINIO_ENDPOINT: http://minio:9000" in gateway_block
     assert "LOOM_GW_MINIO_ACCESS_KEY:" in gateway_block
@@ -37,7 +38,9 @@ def test_web_dev_container_uses_lockfile_stable_bootstrap() -> None:
     compose = REPO_ROOT / "deploy" / "docker-compose.dev.yml"
     text = compose.read_text()
     web_block = text.split("\n  web:\n", 1)[1].split("\n\nvolumes:", 1)[0]
-    command_line = next(line for line in web_block.splitlines() if line.strip().startswith("command:"))
+    command_line = next(
+        line for line in web_block.splitlines() if line.strip().startswith("command:")
+    )
 
     assert "image: node:20-slim" not in web_block
     assert re.search(r"(?m)^\s+image: node:20\.\d+\.\d+-slim$", web_block)
@@ -59,7 +62,8 @@ def test_loom_service_dev_container_uses_internal_minio_endpoint() -> None:
     compose = REPO_ROOT / "deploy" / "docker-compose.dev.yml"
     text = compose.read_text()
     service_block = text.split("\n  loom-service:\n", 1)[1].split(
-        "\n\n  worker:", 1,
+        "\n\n  worker:",
+        1,
     )[0]
 
     assert "LOOM_SVC_MINIO_ENDPOINT: http://minio:9000" in service_block

@@ -97,8 +97,7 @@ def _mutable_dev_images(compose_file: Path) -> tuple[str, ...]:
             continue
         image = match.group(1)
         if _MUTABLE_DEV_IMAGE_RE.fullmatch(image) or (
-            image.startswith("loom-")
-            and image.endswith(":${LOOM_DEV_IMAGE_TAG:-dev}")
+            image.startswith("loom-") and image.endswith(":${LOOM_DEV_IMAGE_TAG:-dev}")
         ):
             images.add(image)
     return tuple(sorted(images))
@@ -178,9 +177,17 @@ def _alembic_upgrade(db_url: str) -> int:
     env = os.environ.copy()
     env["LOOM_DB_URL"] = db_url
     return subprocess.run(
-        [sys.executable, "-m", "alembic",
-         "-c", "database/migrations/alembic.ini", "upgrade", "head"],
-        env=env, check=False,
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            "database/migrations/alembic.ini",
+            "upgrade",
+            "head",
+        ],
+        env=env,
+        check=False,
     ).returncode
 
 
@@ -209,11 +216,21 @@ def _benchmarks_sync_config(db_url: str) -> None:
     env = os.environ.copy()
     env["LOOM_DB_URL"] = db_url
     rc = subprocess.run(
-        [sys.executable, "-m", "loom_cli", "datasets", "sync-config",
-         "--config", str(config_path),
-         "--fixtures-root", fixtures_root,
-         "--db-url", db_url],
-        env=env, check=False,
+        [
+            sys.executable,
+            "-m",
+            "loom_cli",
+            "datasets",
+            "sync-config",
+            "--config",
+            str(config_path),
+            "--fixtures-root",
+            fixtures_root,
+            "--db-url",
+            db_url,
+        ],
+        env=env,
+        check=False,
     ).returncode
     if rc != 0:
         sys.stderr.write(
@@ -255,10 +272,21 @@ def _seed_test_data(db_url: str) -> tuple[int, dict[str, str]]:
     if os.environ.get("LOOM_LOCAL_IMPORT") in ("1", "true", "True"):
         extra_args.append("--local-import")
     r = subprocess.run(
-        [sys.executable, "scripts/seed_test_data.py",
-         "--db-url", db_url, "--mode", "dev", "--print", "all",
-         *extra_args],
-        capture_output=True, text=True, check=False, env=env,
+        [
+            sys.executable,
+            "scripts/seed_test_data.py",
+            "--db-url",
+            db_url,
+            "--mode",
+            "dev",
+            "--print",
+            "all",
+            *extra_args,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
     )
     # Always echo seed stderr so auto-import status (per-benchmark
     # ok/error lines) is visible even on success.
@@ -292,7 +320,8 @@ def _mint_batch_runner_cp_token(
     url = f"{cp_url.rstrip('/')}/admin/batch-runner-tokens"
     try:
         resp = httpx.post(
-            url, json={},
+            url,
+            json={},
             headers={"Authorization": f"Bearer {admin_token}"},
             timeout=10.0,
         )
@@ -373,8 +402,7 @@ def _print_summary(tokens: dict[str, str]) -> None:
         print()
     if tokens.get("admin"):
         print(
-            "Admin token (DEV-ONLY; file-backed singleton; "
-            "not browser login):",
+            "Admin token (DEV-ONLY; file-backed singleton; not browser login):",
         )
         print("  raw token not printed by `loom service up`")
         print(
@@ -466,10 +494,7 @@ def _up_local(args: argparse.Namespace) -> int:
         # with stale image code.  Fresh images remain cheap because BuildKit
         # reuses their cached layers.
         up_argv.append("--build")
-        print(
-            "→ mutable local dev images detected; checking build cache "
-            "before container start"
-        )
+        print("→ mutable local dev images detected; checking build cache before container start")
     print(f"→ docker compose up -d ({compose_file})")
     r = _run(up_argv, check=False)
     if r.returncode != 0:
@@ -518,19 +543,23 @@ def _up_local(args: argparse.Namespace) -> int:
         _run(
             [
                 *_compose_args(compose_file, env_file),
-                "up", "-d", "--force-recreate", "--no-deps", "worker",
+                "up",
+                "-d",
+                "--force-recreate",
+                "--no-deps",
+                "worker",
             ],
             check=False,
         )
         if tokens.get("builder"):
-            print(
-                "→ recreating task-image-builder so it picks up "
-                "LOOM_TASK_IMAGE_BUILDER_TOKEN"
-            )
+            print("→ recreating task-image-builder so it picks up LOOM_TASK_IMAGE_BUILDER_TOKEN")
             _run(
                 [
                     *_compose_args(compose_file, env_file),
-                    "up", "-d", "--force-recreate", "--no-deps",
+                    "up",
+                    "-d",
+                    "--force-recreate",
+                    "--no-deps",
                     "task-image-builder",
                 ],
                 check=False,
@@ -544,7 +573,11 @@ def _up_local(args: argparse.Namespace) -> int:
             _run(
                 [
                     *_compose_args(compose_file, env_file),
-                    "up", "-d", "--force-recreate", "--no-deps", "loom-service",
+                    "up",
+                    "-d",
+                    "--force-recreate",
+                    "--no-deps",
+                    "loom-service",
                 ],
                 check=False,
             )
@@ -571,17 +604,27 @@ def _up(args: argparse.Namespace) -> int:
     candidate = getattr(args, "candidate", None)
     idempotency_key = getattr(args, "idempotency_key", None)
     if environment is not None:
-        if not environment.startswith("dev-") or not candidate or any(
-            getattr(args, name, None) is not None
-            for name in ("compose_file", "env_file", "db_url", "admin_secret_file", "cp_url")
+        if (
+            not environment.startswith("dev-")
+            or not candidate
+            or any(
+                getattr(args, name, None) is not None
+                for name in ("compose_file", "env_file", "db_url", "admin_secret_file", "cp_url")
+            )
         ):
-            print("Managed up requires --environment dev-<name> --candidate <id> and no local Compose options.", file=sys.stderr)
+            print(
+                "Managed up requires --environment dev-<name> --candidate <id> and no local Compose options.",
+                file=sys.stderr,
+            )
             return 1
         from loom_cli.dev_cmd import create_environment
 
         return create_environment(environment[4:], candidate, idempotency_key=idempotency_key)
     if candidate is not None or idempotency_key is not None:
-        print("--candidate and --idempotency-key require an explicit --environment dev-<name>.", file=sys.stderr)
+        print(
+            "--candidate and --idempotency-key require an explicit --environment dev-<name>.",
+            file=sys.stderr,
+        )
         return 1
     print("Target: disposable local Docker Compose.")
     _populate_local_defaults(args)
@@ -750,8 +793,7 @@ def _reveal_admin(args: argparse.Namespace) -> int:
         return 1
     if not args.yes:
         sys.stderr.write(
-            "This prints the raw singleton admin bearer token. "
-            "Type REVEAL to continue: ",
+            "This prints the raw singleton admin bearer token. Type REVEAL to continue: ",
         )
         answer = sys.stdin.readline().strip()
         if answer != "REVEAL":
@@ -792,11 +834,15 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
-        "--compose-file", type=Path, default=_DEFAULT_COMPOSE_FILE,
+        "--compose-file",
+        type=Path,
+        default=_DEFAULT_COMPOSE_FILE,
         help=f"Local-only Docker Compose YAML (default: {_DEFAULT_COMPOSE_FILE})",
     )
     common.add_argument(
-        "--env-file", type=Path, default=Path(".env"),
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
         help="Local-only .env file (default: ./.env; ignored if missing)",
     )
 
@@ -805,17 +851,16 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         "--secret-file",
         type=Path,
         default=_DEFAULT_ADMIN_SECRET_FILE,
-        help=(
-            "Path to singleton admin secrets.toml "
-            f"(default: {_DEFAULT_ADMIN_SECRET_FILE})"
-        ),
+        help=(f"Path to singleton admin secrets.toml (default: {_DEFAULT_ADMIN_SECRET_FILE})"),
     )
 
     p_up = service_sub.add_parser(
         "up",
         help="Start the disposable local development stack",
     )
-    p_up.add_argument("--environment", help="Explicit personal target dev-<name>; never falls back to local")
+    p_up.add_argument(
+        "--environment", help="Explicit personal target dev-<name>; never falls back to local"
+    )
     p_up.add_argument("--candidate", help="Approved candidate UUID; required for a personal target")
     p_up.add_argument("--idempotency-key", help="Reuse the same key when retrying a managed create")
     local_options = p_up.add_argument_group("local Compose options")
@@ -832,7 +877,8 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
         help=f"Environment file; ignored if missing. Default: {_DEFAULT_ENV_FILE}.",
     )
     local_options.add_argument(
-        "--db-url", default=None,
+        "--db-url",
+        default=None,
         help=f"Postgres URL for migrations + seeding (default: {_DEFAULT_DB_URL})",
     )
     local_options.add_argument(
@@ -855,17 +901,21 @@ def add_service_subparser(sub: argparse._SubParsersAction) -> None:  # type: ign
     p_up.set_defaults(handler=_up)
 
     p_down = service_sub.add_parser(
-        "down", parents=[common],
+        "down",
+        parents=[common],
         help="Stop stack (preserves named volumes by default)",
     )
     p_down.add_argument(
-        "-v", "--volumes", action="store_true",
+        "-v",
+        "--volumes",
+        action="store_true",
         help="Also remove named volumes (wipes postgres + minio state)",
     )
     p_down.set_defaults(handler=_down)
 
     p_status = service_sub.add_parser(
-        "status", parents=[common],
+        "status",
+        parents=[common],
         help="Show container state + endpoint URLs",
     )
     p_status.set_defaults(handler=_status)

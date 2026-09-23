@@ -239,7 +239,9 @@ async def materialize_and_publish_task_images(
                     "materialized task bundle checksum mismatch "
                     f"expected={claim.task_checksum} actual={actual_checksum}"
                 )
-            expected_metadata_checksum = claim.task_source_provenance.get("bundle_file_metadata_sha256")
+            expected_metadata_checksum = claim.task_source_provenance.get(
+                "bundle_file_metadata_sha256"
+            )
             if expected_metadata_checksum is not None:
                 actual_metadata_checksum = bundle_file_metadata_sha256(task_dir)
                 if actual_metadata_checksum != expected_metadata_checksum:

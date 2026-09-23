@@ -22,9 +22,7 @@ import pytest
 from loom_cli.__main__ import main
 from loom_cli.service_cmd import _compose_args, _mutable_dev_images
 
-_GENERIC_EXPECTED_DENIAL_ERROR = (
-    "error: expected hidden-resource denial was not observed\n"
-)
+_GENERIC_EXPECTED_DENIAL_ERROR = "error: expected hidden-resource denial was not observed\n"
 _UPDATE_DENIAL_RECEIPT = (
     '{"error_code":"resource_hidden","http_method":"PUT",'
     '"schema":"loom-personal-dev-expected-hidden-denial-v1","status":404,'
@@ -47,74 +45,50 @@ def test_help_lists_subcommands(
     assert "up" in out and "down" in out and "status" in out
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_up_errors_when_compose_file_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main([
-        "service", "up",         "--compose-file", str(tmp_path / "nonexistent.yml"),
-    ])
+    rc = main(
+        [
+            "service",
+            "up",
+            "--compose-file",
+            str(tmp_path / "nonexistent.yml"),
+        ]
+    )
     assert rc == 1
     assert "not found" in capsys.readouterr().err.lower()
 
 
 def test_down_errors_when_compose_file_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main([
-        "service", "down",
-        "--compose-file", str(tmp_path / "nonexistent.yml"),
-    ])
+    rc = main(
+        [
+            "service",
+            "down",
+            "--compose-file",
+            str(tmp_path / "nonexistent.yml"),
+        ]
+    )
     assert rc == 1
     assert "not found" in capsys.readouterr().err.lower()
 
 
 def test_status_errors_when_compose_file_missing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = main([
-        "service", "status",
-        "--compose-file", str(tmp_path / "nonexistent.yml"),
-    ])
+    rc = main(
+        [
+            "service",
+            "status",
+            "--compose-file",
+            str(tmp_path / "nonexistent.yml"),
+        ]
+    )
     assert rc == 1
     assert "not found" in capsys.readouterr().err.lower()
 
@@ -136,9 +110,12 @@ def test_service_commands_error_without_docker_cli(
 
     with patch("loom_cli.service_cmd._run", side_effect=AssertionError("compose should not run")):
         argv = [
-            "service", service_cmd,
-            "--compose-file", str(compose),
-            "--env-file", str(tmp_path / "absent.env"),
+            "service",
+            service_cmd,
+            "--compose-file",
+            str(compose),
+            "--env-file",
+            str(tmp_path / "absent.env"),
         ]
         if service_cmd == "up":
             argv.extend([])
@@ -175,11 +152,16 @@ def test_service_status_errors_when_docker_compose_unavailable(
         )
 
     monkeypatch.setattr("loom_cli.service_cmd.subprocess.run", _fake_run)
-    rc = main([
-        "service", "status",
-        "--compose-file", str(compose),
-        "--env-file", str(tmp_path / "absent.env"),
-    ])
+    rc = main(
+        [
+            "service",
+            "status",
+            "--compose-file",
+            str(compose),
+            "--env-file",
+            str(tmp_path / "absent.env"),
+        ]
+    )
 
     captured = capsys.readouterr()
     assert rc == 2
@@ -258,19 +240,26 @@ def test_up_invokes_docker_compose_up(
     """Storage comes up first; on postgres failure we bail before alembic."""
     compose = tmp_path / "compose.yml"
     compose.write_text("services: {}\n")
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run") as mock_run, \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=False) as mock_wait, \
-         patch("loom_cli.service_cmd._alembic_upgrade") as mock_alembic:
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run") as mock_run,
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=False) as mock_wait,
+        patch("loom_cli.service_cmd._alembic_upgrade") as mock_alembic,
+    ):
         # _run returns CompletedProcess-like; we need .returncode = 0
         from subprocess import CompletedProcess
+
         mock_run.return_value = CompletedProcess([], 0, "", "")
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(tmp_path / "absent.env"),
-        ])
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(tmp_path / "absent.env"),
+            ]
+        )
         # postgres didn't go healthy → exit 1, no alembic call
         assert rc == 1
         # First call should be `docker compose ... up -d postgres minio`
@@ -378,11 +367,7 @@ def test_seed_test_data_parses_all_tokens(
 
     from loom_cli.service_cmd import _seed_test_data
 
-    fake_stdout = (
-        "team: loom_team_aaaaaa\n"
-        "worker: loom_w_bbbbbb\n"
-        "builder: loom_tib_cccccc\n"
-    )
+    fake_stdout = "team: loom_team_aaaaaa\nworker: loom_w_bbbbbb\nbuilder: loom_tib_cccccc\n"
 
     def _fake_run(*_args, **_kwargs):
         return CompletedProcess([], 0, fake_stdout, "")
@@ -463,8 +448,7 @@ def test_ensure_dev_admin_secret_preserves_existing_token(
     existing = "loom_admin_" + "E" * 43
     secret_file.parent.mkdir(parents=True)
     secret_file.write_text(
-        "[admin]\n"
-        f"token = \"{existing}\"\n",
+        f'[admin]\ntoken = "{existing}"\n',
         encoding="utf-8",
     )
     secret_file.chmod(0o600)
@@ -478,11 +462,14 @@ def test_write_env_tokens_creates_file_when_absent(tmp_path) -> None:
     from loom_cli.service_cmd import _write_env_tokens
 
     env_file = tmp_path / ".env"
-    _write_env_tokens(env_file, {
-        "team": "loom_team_aaa",
-        "worker": "loom_w_bbb",
-        "admin": "loom_admin_ccc",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_aaa",
+            "worker": "loom_w_bbb",
+            "admin": "loom_admin_ccc",
+        },
+    )
     content = env_file.read_text()
     assert "LOOM_TEAM_TOKEN=loom_team_aaa" in content
     assert "LOOM_WORKER_TOKEN=loom_w_bbb" in content
@@ -493,12 +480,15 @@ def test_write_env_tokens_writes_builder_token(tmp_path: Path) -> None:
     from loom_cli.service_cmd import _write_env_tokens
 
     env_file = tmp_path / ".env"
-    _write_env_tokens(env_file, {
-        "team": "loom_team_t",
-        "worker": "loom_w_w",
-        "builder": "loom_tib_b",
-        "admin": "loom_admin_a",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_t",
+            "worker": "loom_w_w",
+            "builder": "loom_tib_b",
+            "admin": "loom_admin_a",
+        },
+    )
     content = env_file.read_text()
     assert "LOOM_TASK_IMAGE_BUILDER_TOKEN=loom_tib_b" in content
 
@@ -518,11 +508,14 @@ def test_write_env_tokens_replaces_existing_keys_preserving_others(
         "LOOM_ADMIN_TOKEN=loom_admin_old\n"
         "MY_CUSTOM_VAR=please-keep-me\n",
     )
-    _write_env_tokens(env_file, {
-        "team": "loom_team_new",
-        "worker": "loom_w_new",
-        "admin": "loom_admin_new",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_new",
+            "worker": "loom_w_new",
+            "admin": "loom_admin_new",
+        },
+    )
     lines = env_file.read_text().splitlines()
     assert "# Local dev tokens" in lines
     assert "LOOM_TEAM_TOKEN=loom_team_new" in lines
@@ -532,9 +525,7 @@ def test_write_env_tokens_replaces_existing_keys_preserving_others(
     # Old values are gone; no duplicates of any key.
     assert not any(line.endswith("=loom_team_old") for line in lines)
     keys = [
-        line.split("=", 1)[0]
-        for line in lines
-        if "=" in line and not line.lstrip().startswith("#")
+        line.split("=", 1)[0] for line in lines if "=" in line and not line.lstrip().startswith("#")
     ]
     assert len(keys) == len(set(keys))
 
@@ -546,11 +537,14 @@ def test_write_env_tokens_appends_missing_keys(tmp_path) -> None:
 
     env_file = tmp_path / ".env"
     env_file.write_text("LOOM_TEAM_TOKEN=loom_team_only\n")
-    _write_env_tokens(env_file, {
-        "team": "loom_team_new",
-        "worker": "loom_w_new",
-        "admin": "loom_admin_new",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_new",
+            "worker": "loom_w_new",
+            "admin": "loom_admin_new",
+        },
+    )
     content = env_file.read_text()
     assert "LOOM_TEAM_TOKEN=loom_team_new" in content
     assert "LOOM_WORKER_TOKEN=loom_w_new" in content
@@ -586,23 +580,25 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
     }
     admin_secret_token = "loom_admin_" + "U" * 43
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=None):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch("loom_cli.service_cmd._ensure_dev_admin_secret", return_value=admin_secret_token),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=None),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     assert env_file.exists(), "env_file should have been written"
@@ -612,8 +608,7 @@ def test_up_recreates_worker_after_seeding_fresh_tokens(
     # Find the recreate call — must come after the initial `up -d` and
     # carry --force-recreate + --no-deps + worker target.
     recreate_calls = [
-        argv for argv in captured_run_calls
-        if "--force-recreate" in argv and "worker" in argv
+        argv for argv in captured_run_calls if "--force-recreate" in argv and "worker" in argv
     ]
     assert len(recreate_calls) == 1, (
         f"expected exactly one --force-recreate worker call; "
@@ -655,33 +650,37 @@ def test_up_recreates_task_image_builder_after_seeding_builder_token(
         "admin": "loom_admin_db_ignored",
     }
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value="loom_admin_" + "U" * 43), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=None):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch(
+            "loom_cli.service_cmd._ensure_dev_admin_secret", return_value="loom_admin_" + "U" * 43
+        ),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=None),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     assert "LOOM_TASK_IMAGE_BUILDER_TOKEN=loom_tib_fresh" in env_file.read_text()
     builder_recreates = [
-        argv for argv in captured_run_calls
+        argv
+        for argv in captured_run_calls
         if "--force-recreate" in argv and "task-image-builder" in argv
     ]
     assert len(builder_recreates) == 1
     assert "--no-deps" in builder_recreates[0]
-
 
 
 def test_up_skips_worker_recreate_when_no_env_file(
@@ -707,19 +706,17 @@ def test_up_skips_worker_recreate_when_no_env_file(
         "worker": "loom_w_fresh",
     }
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value="loom_admin_" + "N" * 43), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value="loom_br_unused"):
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch(
+            "loom_cli.service_cmd._ensure_dev_admin_secret", return_value="loom_admin_" + "N" * 43
+        ),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value="loom_br_unused"),
+    ):
         # argparse defaults --env-file to <compose_dir>/.env if not
         # explicitly None, so we have to pass --env-file pointing
         # somewhere AND ensure the loader treats it as "absent".
@@ -730,6 +727,7 @@ def test_up_skips_worker_recreate_when_no_env_file(
         import argparse
 
         from loom_cli.service_cmd import _DEFAULT_CP_URL, _up_local
+
         args = argparse.Namespace(
             compose_file=compose,
             env_file=None,
@@ -741,13 +739,9 @@ def test_up_skips_worker_recreate_when_no_env_file(
 
     assert rc == 0
     # No recreate should have happened (env_file is None → nothing to write).
-    recreate_calls = [
-        argv for argv in captured_run_calls
-        if "--force-recreate" in argv
-    ]
+    recreate_calls = [argv for argv in captured_run_calls if "--force-recreate" in argv]
     assert recreate_calls == [], (
-        f"unexpected --force-recreate when env_file is None: "
-        f"{recreate_calls!r}"
+        f"unexpected --force-recreate when env_file is None: {recreate_calls!r}"
     )
 
 
@@ -757,9 +751,14 @@ def test_init_admin_secret_writes_0600_without_printing_token(
 ) -> None:
     secret_file = tmp_path / "secrets.toml"
 
-    rc = main([
-        "service", "init-admin", "--secret-file", str(secret_file),
-    ])
+    rc = main(
+        [
+            "service",
+            "init-admin",
+            "--secret-file",
+            str(secret_file),
+        ]
+    )
 
     assert rc == 0
     token = _read_admin_token(secret_file)
@@ -780,21 +779,31 @@ def test_reveal_admin_requires_confirmation_unless_yes(
     secret_file = tmp_path / "secrets.toml"
     token = "loom_admin_" + "R" * 43
     secret_file.write_text(
-        "[admin]\n"
-        f"token = \"{token}\"\n",
+        f'[admin]\ntoken = "{token}"\n',
         encoding="utf-8",
     )
     secret_file.chmod(0o600)
 
     monkeypatch.setattr("sys.stdin", io.StringIO("no\n"))
-    denied = main([
-        "service", "reveal-admin", "--secret-file", str(secret_file),
-    ])
+    denied = main(
+        [
+            "service",
+            "reveal-admin",
+            "--secret-file",
+            str(secret_file),
+        ]
+    )
     denied_output = capsys.readouterr()
 
-    approved = main([
-        "service", "reveal-admin", "--secret-file", str(secret_file), "--yes",
-    ])
+    approved = main(
+        [
+            "service",
+            "reveal-admin",
+            "--secret-file",
+            str(secret_file),
+            "--yes",
+        ]
+    )
     approved_output = capsys.readouterr()
 
     assert denied == 2
@@ -811,15 +820,19 @@ def test_rotate_admin_replaces_secret_without_printing_new_token(
     secret_file = tmp_path / "secrets.toml"
     old_token = "loom_admin_" + "O" * 43
     secret_file.write_text(
-        "[admin]\n"
-        f"token = \"{old_token}\"\n",
+        f'[admin]\ntoken = "{old_token}"\n',
         encoding="utf-8",
     )
     secret_file.chmod(0o600)
 
-    rc = main([
-        "service", "rotate-admin", "--secret-file", str(secret_file),
-    ])
+    rc = main(
+        [
+            "service",
+            "rotate-admin",
+            "--secret-file",
+            str(secret_file),
+        ]
+    )
 
     assert rc == 0
     new_token = _read_admin_token(secret_file)
@@ -847,7 +860,9 @@ def test_mint_batch_runner_cp_token_returns_token_on_201(
     def _fake_post(url, *, json, headers, timeout):  # type: ignore[no-untyped-def]
         assert "/admin/batch-runner-tokens" in url
         assert "Authorization" in headers
-        return httpx.Response(201, json={"token": "loom_br_testtoken", "token_hash_prefix": "ab12cd34"})
+        return httpx.Response(
+            201, json={"token": "loom_br_testtoken", "token_hash_prefix": "ab12cd34"}
+        )
 
     monkeypatch.setattr("loom_cli.service_cmd.httpx.post", _fake_post)
     result = _mint_batch_runner_cp_token("loom_admin_" + "A" * 43)
@@ -919,23 +934,27 @@ def test_up_mints_batch_runner_token_and_writes_to_env(
     def _capture_run(argv, *_args, **_kwargs):
         return CompletedProcess(argv, 0, "", "")
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=batch_runner_token) as mock_mint:
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch("loom_cli.service_cmd._ensure_dev_admin_secret", return_value=admin_secret_token),
+        patch(
+            "loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=batch_runner_token
+        ) as mock_mint,
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     # mint was called with the admin token
@@ -974,30 +993,31 @@ def test_up_recreates_loom_service_after_writing_batch_runner_token(
     admin_secret_token = "loom_admin_" + "V" * 43
     batch_runner_token = "loom_br_recreatetest"
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=batch_runner_token):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch("loom_cli.service_cmd._ensure_dev_admin_secret", return_value=admin_secret_token),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=batch_runner_token),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
 
     # loom-service recreate call must exist
     svc_recreate_calls = [
-        argv for argv in captured_run_calls
-        if "--force-recreate" in argv and "loom-service" in argv
+        argv for argv in captured_run_calls if "--force-recreate" in argv and "loom-service" in argv
     ]
     assert len(svc_recreate_calls) == 1, (
         f"expected exactly one --force-recreate loom-service call; "
@@ -1012,7 +1032,8 @@ def test_up_recreates_loom_service_after_writing_batch_runner_token(
     # The loom-service recreate must come AFTER the env file is written
     # (i.e., it must be a later _run call than the initial `up -d`).
     initial_up_idx = next(
-        i for i, argv in enumerate(captured_run_calls)
+        i
+        for i, argv in enumerate(captured_run_calls)
         if "up" in argv and "-d" in argv and "--force-recreate" not in argv
     )
     svc_recreate_idx = captured_run_calls.index(svc_recreate_argv)
@@ -1043,29 +1064,32 @@ def test_up_skips_loom_service_recreate_when_mint_fails(
 
     fake_tokens = {"team": "loom_team_x", "worker": "loom_w_x"}
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value="loom_admin_" + "W" * 43), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=None):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch(
+            "loom_cli.service_cmd._ensure_dev_admin_secret", return_value="loom_admin_" + "W" * 43
+        ),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=None),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     # No loom-service recreate when mint failed
     svc_recreate_calls = [
-        argv for argv in captured_run_calls
-        if "--force-recreate" in argv and "loom-service" in argv
+        argv for argv in captured_run_calls if "--force-recreate" in argv and "loom-service" in argv
     ]
     assert svc_recreate_calls == [], (
         f"unexpected loom-service recreate when mint failed: {svc_recreate_calls!r}"
@@ -1083,12 +1107,15 @@ def test_write_env_tokens_writes_batch_runner_cp_token(tmp_path: Path) -> None:
     from loom_cli.service_cmd import _write_env_tokens
 
     env_file = tmp_path / ".env"
-    _write_env_tokens(env_file, {
-        "team": "loom_team_t",
-        "worker": "loom_w_w",
-        "admin": "loom_admin_a",
-        "batch_runner_cp": "loom_br_b",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_t",
+            "worker": "loom_w_w",
+            "admin": "loom_admin_a",
+            "batch_runner_cp": "loom_br_b",
+        },
+    )
     content = env_file.read_text()
     assert "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_b" in content
 
@@ -1102,13 +1129,15 @@ def test_write_env_tokens_replaces_existing_batch_runner_cp_token(
 
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "LOOM_TEAM_TOKEN=loom_team_old\n"
-        "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_old\n",
+        "LOOM_TEAM_TOKEN=loom_team_old\nLOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_old\n",
     )
-    _write_env_tokens(env_file, {
-        "team": "loom_team_new",
-        "batch_runner_cp": "loom_br_new",
-    })
+    _write_env_tokens(
+        env_file,
+        {
+            "team": "loom_team_new",
+            "batch_runner_cp": "loom_br_new",
+        },
+    )
     lines = env_file.read_text().splitlines()
     assert "LOOM_TEAM_TOKEN=loom_team_new" in lines
     assert "LOOM_SVC_BATCH_RUNNER_CP_TOKEN=loom_br_new" in lines
@@ -1149,23 +1178,25 @@ def test_up_generates_secret_store_master_key_if_absent(
     fake_tokens = {"team": "loom_team_t", "worker": "loom_w_w"}
     admin_secret_token = "loom_admin_" + "K" * 43
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=None):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch("loom_cli.service_cmd._ensure_dev_admin_secret", return_value=admin_secret_token),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=None),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     assert env_file.exists(), ".env should have been created"
@@ -1200,23 +1231,25 @@ def test_up_preserves_existing_secret_store_master_key(
     fake_tokens = {"team": "loom_team_t", "worker": "loom_w_w"}
     admin_secret_token = "loom_admin_" + "P" * 43
 
-    with patch("loom_cli.service_cmd._ensure_docker_compose_available",
-               return_value=0), \
-         patch("loom_cli.service_cmd._run", side_effect=_capture_run), \
-         patch("loom_cli.service_cmd._wait_for_postgres",
-               return_value=True), \
-         patch("loom_cli.service_cmd._alembic_upgrade",
-               return_value=0), \
-         patch("loom_cli.service_cmd._seed_test_data",
-               return_value=(0, fake_tokens)), \
-         patch("loom_cli.service_cmd._ensure_dev_admin_secret",
-               return_value=admin_secret_token), \
-         patch("loom_cli.service_cmd._mint_batch_runner_cp_token",
-               return_value=None):
-        rc = main([
-            "service", "up",             "--compose-file", str(compose),
-            "--env-file", str(env_file),
-        ])
+    with (
+        patch("loom_cli.service_cmd._ensure_docker_compose_available", return_value=0),
+        patch("loom_cli.service_cmd._run", side_effect=_capture_run),
+        patch("loom_cli.service_cmd._wait_for_postgres", return_value=True),
+        patch("loom_cli.service_cmd._alembic_upgrade", return_value=0),
+        patch("loom_cli.service_cmd._seed_test_data", return_value=(0, fake_tokens)),
+        patch("loom_cli.service_cmd._ensure_dev_admin_secret", return_value=admin_secret_token),
+        patch("loom_cli.service_cmd._mint_batch_runner_cp_token", return_value=None),
+    ):
+        rc = main(
+            [
+                "service",
+                "up",
+                "--compose-file",
+                str(compose),
+                "--env-file",
+                str(env_file),
+            ]
+        )
 
     assert rc == 0
     content = env_file.read_text()
@@ -1224,8 +1257,7 @@ def test_up_preserves_existing_secret_store_master_key(
     assert f"LOOM_SECRET_STORE_MASTER_KEY={existing_key}" in content
     # No duplicate lines for the key.
     key_lines = [
-        line for line in content.splitlines()
-        if line.startswith("LOOM_SECRET_STORE_MASTER_KEY=")
+        line for line in content.splitlines() if line.startswith("LOOM_SECRET_STORE_MASTER_KEY=")
     ]
     assert len(key_lines) == 1, (
         f"expected exactly one LOOM_SECRET_STORE_MASTER_KEY line; "
