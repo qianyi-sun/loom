@@ -330,6 +330,8 @@ def automatic_service_execution_rejections(
         reasons.append("gpu_unsupported")
     if env.mutable_paths and not terminus:
         reasons.append("mutable_paths_require_terminus")
+    if env.workspace_reference_files and not terminus:
+        reasons.append("workspace_references_require_terminus")
     if env.preserve_acls and not terminus:
         reasons.append("acl_snapshots_require_terminus")
     if env.service_lifecycle is not None and not terminus:
@@ -796,6 +798,11 @@ def _compile_terminus_plan(
         outputs.append(RuntimeOutputDeclarationV1(
             source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
             kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
+        ))
+    if env.workspace_reference_files:
+        outputs.append(RuntimeOutputDeclarationV1(
+            source_path=".loom/workspace-references.json",
+            relative_path="artifacts/workspace-references.json", kind="task_artifact", required=True,
         ))
     if env.mutable_paths:
         for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
