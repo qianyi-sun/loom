@@ -345,6 +345,46 @@ class FakeKubectl(deploy.Kubectl):
         return ""
 
 
+def _current_primary(kube, config, files, target_id):
+    """An installed ConfigMap, independent of the proposed render."""
+    import copy
+
+    current = copy.deepcopy(next(row for row in files["10-config-network.yaml"]
+                                if row["kind"] == "ConfigMap"))
+    environment = {**config, "target_id": target_id}
+    current["data"]["environment.json"] = json.dumps(environment)
+    kube.objects["configmap", "loom-platform-config"] = current
+
+
+@pytest.mark.parametrize("retire_target", [None, "foreign-target"])
+def test_primary_target_change_requires_exact_explicit_retirement(rendered, monkeypatch, retire_target):
+    # Without this fence, an immutable-class replacement leaves the old target
+    # eligible for dispatch after its actuator has moved to the new identity.
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = retire_target
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_retirement_cannot_name_the_destination_or_fresh_install(rendered, monkeypatch, installed):
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = config["target_id"]
+    kube = FakeKubectl(config, files, database=installed)
+    if installed:
+        _current_primary(kube, config, files, config["target_id"])
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
 def test_reviewed_render_read_only_plan(rendered: tuple) -> None:
     args, config, _, files = rendered
     kube = FakeKubectl(config, files)
