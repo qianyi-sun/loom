@@ -164,3 +164,28 @@ def test_diagnostic_preserves_wire_size_at_gateway_limit(wire, monkeypatch):
         adapter._get(["get", "pods", "--all-namespaces"])
     assert adapter.failure == "response_too_large"
     assert adapter.reads[-1]["bytes"] == 4194305
+
+
+def test_candidate_drift_does_not_hide_independent_current_capacity_failure(wire):
+    wire[1]["candidate"] = "c" * 40
+    wire[2][("get", "pods", "--all-namespaces")] = " " * (4 * 1024 * 1024 + 1)
+    result = inspect(wire)
+    assert result["status"] == "blocked"
+    assert result["checks"] == {"foundation": "blocked", "capacity": "blocked"}
+    assert result["failures"] == {"foundation": "validation_failed", "capacity": "response_too_large"}
+    assert result["scope"] == "current_cluster_not_historical_gateway"
+
+
+def test_independent_check_clears_prior_transport_failure(wire):
+    kube, _, _, inventory = wire
+    original = kube.run
+
+    def fail_context(*args, **kwargs):
+        if args[0] == "config":
+            raise RuntimeError("private-error")
+        return original(*args, **kwargs)
+
+    kube.run = fail_context
+    inventory["pods"][0]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "900m"
+    result = inspect(wire)
+    assert result["failures"] == {"foundation": "read_failed", "capacity": "insufficient_capacity"}
