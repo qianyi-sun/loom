@@ -158,7 +158,11 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
             missing_storage = self.platform_capacity(request, rendered)
             asyncio.run(self.provider_and_publication(request, missing_storage))
             with backup_client(request) as objects:
-                response = objects.head_bucket(Bucket=request.deployment.backup_bucket)
+                # Nebius object-only bucket policies allow object listing but
+                # not HeadBucket. IAM qualification above pins the bucket and
+                # exact policy; prove the supplied credential's object access
+                # without adding a bucket/project grant or writing a probe.
+                response = objects.list_objects_v2(Bucket=request.deployment.backup_bucket, MaxKeys=1)
                 if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 200:
                     raise ValueError()
             self.public_route(request)
