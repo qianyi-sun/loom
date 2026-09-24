@@ -19,9 +19,11 @@ variable "labels" {
 variable "nebius_profile" { type = string }
 variable "integration_platform" {
   type = object({
-    bucket_prefix           = string
-    system_preset           = optional(string, "4vcpu-16gb")
-    execution_max_nodes     = optional(number, 100)
-    native_builder_group_id = optional(string)
+    bucket_prefix              = string
+    system_preset              = optional(string, "4vcpu-16gb")
+    system_disk_gib            = optional(number, 80)
+    system_create_before_drain = optional(bool, false)
+    execution_max_nodes        = optional(number, 100)
+    native_builder_group_id    = optional(string)
   })
 }

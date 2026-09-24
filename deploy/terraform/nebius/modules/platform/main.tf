@@ -3,21 +3,25 @@
 variable "integration_platform" {
   description = "Independent pure Nebius integration footprint; null creates nothing."
   type = object({
-    bucket_prefix           = string
-    system_preset           = optional(string, "4vcpu-16gb")
-    execution_max_nodes     = optional(number, 100)
-    native_builder_group_id = optional(string)
+    bucket_prefix              = string
+    system_preset              = optional(string, "4vcpu-16gb")
+    system_disk_gib            = optional(number, 80)
+    system_create_before_drain = optional(bool, false)
+    execution_max_nodes        = optional(number, 100)
+    native_builder_group_id    = optional(string)
   })
   default = null
   validation {
     condition = var.integration_platform == null ? true : (
       can(regex("^[a-z0-9][a-z0-9-]{5,45}$", var.integration_platform.bucket_prefix)) &&
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.integration_platform.system_preset) &&
+      var.integration_platform.system_disk_gib >= 80 && var.integration_platform.system_disk_gib <= 1024 &&
+      floor(var.integration_platform.system_disk_gib) == var.integration_platform.system_disk_gib &&
       var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 100 &&
       floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes &&
       (var.integration_platform.native_builder_group_id == null ? true : can(regex("^group-[a-z0-9]+$", var.integration_platform.native_builder_group_id)))
     )
-    error_message = "Integration needs a unique bucket prefix and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
+    error_message = "Integration needs a unique bucket prefix, a supported system preset, an integer system disk from 80 to 1024 GiB, and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
   }
 }
 
@@ -66,7 +70,7 @@ locals {
     }
   ]
   integration_nodes = var.integration_platform == null ? {} : {
-    system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = 80 }
+    system    = { preset = var.integration_platform.system_preset, minimum = 1, maximum = 1, disk = var.integration_platform.system_disk_gib }
     execution = { preset = "16vcpu-64gb", minimum = 0, maximum = var.integration_platform.execution_max_nodes, disk = 80 }
   }
 }
@@ -159,8 +163,8 @@ resource "nebius_mk8s_v1_node_group" "integration" {
   }
   strategy = {
     drain_timeout   = "20m"
-    max_surge       = { count = 0 }
-    max_unavailable = { count = 1 }
+    max_surge       = { count = each.key == "system" && var.integration_platform.system_create_before_drain ? 1 : 0 }
+    max_unavailable = { count = each.key == "system" && var.integration_platform.system_create_before_drain ? 0 : 1 }
   }
   template = {
     service_account_id = var.node_registry_pull_service_account_id

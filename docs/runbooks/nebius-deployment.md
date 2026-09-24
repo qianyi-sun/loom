@@ -650,6 +650,30 @@ add a management-install operation to the protected workflow on its own.
 
 ### Protected initial management installation
 
+Qualify platform capacity before preparing management's child allowance. The
+primary Terraform platform input supports `integration_platform.system_preset`
+(`4vcpu-16gb` or `8vcpu-32gb`) and `system_disk_gib` (integer 80–1024 GiB,
+default 80). The disk is node-local OS/image/backup scratch, not PostgreSQL PVC
+capacity. Include existing maintenance scratch as well as management, concurrent
+children, rollout surge, system daemons and images; undeclared Pod requests do
+not mean the workload uses no disk.
+
+For a planned system-node replacement, `system_create_before_drain: true` selects
+one temporary surge node and zero unavailable nodes; the steady count remains
+one. The default remains the existing drain-first strategy. These inputs do not
+alter execution groups or secondary-region capacity. A temporary node also needs
+provider quota and incurs node/disk charges. This is not a zero-downtime guarantee:
+single-replica databases and ingress can pause while retained volumes reattach.
+
+Before applying, retain a current off-node backup/restore proof, PVC/PV identities,
+ingress allocation, state/backend identity and exact saved Terraform plan. Inspect
+the plan for only the intended primary system-group update; do not apply unrelated
+changes or deletes. Use protected rollout for Kubernetes observations/recovery,
+not an ad-hoc drain or workload deletion. Reconcile an uncertain provider outcome
+before retrying. Rollback is a separately reviewed forward node-group update;
+retain the enlarged disk and all data volumes rather than shrinking or deleting
+them. Capacity configuration alone is not installed acceptance.
+
 `nebius-rollout` provides two manual actions, `management-preflight` and
 `management-install`, on `dev` in the protected `nebius-integration` environment.
 They share the existing rollout serialization. Neither accepts shell commands,
