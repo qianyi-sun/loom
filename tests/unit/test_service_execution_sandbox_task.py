@@ -137,6 +137,68 @@ class Sandbox(FakeDriver):
         await super().export_workspace_archive(src, dst)
 
 
+@pytest.mark.parametrize("verifier_drift", [False, True])
+async def test_declared_workspace_reference_manifest_is_used_by_both_phases(tmp_path, monkeypatch, verifier_drift):
+    from loom.models.task import TaskConfig
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+    task, trial, _ = _inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["workspace_reference_files"] = ["/usr/local/bin/python3", "/usr/local/bin/python3.11"]
+    raw["environment"]["reference_file_symlinks"] = {"/usr/local/bin/python3": "python3.11"}
+    task = TaskConfig.model_validate(raw)
+    (tmp_path / "instruction.md").write_text("Use an ordinary virtual environment")
+
+    class ReferenceSandbox(Sandbox):
+        drift = False
+        imported = False
+
+        async def inspect_reference_symlink(self, path):
+            return "python3.11"
+
+        async def inspect_reference_file(self, path, *, max_bytes):
+            return {"path": str(path), "size_bytes": 6, "mode": 0o755, "uid": 0, "gid": 0,
+                    "sha256": ("1" if self.drift else "0") * 64}
+
+        async def import_workspace_archive(self, src, dst, *, policy, preserve_acls, external_reference_files):
+            assert external_reference_files == frozenset(task.environment.workspace_reference_files)
+            self.imported = True
+            await super().import_workspace_archive(src, dst, policy=policy)
+
+    agent, verifier = ReferenceSandbox(), ReferenceSandbox()
+    verifier.drift = verifier_drift
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
+                        lambda role, task: agent if role == "task-sandbox" else verifier)
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        agent.filesystem[PurePosixPath("/app/answer")] = b"output"
+
+    def check(cmd, user, cwd, env):
+        if env and "LOOM_VERIFIER_OUTPUT" in env:
+            assert verifier.filesystem[PurePosixPath("/app/answer")] == b"output"
+            verifier.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    verifier.exec_handler = check
+    monkeypatch.setattr("loom.service_execution_sandbox_task._execution_identity", identity)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.run_terminus2", terminus)
+    await run_agent(tmp_path, task, trial)
+    assert (tmp_path / ".loom/workspace-references.json").is_file()
+    if verifier_drift:
+        with pytest.raises(WorkspaceSnapshotError, match="differs"):
+            await run_verifier(tmp_path, task, trial)
+        assert not verifier.imported
+    else:
+        await run_verifier(tmp_path, task, trial)
+        assert verifier.imported
+    assert verifier.quiesced and verifier.state == "stopped"
+
+
 @pytest.mark.asyncio
 async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(tmp_path, monkeypatch):
     from loom.models.task import TaskConfig
