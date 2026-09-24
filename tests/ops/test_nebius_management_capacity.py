@@ -50,12 +50,12 @@ def test_running_owned_pod_is_not_charged_twice_with_its_controller(platform):
     dep = platform["controllers"][0]
     rs = workload("ReplicaSet", "api-hash")
     rs["spec"]["replicas"] = 1
-    rs["metadata"]["ownerReferences"] = [{"kind": "Deployment", "name": "api", "uid": dep["metadata"]["uid"], "controller": True}]
+    rs["metadata"]["ownerReferences"] = [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "api", "uid": dep["metadata"]["uid"], "controller": True}]
     platform["controllers"].append(rs)
     pod = copy.deepcopy(dep["spec"]["template"])
     pod.update(apiVersion="v1", kind="Pod", status={"phase": "Running"})
     pod["metadata"].update(name="api-hash-0", namespace="loom-platform", uid=str(uuid4()), ownerReferences=[{
-        "kind": "ReplicaSet", "name": "api-hash", "uid": rs["metadata"]["uid"], "controller": True}])
+        "apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "api-hash", "uid": rs["metadata"]["uid"], "controller": True}])
     pod["spec"]["nodeName"] = "computeinstance-test"
     platform["pods"].append(pod)
     assert qualify(platform)["required"]["cpu_millis"] == 800
@@ -128,6 +128,6 @@ def test_heavier_old_replicaset_is_reserved_during_rollout(platform):
     dep = platform["controllers"][0]
     rs = workload("ReplicaSet", "api-old", cpu="800m")
     rs["spec"]["replicas"] = 1
-    rs["metadata"]["ownerReferences"] = [{"kind": "Deployment", "name": "api", "uid": dep["metadata"]["uid"], "controller": True}]
+    rs["metadata"]["ownerReferences"] = [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "api", "uid": dep["metadata"]["uid"], "controller": True}]
     platform["controllers"].append(rs)
     assert qualify(platform)["required"]["cpu_millis"] == 2200
