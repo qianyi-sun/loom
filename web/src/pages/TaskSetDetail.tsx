@@ -41,7 +41,7 @@ const ACTIVE_STATUSES = new Set(["materializing"]);
 
 function capabilityLabel(ts: TaskSetDetailView): string {
   if (ts.evaluation_ready && ts.intents.includes("trajectory_generation")) {
-    return "both";
+    return "evaluation-ready · trajectory generation";
   }
   if (ts.evaluation_ready) return "evaluation-ready";
   return "trajectory-only";
@@ -161,7 +161,7 @@ export default function TaskSetDetail(): JSX.Element {
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">
-            {ts.task_set_id}
+            {ts.display_name || ts.task_set_id}
           </h1>
           <div className="mt-1 flex items-center gap-2">
             <StatusPill variant={statusVariant(ts.status)}>
@@ -194,13 +194,15 @@ export default function TaskSetDetail(): JSX.Element {
         </div>
       </header>
 
+      <p className="text-sm text-slate-600">Trajectory generation uses task sets. Evaluation-ready historical or admin-imported sets include a verifier; new evaluation batches use native benchmark tasks.</p>
+      <Link className="inline-block text-sm text-accent hover:underline" to={`/batches/new?taskSet=${encodeURIComponent(ts.task_set_id)}`}>Configure a batch with this task source →</Link>
       <Tabs
         items={
           [
             { value: "overview", label: "Overview" },
             {
               value: "errors",
-              label: `Errors (${ts.error_summary.length})`,
+              label: `Error samples (${ts.error_summary.length})`,
             },
           ] satisfies readonly TabItem<TabName>[]
         }
@@ -294,6 +296,7 @@ function OverviewPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
           ) : null}
         </dl>
 
+        {(ts.task_preview ?? []).length > 0 ? <section><h2 className="text-sm font-medium">Task preview (first {ts.task_preview?.length} of {ts.task_count})</h2><ul className="mt-2 text-sm">{ts.task_preview?.map((id) => <li className="break-all" key={id}>{id}</li>)}</ul></section> : null}
         {ts.warnings.length > 0 ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
             <p className="text-xs font-medium uppercase text-amber-800">
@@ -319,7 +322,7 @@ function ErrorsPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
       <Card>
         <Card.Body>
           <p className="text-sm text-slate-500">
-            No errors recorded for this task set.
+            No retained error samples for this task set. Check the task-set status and warnings for other import failures.
           </p>
         </Card.Body>
       </Card>
@@ -328,7 +331,8 @@ function ErrorsPanel({ ts }: { ts: TaskSetDetailView }): JSX.Element {
 
   return (
     <Card>
-      <Card.Body className="p-0">
+      <Card.Body className="overflow-x-auto p-0">
+        <p className="p-4 text-sm text-slate-600">Showing {ts.error_summary.length} retained error samples, not a total error count. Only the first 50 samples are retained.{ts.error_summary.length >= 50 ? " The sample limit has been reached; additional errors may exist." : ""} Fix the reported manifest or task data, then rebuild. Share the task-set ID and status reason with an administrator if the import still fails.</p>
         <table aria-label="Task import errors" className="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr className="bg-slate-50/50">

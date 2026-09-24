@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { EMPTY_BENCHMARK_HELP } from "../../lib/helpText";
 import { isTaskSetId, type BenchmarkItem } from "./taskSources";
@@ -66,9 +66,11 @@ export function BenchmarkPicker({
   /** Skip series group headers (use for a single-kind TaskSet list). */
   flat?: boolean;
 }): JSX.Element {
+  const [search, setSearch] = useState("");
   const groups = useMemo(() => {
     const bySeries = new Map<string, BenchmarkItem[]>();
     for (const b of items) {
+      if (search.trim() && !`${b.display_name ?? ""} ${b.id} ${b.detail_label ?? ""}`.toLowerCase().includes(search.trim().toLowerCase())) continue;
       const key = b.series ?? "";
       const bucket = bySeries.get(key) ?? [];
       bucket.push(b);
@@ -87,7 +89,7 @@ export function BenchmarkPicker({
         if (b.series === "" && a.series !== "") return -1;
         return a.series.localeCompare(b.series);
       });
-  }, [items]);
+  }, [items, search]);
 
   const toggleOne = (id: string): void => {
     const next = new Set(selected);
@@ -116,6 +118,8 @@ export function BenchmarkPicker({
 
   return (
     <div className="mt-1 max-h-72 min-w-0 overflow-x-hidden overflow-y-auto rounded-lg border border-slate-200 bg-white">
+      <div className="sticky top-0 z-10 bg-white p-2"><input type="search" aria-label={`Search ${sourceKind} sources`} placeholder="Search by name or ID" value={search} onChange={(event) => setSearch(event.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" /></div>
+      {groups.length === 0 ? <p className="p-3 text-sm text-slate-500">No sources match this search. Clear it to see all sources; your selections are retained.</p> : null}
       {groups.map(({ series, rows }) => {
         const seriesLabel = series === "" ? "Other" : series;
         const selectableRows = rows.filter(benchmarkSelectable);
@@ -203,6 +207,7 @@ export function BenchmarkPicker({
                   />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate">{label}</span>
+                    {r.detail_label ? <span className="block break-words text-xs text-slate-500">{r.detail_label}</span> : null}
                   </span>
                   {countText ? (
                     <span

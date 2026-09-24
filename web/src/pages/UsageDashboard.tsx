@@ -155,7 +155,7 @@ export default function UsageDashboard(): JSX.Element {
 
       <CommandActions title="Usage CLI" label="Export usage query"><CommandSnippet
         label="Usage CLI"
-        command={usageCommand(start, end, teamId, auth.isAdmin)}
+        command={usageCommand(start, end, teamId, auth.isAdmin, groupBy)}
         helperText={
           auth.isAdmin
             ? teamId
@@ -203,6 +203,7 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
     },
     [buckets],
   );
+  const hasPricedBuckets = buckets.some((bucket) => usageCostAmount(bucket) !== null);
   const hasBatchBreakdown = buckets.some((b) => (b.batches ?? []).length > 0);
 
   return (
@@ -229,19 +230,19 @@ function UsageContent({ buckets }: { buckets: Bucket[] }): JSX.Element {
       </div>
       <p className="text-xs text-slate-500">
         Trial counts reflect currently stored trial states. Token totals come
-        from LLM gateway call records, not evaluator rewards.
+        from LLM gateway call records, not evaluator rewards. Mixed combines priced and token-only calls; partial means some usage is missing; price_unknown means a matching price is unavailable.
       </p>
 
       <Card>
         <Card.Header
-          title="Estimated LLM cost per bucket"
-          description="Each bar is the sum of recorded model-call costs for that time bucket."
+          title={hasPricedBuckets ? "Estimated LLM cost per bucket" : "Tokens per bucket"}
+          description={hasPricedBuckets ? "Recorded model-call costs for each time bucket." : "Costs are unavailable: calls may be token-only or missing price coverage. Tokens remain available; unknown cost is not zero."}
         />
         <Card.Body>
           <Chart
             buckets={buckets}
-            getValue={(b) => usageCostAmount(b) ?? 0}
-            formatValue={(_v, b) => formatUsageCost(b)}
+            getValue={(b) => hasPricedBuckets ? usageCostAmount(b) ?? 0 : b.llm_input_tokens + b.llm_output_tokens}
+            formatValue={(v, b) => hasPricedBuckets ? formatUsageCost(b) : `${v.toLocaleString()} tokens`}
           />
         </Card.Body>
       </Card>
@@ -329,6 +330,7 @@ function UsageBucketRows({
       {showBatchBreakdown && (bucket.batches ?? []).length > 0 ? (
         <tr>
           <td colSpan={9} className="bg-slate-50/70 px-4 py-3">
+            <details><summary className="cursor-pointer text-sm font-medium">Batch breakdown ({bucket.batches?.length ?? 0})</summary>
             <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Batch usage scroll area">
               <table aria-label="Batch usage" className="min-w-full text-xs">
                 <thead>
@@ -359,6 +361,7 @@ function UsageBucketRows({
                 </tbody>
               </table>
             </div>
+            </details>
           </td>
         </tr>
       ) : null}

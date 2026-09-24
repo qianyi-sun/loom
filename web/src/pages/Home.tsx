@@ -313,7 +313,7 @@ function OverviewContent({ data }: { data: OverviewSummary }): JSX.Element {
               <p className="mt-1 text-sm text-slate-500">
                 Tasks may queue while capacity becomes available or nodes start.
               </p>
-              <Link to="/monitor" className="text-sm text-accent">View nodes and scheduling</Link>
+              <Link to="/monitor?view=capacity" className="text-sm text-accent">View nodes and scheduling</Link>
             </div>
             <CountLine
               value={data.run_activity.trials.running ?? 0}

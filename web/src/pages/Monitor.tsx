@@ -1,6 +1,8 @@
+import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigationType, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Input } from "../components/Input";
@@ -13,9 +15,25 @@ import { TrialsView } from "./MonitorTrials";
 export default function Monitor(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const auth = useAuth();
+  const capacity = ["capacity", "resources"].includes(searchParams.get("view") ?? "");
   const view: View = searchParams.get("view") === "trials" ? "trials" : "batches";
   const batchIdFilter = searchParams.get("batch_id") ?? undefined;
   const search = searchParams.get("q") ?? "";
+  const [searchDraft, setSearchDraft] = useState(search);
+  const pendingQueries = useRef<string[]>([]);
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  useEffect(() => {
+    const ownUpdate = pendingQueries.current.lastIndexOf(searchParams.toString());
+    if (navigationType === "POP" || ownUpdate < 0) {
+      pendingQueries.current = [];
+      setSearchDraft(search);
+    } else {
+      pendingQueries.current.splice(0, ownUpdate + 1);
+      // An older URL commit must not overwrite characters already typed locally.
+      if (pendingQueries.current.length === 0) setSearchDraft(search);
+    }
+  }, [location.key, navigationType, search, searchParams]);
   const stateFilter = searchParams.get("state") ?? "";
   const teamFilter = searchParams.get("team_id") ?? "";
   const benchmarkFilter = searchParams.get("benchmark_id") ?? "";
@@ -33,24 +51,39 @@ export default function Monitor(): JSX.Element {
   const adminTeams = teamsQuery.data?.items ?? [];
   const selectedTeamKnown = adminTeams.some((team) => team.id === teamFilter);
 
-  const updateParam = (key: string, value: string): void => {
+  const draftParams = (): URLSearchParams => {
     const next = new URLSearchParams(searchParams);
-    if (value) next.set(key, value);
-    else next.delete(key);
+    if (searchDraft) next.set("q", searchDraft);
+    else next.delete("q");
+    return next;
+  };
+  const navigateParams = (next: URLSearchParams): void => {
+    pendingQueries.current.push(next.toString());
     setSearchParams(next);
   };
+  const updateParam = (key: string, value: string): void => {
+    const next = draftParams();
+    clearCursorParams(next);
+    if (key === "q") setSearchDraft(value);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    navigateParams(next);
+  };
   const updateParamWithAliases = (key: string, value: string, aliases: string[] = []): void => {
-    const next = new URLSearchParams(searchParams);
+    const next = draftParams();
+    clearCursorParams(next);
     for (const alias of aliases) next.delete(alias);
     if (value) next.set(key, value);
     else next.delete(key);
-    setSearchParams(next);
+    navigateParams(next);
   };
 
-  const setView = (v: View): void => {
-    const next = new URLSearchParams(searchParams);
+  const setView = (v: View | "capacity"): void => {
+    const next = draftParams();
+    clearCursorParams(next);
     next.set("view", v);
-    setSearchParams(next);
+    next.delete("state");
+    navigateParams(next);
   };
 
   const stateOptions = view === "batches" ? BATCH_STATE_OPTIONS : TRIAL_STATE_OPTIONS;
@@ -62,12 +95,12 @@ export default function Monitor(): JSX.Element {
           <h1 className="text-2xl font-bold text-slate-900">Monitor</h1>
           <p className="mt-1 text-sm text-slate-500">Live-updating view of your batches and trials.</p>
         </div>
-        <SegmentedToggle value={view} onChange={setView} />
+        <SegmentedToggle value={capacity ? "capacity" : view} onChange={setView} />
       </header>
 
       <div className="flex flex-wrap items-center gap-3">
         <Input
-          value={search}
+          value={searchDraft}
           onChange={(e) => updateParam("q", e.target.value)}
           placeholder={
             view === "batches" ? "Search batches by name or ID..." : "Search trials by task ID or trial ID..."
@@ -117,6 +150,9 @@ export default function Monitor(): JSX.Element {
             </select>
           </label>
         ) : null}
+        <details className="w-full rounded-lg border border-slate-200 p-3">
+          <summary className="cursor-pointer text-sm font-medium">Advanced filters</summary>
+          <div className="mt-3 flex flex-wrap gap-3">
         <Input
           value={benchmarkFilter}
           onChange={(e) => updateParam("benchmark_id", e.target.value)}
@@ -165,6 +201,15 @@ export default function Monitor(): JSX.Element {
           aria-label="filter by provider model"
           title="Filter by provider model ID."
         />
+          </div>
+        </details>
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Active advanced filters">
+          {[["benchmark_id", benchmarkFilter], ["agent_name", agentFilter], ["model_provider", modelProviderFilter], ["model_name", modelNameFilter], ["provider_connection_id", providerConnectionFilter], ["provider_model_id", providerModelFilter]].filter(([, value]) => value).map(([key, value]) => (
+            <button key={key} className="rounded-full border px-3 py-1 text-xs" onClick={() => updateParamWithAliases(key, "", key === "agent_name" ? ["agent"] : key === "model_name" ? ["model"] : [])} title={`Remove ${key.replaceAll("_", " ")} filter`}>
+              {key.replaceAll("_", " ")}: {value} ×
+            </button>
+          ))}
+        </div>
         {view === "trials" && batchIdFilter ? (
           <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
             batch_id = <code className="font-mono">{batchIdFilter.slice(0, 8)}</code>
@@ -172,11 +217,7 @@ export default function Monitor(): JSX.Element {
               type="button"
               className="ml-2 text-slate-500 hover:text-slate-900"
               title="Remove this batch_id filter and show trials from all batches."
-              onClick={() => {
-                const next = new URLSearchParams(searchParams);
-                next.delete("batch_id");
-                setSearchParams(next);
-              }}
+              onClick={() => updateParam("batch_id", "")}
             >
               clear
             </button>
@@ -185,6 +226,7 @@ export default function Monitor(): JSX.Element {
       </div>
 
       <MonitorHealthSummary
+        compact={!capacity}
         view={view}
         search={search}
         stateFilter={stateFilter}
@@ -198,7 +240,7 @@ export default function Monitor(): JSX.Element {
         batchId={batchIdFilter}
       />
 
-      {view === "batches" ? (
+      {capacity ? null : view === "batches" ? (
         <BatchesView
           search={search}
           stateFilter={stateFilter}

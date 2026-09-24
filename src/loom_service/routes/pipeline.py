@@ -17,6 +17,8 @@ from loom.db.schema import (
     ExecutionAttempt,
     PipelineBudgetLedger,
     PipelineEvent,
+    PipelineInputImport,
+    PipelineInputMaterialization,
     PipelineLivePreviewFrame,
     PipelineLivePreviewGeneration,
     PipelineRun,
@@ -38,6 +40,7 @@ from loom.pipeline.public_api import (
     PipelineArtifactListQueryV1,
     PipelineArtifactListResponseV1,
     PipelineExecutionAttemptListV1,
+    PipelineInputArtifactDetailV1,
     PipelineRunCancelRequestV1,
     PipelineRunDetailV1,
     PipelineRunEventsQueryV1,
@@ -1479,6 +1482,63 @@ async def get_pipeline_artifact(
     await validate_public_artifact(
         resolved,
         client=request.app.state.minio_client,
+        bucket=request.app.state.settings.artifacts_bucket,
+    )
+    return public_artifact_projection(resolved)
+
+
+@router.get("/pipeline-artifacts/{artifact_id}", response_model=PipelineArtifactDetailV1 | PipelineInputArtifactDetailV1)
+async def get_pipeline_artifact_by_id(
+    request: Request, sc: SessionAndCtx, artifact_id: UUID,
+) -> dict[str, Any]:
+    """Resolve an input lineage link through the existing artifact read policy."""
+    team_id, user_id = _team_and_user(sc, mutation=False)
+    artifact = await sc[0].get(Artifact, artifact_id)
+    if artifact is not None and artifact.producer_kind in {"input_import", "recipe_input_materialization"}:
+        # Input sources have no Run/Stage. Expose registry metadata under the
+        # existing same-team and access-class boundary, never storage locators.
+        if artifact.team_id != team_id:
+            raise HTTPException(status_code=404, detail="Artifact source was not found")
+        imported = artifact.producer_kind == "input_import"
+        source: PipelineInputImport | PipelineInputMaterialization | None
+        if imported:
+            source = (
+                await sc[0].get(PipelineInputImport, artifact.pipeline_input_import_id)
+                if artifact.pipeline_input_import_id else None
+            )
+        else:
+            source = (
+                await sc[0].get(PipelineInputMaterialization, artifact.pipeline_input_materialization_id)
+                if artifact.pipeline_input_materialization_id else None
+            )
+        if (
+            source is None or source.team_id != team_id or source.state != "committed"
+            or (isinstance(source, PipelineInputImport) and source.committed_artifact_id != artifact.id)
+            or source.artifact_upload_session_id != artifact.artifact_upload_session_id
+            or not artifact_read_allowed(
+                getattr(artifact, "access_class", None),
+                run_created_by_user_id=source.created_by_user_id,
+                requesting_user_id=user_id, requesting_role=sc[1].role,
+                platform_admin=is_admin(sc[1]),
+            )
+        ):
+            raise HTTPException(status_code=404, detail="Artifact source was not found")
+        return {
+            "id": str(artifact.id), "name": artifact.name,
+            "artifact_type": artifact.artifact_type,
+            "source_kind": artifact.producer_kind, "source_id": str(source.id),
+            "state": source.state, "recipe_name": source.recipe_name,
+            "recipe_version": source.recipe_version, "content_sha256": artifact.content_hash,
+            "manifest_sha256": artifact.manifest_sha256,
+            "stored_size_bytes": artifact.stored_size_bytes, "file_count": artifact.file_count,
+            "safety_state": artifact.safety_state, "created_at": artifact.created_at.isoformat(),
+        }
+    resolved = await resolve_public_artifact(
+        sc[0], team_id=team_id, artifact_id=artifact_id, user_id=user_id,
+        role=sc[1].role, platform_admin=is_admin(sc[1]),
+    )
+    await validate_public_artifact(
+        resolved, client=request.app.state.minio_client,
         bucket=request.app.state.settings.artifacts_bucket,
     )
     return public_artifact_projection(resolved)

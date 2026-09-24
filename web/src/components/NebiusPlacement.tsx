@@ -31,7 +31,7 @@ export function NebiusPlacement({ targetId }: { targetId?: string }): JSX.Elemen
     maxIntervalMs: 60_000, hiddenBehavior: "pause", blurBehavior: "slow" });
   const params = new URLSearchParams(location.search);
   const scope: Record<string, string | undefined> = { target_id: targetId };
-  for (const key of ["team_id", "batch_id", "q", "benchmark_id", "agent_name", "model_provider",
+  for (const key of ["view", "team_id", "batch_id", "q", "benchmark_id", "agent_name", "model_provider",
     "model_name", "provider_connection_id", "provider_model_id"]) scope[key] = params.get(key) ?? undefined;
   const query = useQuery({
     queryKey: queryKeys["monitor-placement"](scope), queryFn: () => api.getMonitorPlacement(scope),

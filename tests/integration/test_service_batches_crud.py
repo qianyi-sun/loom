@@ -412,6 +412,7 @@ async def test_post_batch_materializes_count(
     UUID(body["batch_id"])  # parseable
     assert detail.status_code == 200, detail.text
     detail_body = detail.json()
+    assert detail_body["purpose"] == "evaluation"
     assert detail_body["owner_team"] == {
         "id": str(team_id),
         "name": f"t-{team_id}",

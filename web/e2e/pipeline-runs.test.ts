@@ -165,13 +165,16 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   });
   expect(interactiveMs).toBeLessThan(2_000);
 
-  const stageTable = page.locator("table").nth(1);
+  const stageTable = page.getByRole("table", { name: "Pipeline stages" });
   expect(await stageTable.getByRole("row").count()).toBeLessThanOrEqual(201);
   const next = page.getByRole("button", { name: "Next" }).first();
-  await next.click();
-  await next.click();
-  await next.click();
-  await next.click();
+  for (let pageNumber = 2; pageNumber <= 5; pageNumber += 1) {
+    await next.click();
+    // The stage controls are replaced by a loading state between pages.
+    // Wait for that page before selecting Next again; otherwise the locator
+    // can bind to the independent (disabled) Artifact pager during loading.
+    await expect(page.getByText(`Cursor page ${pageNumber} · 200 StageRuns on this page`)).toBeVisible();
+  }
   await expect(page.getByText("Cursor page 5 · 200 StageRuns on this page")).toBeVisible();
   const openedAt = Date.now();
   const target = stageTable.getByRole("row", {

@@ -14,6 +14,8 @@ import { queryKeys } from "../api/queryKeys";
  */
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { clearCursorParams, useUrlCursorPage } from "../hooks/useUrlCursorPage";
 
 import { api } from "../api";
 import { Button } from "../components/Button";
@@ -23,12 +25,6 @@ import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import Pagination from "../components/Pagination";
-import {
-  initialPage,
-  nextPage,
-  prevPage,
-  type PageState,
-} from "../components/paginationState";
 import { SubmitTrialModal } from "../components/SubmitTrialModal";
 import { cn } from "../lib/cn";
 
@@ -58,9 +54,16 @@ function Badge({
 }
 
 export default function Tasks(): JSX.Element {
-  const [benchmark, setBenchmark] = useState("");
-  const [search, setSearch] = useState("");
-  const [page, setPage] = useState<PageState>(initialPage);
+  const [params, setParams] = useSearchParams();
+  const benchmark = params.get("benchmark") ?? "";
+  const search = params.get("q") ?? "";
+  const page = useUrlCursorPage();
+  const filter = (key: string, value: string): void => {
+    const next = new URLSearchParams(params);
+    clearCursorParams(next);
+    if (value) next.set(key, value); else next.delete(key);
+    setParams(next, { replace: true });
+  };
   const [submitTaskId, setSubmitTaskId] = useState<string | null>(null);
 
   const benchmarks = useQuery({
@@ -69,12 +72,12 @@ export default function Tasks(): JSX.Element {
   });
 
   const query = useQuery({
-    queryKey: queryKeys["tasks"](benchmark, search, page.current),
+    queryKey: queryKeys["tasks"](benchmark, search, page.cursor),
     queryFn: () =>
       api.listTasks({
         benchmark_id: benchmark || undefined,
         q: search.trim() || undefined,
-        cursor: page.current ?? undefined,
+        cursor: page.cursor ?? undefined,
         limit: "50",
       }),
   });
@@ -167,6 +170,7 @@ export default function Tasks(): JSX.Element {
         </p>
       </header>
 
+      <nav aria-label="Task sources" className="flex flex-wrap gap-4 text-sm text-accent"><Link to="/task-sets">Task sets</Link><Link to="/benchmarks">Benchmarks</Link></nav>
       <HelpButton topic="tasks">Task selection guide</HelpButton>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -178,8 +182,7 @@ export default function Tasks(): JSX.Element {
             className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
             value={benchmark}
             onChange={(e) => {
-              setBenchmark(e.target.value);
-              setPage(initialPage);
+              filter("benchmark", e.target.value);
             }}
           >
             <option value="">All benchmarks</option>
@@ -198,8 +201,7 @@ export default function Tasks(): JSX.Element {
             placeholder="e.g. humaneval/0"
             value={search}
             onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(initialPage);
+              filter("q", e.target.value);
             }}
             className="min-w-[14rem]"
           />
@@ -208,20 +210,23 @@ export default function Tasks(): JSX.Element {
 
       <Card>
         <Card.Body className="p-0">{body}</Card.Body>
-        {query.data && query.data.items.length > 0 ? (
+        {(
           <Card.Footer>
             <Pagination
-              state={page}
-              hasNext={query.data.next_cursor !== null}
+              state={page.state}
+              hasNext={query.data?.next_cursor != null}
+              isLoading={query.isPending || query.isFetching}
+              isError={query.isError}
+              onRetry={() => void query.refetch()}
               onNext={() => {
                 if (query.data?.next_cursor) {
-                  setPage((p) => nextPage(p, query.data!.next_cursor!));
+                  page.next(query.data.next_cursor);
                 }
               }}
-              onPrev={() => setPage((p) => prevPage(p))}
+              onPrev={page.prev}
             />
           </Card.Footer>
-        ) : null}
+        )}
       </Card>
 
       {submitTaskId ? (

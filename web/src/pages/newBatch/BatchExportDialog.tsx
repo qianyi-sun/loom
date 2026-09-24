@@ -46,13 +46,14 @@ export function BatchExportDialog({ result, onClose }: {
             {" "}Your browser credentials are never included. Running this command creates a batch in the environment you are viewing.
           </p>
           {format === "cli" ? <p className="text-xs text-slate-500">
-            Download batch.json and run the command from that folder. Requires a Loom CLI version supporting --request-json. The login command selects this deployment.
+            Download batch.json and run the command from that folder. Requires a Loom CLI version supporting both --request-json and loom auth login --team-id. The login command selects this deployment.
           </p> : null}
-          {format === "cli" ? <>
-            <Button variant="secondary" size="sm" onClick={downloadRequest}>Download batch.json</Button>
-            <CommandSnippet label="batch.json" command={commands.json} />
-          </> : null}
+          {"payload" in result ? <p className="text-sm text-slate-700">Purpose: {result.payload.purpose ?? "evaluation"} · {result.payload.combinations?.length ?? 1} agent/model combination(s). The exported request retains all selected task sources and settings.</p> : null}
           <CommandSnippet label={format === "cli" ? "CLI command" : "API request"} command={commands[format]} />
+          <Button variant="secondary" size="sm" onClick={downloadRequest}>Download batch.json</Button>
+          <details><summary className="cursor-pointer text-sm font-medium text-slate-700">Request JSON</summary>
+            <CommandSnippet label="batch.json" command={commands.json} />
+          </details>
         </> : null}
       </div>
     </Modal>

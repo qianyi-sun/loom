@@ -429,7 +429,7 @@ async def get_monitor_summary(
     batch_counts_stmt = apply_batch_monitor_filters(
         batch_counts_stmt,
         target_team=target_team,
-        q=q_value,
+        q=q_value if view == "batches" else None,
         benchmark_id=benchmark_id,
         agent_name=agent_value,
         model_provider=model_provider,
@@ -442,7 +442,8 @@ async def get_monitor_summary(
     trial_counts_stmt = apply_trial_monitor_filters(
         trial_counts_stmt,
         target_team=target_team,
-        q=q_value,
+        q=q_value if view == "batches" else None,
+        trial_q=q_value if view == "trials" else None,
         batch_id=batch_id,
         benchmark_id=benchmark_id,
         agent_name=agent_value,
@@ -456,7 +457,8 @@ async def get_monitor_summary(
     resource_trials_stmt = apply_trial_monitor_filters(
         resource_trials_stmt,
         target_team=target_team,
-        q=q_value,
+        q=q_value if view == "batches" else None,
+        trial_q=q_value if view == "trials" else None,
         batch_id=batch_id,
         benchmark_id=benchmark_id,
         agent_name=agent_value,
@@ -467,7 +469,8 @@ async def get_monitor_summary(
         state=None,
     )
     service_filters: dict[str, Any] = {
-        "q": q_value,
+        "q": q_value if view == "batches" else None,
+        "trial_q": q_value if view == "trials" else None,
         "batch_id": batch_id,
         "benchmark_id": benchmark_id,
         "agent_name": agent_value,
@@ -566,6 +569,7 @@ async def get_monitor_placement(
     response: Response, sc: SessionAndCtx, target_id: str,
     team_id: UUID | None = None, batch_id: UUID | None = None,
     q: str | None = None, benchmark_id: str | None = None,
+    view: str = "batches",
     agent_name: str | None = None, model_provider: str | None = None,
     model_name: str | None = None, provider_connection_id: UUID | None = None,
     provider_model_id: str | None = None,
@@ -575,7 +579,9 @@ async def get_monitor_placement(
     response.headers["Cache-Control"] = "no-store"
     ids = apply_trial_monitor_filters(
         select(Trial.id), target_team=resolve_monitor_team_filter(ctx, team_id),
-        batch_id=batch_id, q=q, benchmark_id=benchmark_id, agent_name=agent_name,
+        batch_id=batch_id, q=q if view != "trials" else None,
+        trial_q=q if view == "trials" else None,
+        benchmark_id=benchmark_id, agent_name=agent_name,
         model_provider=model_provider, model_name=model_name,
         provider_connection_id=provider_connection_id, provider_model_id=provider_model_id,
     )

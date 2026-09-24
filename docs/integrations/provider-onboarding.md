@@ -187,3 +187,13 @@ A user-operated model server can be registered as an OpenAI-compatible provider
 using the same provider connection flow above. Supply a reachable HTTPS base URL,
 model identifier and provider credential. Loom does not schedule or operate the
 external model server. The former Slurm/vLLM bundle generator is retired.
+
+## Reading readiness in the Web app
+
+Ready describes the last successful connection test, with its age shown alongside
+it. It is not a continuous availability probe. The Models tab distinguishes
+cached discovery/manual registration, models that have not been preflight-tested,
+and the last successful or failed generation preflight. Refreshing discovery does
+not verify generation access. Model help and CLI opens the supported
+`loom providers models NAME --refresh` command on demand; connection names are
+shell-quoted so names containing spaces or apostrophes remain a single argument.

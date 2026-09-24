@@ -134,6 +134,11 @@ export function getPipelineArtifact(
   );
 }
 
+export type PipelineInputArtifactDetail = import("./schema").components["schemas"]["PipelineInputArtifactDetailV1"];
+export function getPipelineArtifactById(artifactId: string, signal?: AbortSignal): Promise<PipelineArtifactDetail | PipelineInputArtifactDetail> {
+  return apiFetch<PipelineArtifactDetail | PipelineInputArtifactDetail>(`/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}`, { signal });
+}
+
 export function pipelineArtifactFileUrl(artifactId: string, fileIndex: number): string {
   return `${getApiBase()}/api/v1/pipeline-artifacts/${encodeURIComponent(artifactId)}/files/${fileIndex}`;
 }

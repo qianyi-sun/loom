@@ -12,6 +12,7 @@ import { CountBox, NebiusExecutionBreakdown, ResourcePoolBreakdown } from "./Mon
 
 export function MonitorHealthSummary({
   view,
+  compact = false,
   search,
   stateFilter,
   teamFilter,
@@ -24,6 +25,7 @@ export function MonitorHealthSummary({
   batchId,
 }: {
   view: View;
+  compact?: boolean;
   search: string;
   stateFilter: string;
   teamFilter: string;
@@ -60,7 +62,7 @@ export function MonitorHealthSummary({
     queryFn: () =>
       api.getMonitorSummary({
         view,
-        q: view === "batches" ? debouncedSearch || undefined : undefined,
+        q: debouncedSearch || undefined,
         state: stateFilter || undefined,
         team_id: teamFilter || undefined,
         benchmark_id: benchmarkFilter || undefined,
@@ -118,6 +120,10 @@ export function MonitorHealthSummary({
       />
       <Card.Body className="space-y-4">
         <ProgressSummary progress={data.progress} batchId={batchId} />
+        <p className="text-sm text-slate-600">{queueStatusText(data)}</p>
+        <details open={!compact}>
+          <summary className="cursor-pointer text-sm font-medium">Nodes, scheduling and capacity diagnostics</summary>
+          <div className="mt-4 space-y-4">
         {!(data.progress && data.service_execution?.targets.length) ? (
           <>
             <div className="grid gap-3 md:grid-cols-4">
@@ -150,7 +156,7 @@ export function MonitorHealthSummary({
             <div className="grid gap-3 text-sm md:grid-cols-2">
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                 <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Queue health</p>
-                <p className="mt-1 text-slate-700">{queueStatusText(data)}</p>
+
                 <p className="mt-1 text-xs text-slate-500">
                   <span>{plural(data.queue.active_workers, "active worker")}</span>
                   <span className="px-1">·</span>
@@ -175,6 +181,8 @@ export function MonitorHealthSummary({
           </>
         ) : null}
         <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
+          </div>
+        </details>
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>{stateCount(data.state_counts.trials["protected-pending"], "protected pending")}</span>
           <span>

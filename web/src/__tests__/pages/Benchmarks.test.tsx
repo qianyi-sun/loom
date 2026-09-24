@@ -101,6 +101,14 @@ describe("Benchmarks page", () => {
     expect(pageText).not.toMatch(/X-Amz-Signature=/i);
   });
 
+  it("restores a shared catalog page URL", async () => {
+    const spy = setupFetch();
+    renderWithProviders(<Benchmarks />, { route: "/benchmarks?cursor=second-page&cursor_history=%5Bnull%5D" });
+    await screen.findByText("AIME 2025");
+    expect(spy.mock.calls.some(([url]) => String(url).includes("cursor=second-page"))).toBe(true);
+    expect(screen.getByRole("status")).toHaveTextContent("Page 2");
+  });
+
   it("requests hidden-route data with empty catalog rows included", async () => {
     const spy = setupFetch();
     renderWithProviders(<Benchmarks />, { route: "/benchmarks" });

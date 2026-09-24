@@ -52,7 +52,7 @@ export class BrowserErrorBoundary extends React.Component<
     if (props.resetKey === state.resetKey) return null;
     return {
       referenceId: null,
-      renderAttempt: state.renderAttempt + 1,
+      renderAttempt: state.renderAttempt + (state.referenceId ? 1 : 0),
       resetKey: props.resetKey,
     };
   }
@@ -103,7 +103,7 @@ export class BrowserErrorBoundary extends React.Component<
 
     return (
       <React.Fragment
-        key={`${this.state.resetKey}:${this.state.renderAttempt}`}
+        key={this.state.renderAttempt}
       >
         {this.props.children}
       </React.Fragment>

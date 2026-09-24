@@ -222,3 +222,17 @@ and compatibility invites in
 
 For attack assumptions and security invariants, see the
 [authentication threat model](auth-threat-model.md).
+
+## Access navigation and audit filters
+
+Team access tabs use `/admin/access?tab=requests|accounts|teams|invites|tokens|audit`,
+with role-specific visibility unchanged. Requests reviews new account/team
+applications; Accounts handles existing-account password recovery. Settings links
+Create CLI token directly to `?tab=tokens`.
+
+The Audit tab defaults to access/account/team/token events. Full system audit
+remains available. Scope, actor/action substrings, UTC date bounds, and cursor
+pagination are applied server-side before the page limit. Date-time API inputs
+without an offset are interpreted as UTC. Filters and page history are retained
+in the URL; changing a filter clears the old cursor. Ordinary users and team
+owners gain no platform-audit permission from these controls.

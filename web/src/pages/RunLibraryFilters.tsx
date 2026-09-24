@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ARTIFACT_LABELS } from "../lib/artifactLabels";
 import { Card } from "../components/Card";
+import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { Input } from "../components/Input";
 
 const TYPED_ARTIFACT_LABELS: Array<[string, string]> = [
@@ -39,7 +40,6 @@ const filterFields = [
   ["provider_model_id", "Provider model"],
   ["state", "State"],
   ["artifact_type", "Artifact type"],
-  ["producer_kind", "Producer"],
   ["pipeline_recipe", "Pipeline recipe"],
   ["pipeline_result", "Pipeline result"],
 ] as const;
@@ -74,6 +74,7 @@ export function RunLibraryFilters({
     if (searchDraft === search) return;
     const timer = window.setTimeout(() => {
       const next = new URLSearchParams(serialized);
+      clearCursorParams(next);
       if (searchDraft) next.set("q", searchDraft);
       else next.delete("q");
       setSearchParams(next);
@@ -81,7 +82,7 @@ export function RunLibraryFilters({
     return () => window.clearTimeout(timer);
   }, [searchDraft, search, serialized, setSearchParams]);
   const activeFilters = filterFields.flatMap(([key, label]) => {
-    const shared = key === "producer_kind" || key === "artifact_type";
+    const shared = key === "artifact_type";
     const pipelineField = key === "pipeline_recipe" || key === "pipeline_result";
     if (!shared && pipelineOnly !== pipelineField) return [];
     const value =
@@ -90,6 +91,7 @@ export function RunLibraryFilters({
   });
   function updateParam(key: string, value: string): void {
     const next = new URLSearchParams(searchParams);
+    clearCursorParams(next);
     if (value) next.set(key, value);
     else next.delete(key);
     setSearchParams(next);
@@ -97,6 +99,7 @@ export function RunLibraryFilters({
 
   function updateParamWithAliases(key: string, value: string, aliases: string[] = []): void {
     const next = new URLSearchParams(searchParams);
+    clearCursorParams(next);
     for (const alias of aliases) next.delete(alias);
     if (value) next.set(key, value);
     else next.delete(key);
@@ -121,19 +124,44 @@ export function RunLibraryFilters({
             Use recipe, result, team and artifact filters for pipeline artifacts. Text search applies to runs.
           </p>
         )}
+        <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+              Team
+              <select
+                value={teamId}
+                onChange={(event) => updateParam("team_id", event.target.value)}
+                className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
+              >
+                <option value="">Current scope</option>
+                {teamId && !selectedTeamKnown ? <option value={teamId}>{teamId}</option> : null}
+                {teamOptions.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
+              State
+              <select
+                disabled={pipelineOnly}
+                value={state}
+                onChange={(event) => updateParam("state", event.target.value)}
+                className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
+              >
+                {STATE_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+        </div>
         <details>
           <summary className="cursor-pointer rounded text-sm font-medium text-slate-700">
             Advanced filters
           </summary>
           <div className="mt-3 grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="flex items-center gap-2 text-sm font-medium text-slate-700">
-              <input
-                type="checkbox"
-                checked={pipelineOnly}
-                onChange={(event) => updateParam("producer_kind", event.target.checked ? "pipeline" : "")}
-              />
-              Pipeline artifacts only
-            </label>
             <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Pipeline Recipe
               <Input
@@ -220,37 +248,6 @@ export function RunLibraryFilters({
               />
             </label>
             <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-              Team
-              <select
-                value={teamId}
-                onChange={(event) => updateParam("team_id", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
-              >
-                <option value="">Current scope</option>
-                {teamId && !selectedTeamKnown ? <option value={teamId}>{teamId}</option> : null}
-                {teamOptions.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
-              State
-              <select
-                disabled={pipelineOnly}
-                value={state}
-                onChange={(event) => updateParam("state", event.target.value)}
-                className="mt-1 block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm normal-case tracking-normal text-slate-800"
-              >
-                {STATE_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1 text-xs font-medium uppercase tracking-wider text-slate-500">
               Artifact type
               <select
                 value={artifactType}
@@ -290,6 +287,7 @@ export function RunLibraryFilters({
               className="rounded px-3 py-1 text-sm text-accent underline"
               onClick={() => {
                 const next = new URLSearchParams(searchParams);
+    clearCursorParams(next);
                 for (const [key] of filterFields) {
                   next.delete(key);
                   for (const alias of aliases[key] ?? []) next.delete(alias);

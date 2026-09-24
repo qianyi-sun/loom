@@ -311,7 +311,7 @@ export default function Settings(): JSX.Element {
             description="Prefixes identify credentials without exposing secrets. Create new CLI tokens from Team access."
             actions={
               <Link
-                to="/admin/access"
+                to="/admin/access?tab=tokens"
                 className={cn(
                   LINK_BUTTON,
                   "border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
