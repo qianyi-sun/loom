@@ -26,7 +26,6 @@ def main(config_path: str, action: str) -> int:
         endpoint = urlsplit(config["api_server"])
         if (endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password
                 or endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment
-                or not re.fullmatch(r"mk8s-[a-z0-9]+", config["cluster_id"])
                 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", config["ingress_class"])
                 or not re.fullmatch(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+/loom-shared-ingress@" + re.escape(DIGEST), config["image"])):
             raise ValueError()
