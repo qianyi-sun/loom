@@ -27,9 +27,14 @@ export const PURPOSE_OPTIONS: Array<{
 
 export type ProviderSelectionResult = { ok: true; value: ProviderOverride[] } | { ok: false; error: string };
 
-export function preflightLabel(status?: string | null): string {
+export function preflightLabel(
+  status?: string | null,
+  failureKind?: string | null,
+): string {
   if (status === "valid") return "preflight valid";
-  if (status === "failed") return "preflight failed";
+  if (status === "failed") {
+    return failureKind === "inconclusive" ? "preflight inconclusive" : "preflight failed";
+  }
   return "not preflighted";
 }
 

@@ -16,6 +16,7 @@ from sqlalchemy import select
 from loom.db.schema import ProviderConnection, ProviderModelCache, RateCard
 from loom_service.auth_guards import is_admin
 from loom_service.dependencies import SessionAndCtx
+from loom_service.provider_connections_service import preflight_failure_kind
 from loom_service.provider_model_classifier import classify_model_id
 
 router = APIRouter()
@@ -72,6 +73,11 @@ def _byo_model_item(
         "last_preflight_http_status": cache.last_preflight_http_status,
         "last_preflight_error_code": cache.last_preflight_error_code,
         "last_preflight_error_message": cache.last_preflight_error_message,
+        "last_preflight_failure_kind": preflight_failure_kind(
+            cache.last_preflight_status,
+            cache.last_preflight_error_code,
+            cache.last_preflight_http_status,
+        ),
     }
 
 
@@ -108,6 +114,7 @@ async def list_models(
                 "last_preflight_http_status": None,
                 "last_preflight_error_code": None,
                 "last_preflight_error_message": None,
+                "last_preflight_failure_kind": None,
             })
 
     stmt = (

@@ -101,6 +101,25 @@ function mockPickerEndpoints(
               last_preflight_http_status: 403,
               last_preflight_error_code: "access-denied",
               last_preflight_error_message: "HTTP 403 from upstream: [REDACTED]",
+              last_preflight_failure_kind: "rejected",
+            },
+            {
+              provider: "openai",
+              name: "slow-reasoner",
+              provider_connection_id: "conn-1",
+              provider_connection_name: "Lab vLLM",
+              provider_connection_type: "openai-compatible",
+              source: "discovered",
+              agent_capable: true,
+              recommended: true,
+              visibility: "default",
+              hidden_reason: null,
+              last_preflight_status: "failed",
+              last_preflight_at: "2026-09-20T12:00:00Z",
+              last_preflight_http_status: null,
+              last_preflight_error_code: "timeout",
+              last_preflight_error_message: "timeout after 20.0s: read timeout",
+              last_preflight_failure_kind: "inconclusive",
             },
             {
               provider: "openai",
@@ -230,6 +249,27 @@ describe("AgentModelPicker copy", () => {
       screen.getByText(/This model failed its last preflight/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/access-denied/i)).toBeInTheDocument();
+  });
+
+  it("shows a non-blocking notice when the last preflight was only inconclusive", async () => {
+    // #948: a timed-out probe is not a rejection and must not read as one.
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      await screen.findByRole("option", { name: /Lab vLLM/i }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      await screen.findByRole("option", { name: /slow-reasoner \(preflight inconclusive\)/i }),
+    );
+
+    expect(
+      screen.getByText(/last preflight for this model was inconclusive/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/You can still submit/i)).toBeInTheDocument();
+    expect(screen.queryByText(/This model failed its last preflight/i)).toBeNull();
   });
 
   it("keeps mz_tn_canada_qianyi models visible for terminus-2", async () => {

@@ -114,6 +114,7 @@ from loom_service.multi_model import (
 )
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
+from loom_service.provider_connections_service import preflight_failure_kind
 from loom_service.service_execution_status import (
     SERVICE_EXECUTION_LIFECYCLE_STAGES,
     service_execution_lifecycle_case,
@@ -582,12 +583,21 @@ async def _reject_if_known_failed_provider_model(
                 "NAME --refresh` or choose a cached model"
             ),
         )
-    if row.last_preflight_status != "failed":
+    # Only a definitive rejection blocks (#948). A timed-out or otherwise
+    # inconclusive probe is not evidence the model is unusable; the run
+    # itself surfaces a real failure if there is one.
+    if preflight_failure_kind(
+        row.last_preflight_status,
+        row.last_preflight_error_code,
+        row.last_preflight_http_status,
+    ) != "rejected":
         return
     prefix = f"{context}: " if context else ""
     detail = f"{prefix}provider model {provider_model_id!r} last preflight failed for this provider connection"
     if row.last_preflight_error_code:
         detail += f" ({row.last_preflight_error_code})"
+    if row.last_preflight_at is not None:
+        detail += f" at {row.last_preflight_at.isoformat()}"
     detail += "; run provider model preflight again or choose another model"
     reject_submission(
         reason="provider_model_preflight",

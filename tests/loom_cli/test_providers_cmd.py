@@ -689,6 +689,7 @@ def _make_model(
     last_preflight_http_status: int | None = None,
     last_preflight_error_code: str | None = None,
     last_preflight_error_message: str | None = None,
+    last_preflight_failure_kind: str | None = None,
 ) -> dict[str, Any]:
     return {
         "model_id": model_id,
@@ -706,6 +707,7 @@ def _make_model(
         "last_preflight_http_status": last_preflight_http_status,
         "last_preflight_error_code": last_preflight_error_code,
         "last_preflight_error_message": last_preflight_error_message,
+        "last_preflight_failure_kind": last_preflight_failure_kind,
     }
 
 
@@ -837,6 +839,40 @@ def test_models_refresh_with_admin_actor_sends_audit_header(
         if request.method == "POST" and request.url.path == refresh_path
     )
     assert refresh_request.headers["X-Loom-Admin-Actor"] == "release-operator"
+
+
+def test_models_preflight_timeout_reports_inconclusive_non_blocking(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#948: a timed-out probe is labelled inconclusive, not a rejection."""
+    conn = _make_connection(name="openai-prod")
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    timed_out = _make_model(
+        model_id="slow-reasoner",
+        last_preflight_status="failed",
+        last_preflight_http_status=None,
+        last_preflight_error_code="timeout",
+        last_preflight_error_message="timeout after 20.0s: read timeout",
+        last_preflight_failure_kind="inconclusive",
+    )
+    mock_server.canned[(
+        "POST",
+        f"/api/v1/provider-connections/{conn['id']}/models/slow-reasoner/preflight",
+    )] = httpx.Response(200, json=timed_out)
+    mock_server.canned[
+        ("GET", f"/api/v1/provider-connections/{conn['id']}/models")
+    ] = httpx.Response(200, json={"items": [timed_out]})
+
+    rc = main([
+        "providers", "models", "openai-prod", "--preflight", "slow-reasoner",
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "does not block batch submission" in out
+    assert "preflight=failed,timeout,inconclusive" in out
 
 
 def test_models_preflight_posts_then_lists(

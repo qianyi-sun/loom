@@ -24,7 +24,7 @@ Trust boundary:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -61,6 +61,7 @@ from loom_service.provider_connections_service import (
     default_pricing_source_for,
     default_rate_card_provider_for,
     fetch_upstream_models,
+    preflight_failure_kind,
     preflight_model,
     probe_connection,
     resolve_and_validate,
@@ -207,6 +208,9 @@ class ProviderModelCacheEntry(BaseModel):
     last_preflight_http_status: int | None
     last_preflight_error_code: str | None
     last_preflight_error_message: str | None
+    # 'rejected' blocks batch submission; 'inconclusive' (timeout, network
+    # error, 408/429/5xx) does not (#948). None unless the preflight failed.
+    last_preflight_failure_kind: Literal["rejected", "inconclusive"] | None = None
 
 
 class ProviderModelCacheListResponse(BaseModel):
@@ -274,6 +278,11 @@ def _cache_row_to_entry(row: ProviderModelCache) -> ProviderModelCacheEntry:
         last_preflight_http_status=row.last_preflight_http_status,
         last_preflight_error_code=row.last_preflight_error_code,
         last_preflight_error_message=row.last_preflight_error_message,
+        last_preflight_failure_kind=preflight_failure_kind(
+            row.last_preflight_status,
+            row.last_preflight_error_code,
+            row.last_preflight_http_status,
+        ),
     )
 
 

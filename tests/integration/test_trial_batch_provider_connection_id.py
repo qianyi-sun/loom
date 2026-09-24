@@ -535,6 +535,56 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
     assert "sk-" not in detail
 
 
+@pytest.mark.parametrize(
+    ("error_code", "http_status"),
+    [("timeout", None), ("request-error", None), ("upstream-http-error", 503)],
+)
+def test_batch_create_is_not_blocked_by_inconclusive_preflight(
+    app_setup, error_code: str, http_status: int | None,
+) -> None:
+    """#948: a timed-out / transient preflight is not a rejection."""
+    app, tokens, ids = app_setup
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(ProviderModelCache).values(
+                provider_connection_id=ids["conn_a"],
+                model_id="gpt-slow",
+                last_preflight_status="failed",
+                last_preflight_http_status=http_status,
+                last_preflight_error_code=error_code,
+                last_preflight_error_message="timeout after 20.0s: read timeout",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    c = _client(app)
+    r = c.post(
+        "/api/v1/batches",
+        headers=_auth(tokens["a"]),
+        json={
+            "name": f"inconclusive-preflight-{error_code}",
+            "purpose": "evaluation",
+            "task_filter": {"task_ids": [ids["task_id"]]},
+            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-slow",
+        },
+    )
+
+    assert r.status_code == 201, r.text
+
+    models = c.get(
+        f"/api/v1/provider-connections/{ids['conn_a']}/models",
+        headers=_auth(tokens["a"]),
+    )
+    assert models.status_code == 200, models.text
+    entry = next(m for m in models.json()["items"] if m["model_id"] == "gpt-slow")
+    assert entry["last_preflight_failure_kind"] == "inconclusive"
+
+
 def test_batch_create_with_uncached_provider_model_returns_400(
     app_setup,
 ) -> None:
