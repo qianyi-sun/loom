@@ -67,6 +67,52 @@ def test_retains_setup_and_reward_semantics_and_extracts_pins() -> None:
     assert "uvx" not in result.script
 
 
+def test_canonical_uv_installer_preserves_pins_test_arguments_and_reward() -> None:
+    source = SCRIPT.replace("uv/0.9.5/install.sh", "uv/install.sh")
+    expected = adapt_harbor_test_script(SCRIPT)
+
+    actual = adapt_harbor_test_script(source)
+
+    assert actual == expected
+    assert actual.python_version == "3.13"
+    assert actual.requirements == ("pytest==8.4.1", "pandas==2.3.3", "pytest-json-ctrf==0.3.5")
+    assert actual.script.endswith(source[source.index("if [ $? -eq 0 ]") :])
+    result = subprocess.run(["bash", "-n"], input=actual.script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_canonical_uv_installer_in_complete_missing_uv_guard() -> None:
+    source = SCRIPT.replace("uv/0.9.5/install.sh", "uv/install.sh").replace(
+        "curl -LsSf", "if ! command -v uv >/dev/null 2>&1; then\n  curl -LsSf",
+    ).replace('source "$HOME/.local/bin/env"', '  source "$HOME/.local/bin/env"\nfi')
+
+    actual = adapt_harbor_test_script(source)
+
+    assert "command -v" not in actual.script
+    assert "install.sh" not in actual.script
+    assert actual.requirements == adapt_harbor_test_script(SCRIPT).requirements
+    assert actual.script.endswith(source[source.index("if [ $? -eq 0 ]") :])
+    result = subprocess.run(["bash", "-n"], input=actual.script, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("installer", [
+    "https://astral.sh/uv/install.sh?version=latest", "https://astral.sh/uv/install.sh#fragment",
+    "https://astral.sh/uv//install.sh", "http://astral.sh/uv/install.sh",
+    "https://astral.sh.example.org/uv/install.sh", "https://astral.sh/uv/latest/install.sh",
+])
+def test_canonical_uv_installer_does_not_accept_other_endpoints(installer: str) -> None:
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(SCRIPT.replace("https://astral.sh/uv/0.9.5/install.sh", installer))
+
+
+@pytest.mark.parametrize("suffix", ["; touch /app/ready", " && echo initialized", " --extra"])
+def test_canonical_uv_installer_does_not_drop_appended_commands(suffix: str) -> None:
+    source = SCRIPT.replace("uv/0.9.5/install.sh | sh", "uv/install.sh | sh" + suffix)
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(source)
+
+
 def test_preserves_other_shell_continuations() -> None:
     statement = 'printf "%s" \\\n  "hello"\n'
     result = adapt_harbor_test_script(SCRIPT.replace("rm *.csv\n", statement))
