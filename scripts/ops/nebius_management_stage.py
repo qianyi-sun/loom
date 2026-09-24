@@ -83,7 +83,7 @@ def _documents(rendered: RenderedManagement, phase: str, binding: ManagementBind
 class HTTPSManagementStageAPI(ManagementKubernetesTransport):
     """Explicit TLS/auth, no retry; only the fixed phase's rendered objects."""
 
-    error_type = ManagementStageError
+    error_type: type[RuntimeError] = ManagementStageError
 
     def __init__(self, *, binding: ManagementBinding, rendered: RenderedManagement, phase: str,
                  api_server: str, ssl_context: ssl.SSLContext, token: str | None = None):

@@ -120,6 +120,12 @@ def test_backup_report_is_from_exact_completed_job_pod_and_uploader(evidence):
     assert all(req.method == "GET" for req in values["calls"])
 
 
+def test_backup_pod_accepts_kubernetes_equivalent_resource_quantities(evidence):
+    api, values, report = evidence
+    values["pod"]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "0.1"
+    assert api.backup_report(job_uid=values["job"]["metadata"]["uid"]) == report
+
+
 @pytest.mark.parametrize("fault", ["owner", "image", "failed", "replaced_pod", "restarted"])
 def test_wrong_or_changed_backup_execution_never_supplies_object_proof(evidence, fault):
     from scripts.ops.nebius_management_install import ManagementInstallError
