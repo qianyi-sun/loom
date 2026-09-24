@@ -1340,7 +1340,9 @@ ID before mutation. Busy or locked platforms are skipped without retirement.
 
 After a successful backup and before applying manifests, the deployer retires
 the old target through the authenticated admin health API inside the existing
-control-plane Pod. Credentials stay in that Pod. Normal configuration bootstrap
+control-plane Pod. Retirement records observed `unhealthy` status with its
+timestamp and `target_replaced` reason; `unknown` is reserved for targets with
+no health observation. Credentials stay in that Pod. Normal configuration bootstrap
 registers and activates the fresh target, and the deployment keeps its guard
 through workload and HTTPS readback. Actuator health reports preserve the old
 target's retired desired state. The evidence records both target IDs and whether
