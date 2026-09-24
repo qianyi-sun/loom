@@ -61,6 +61,48 @@ def _report(root: Path, capsys: pytest.CaptureFixture[str], *, profile: bool = T
     return rc, json.loads(captured.out)
 
 
+@pytest.mark.parametrize("writer", [
+    "echo 'if uvx -p 3.13 -w pytest==8.4.1 pytest /tests/test_outputs.py -rA; then' >> /app/check.sh",
+    "printf '%s\\n' 'python3 -m pytest /tests/test_outputs.py' > /app/check.sh",
+])
+def test_report_blocks_image_authored_public_script_using_private_pytest(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
+) -> None:
+    bundle = _write_bundle(tmp_path, "public-checker")
+    dockerfile = bundle / "environment/Dockerfile"
+    dockerfile.write_text("FROM ubuntu:24.04\nWORKDIR /app\nRUN " + writer + "\n")
+    before = {str(p): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    rc, payload = _report(tmp_path, capsys)
+    report, = payload["compatibility_report"]["tasks"]
+    assert rc == 1 and report["status"] == "blocked"
+    diagnostic, = [d for d in report["diagnostics"] if d["code"] == "agent_private_verifier_dependency"]
+    assert diagnostic["category"] == "package_defect"
+    assert diagnostic["source_location"] == f"{dockerfile}:3"
+    assert "/app/check.sh" in diagnostic["reason"]
+    assert "/tests/test_outputs.py" in diagnostic["reason"]
+    assert "private" in diagnostic["suggested_action"]
+    assert {str(p): p.read_bytes() for p in bundle.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("writer", [
+    "echo '# pytest /tests/test_outputs.py' > /app/check.sh",
+    "echo 'echo pytest /tests/test_outputs.py' > /app/check.sh",
+    "echo 'pytest /tests/not-in-package.py' > /app/check.sh",
+    "echo 'pytest /app/public_tests.py' > /app/check.sh",
+    "echo 'pytest /tests/test_outputs.py' > /opt/verifier/check.sh",
+    "pytest /tests/test_outputs.py",
+])
+def test_report_does_not_infer_private_runtime_dependency_from_unrelated_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
+) -> None:
+    bundle = _write_bundle(tmp_path, "unrelated-checker")
+    (bundle / "environment/Dockerfile").write_text(
+        "FROM ubuntu:24.04\nWORKDIR /app\nRUN " + writer + "\n")
+    _, payload = _report(tmp_path, capsys)
+    report, = payload["compatibility_report"]["tasks"]
+    assert not any(d["code"] == "agent_private_verifier_dependency" for d in report["diagnostics"])
+
+
 @pytest.mark.parametrize(("source", "declared", "blocked", "line"), [
     ("FROM ubuntu:24.04\nWORKDIR /media/project\n", "/app", True, 2),
     ("FROM ubuntu:24.04\nWORKDIR /media/project\n", "/media/project", False, 2),
