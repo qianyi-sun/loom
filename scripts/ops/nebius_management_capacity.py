@@ -75,6 +75,21 @@ def _count(row: dict[str, Any]) -> int:
     count = spec.get("parallelism", 1) if kind in {"Job", "CronJob"} else spec.get("replicas", 1)
     if type(count) is not int or not 0 <= count <= 10000:
         raise ValueError()
+    if kind == "DaemonSet":
+        # Fit is per node: a positive fleet-wide surge can put an old and a
+        # replacement daemon on this node. It does not put the entire fleet's
+        # surge here. Already-observed terminating Pods are charged separately.
+        strategy = spec.get("updateStrategy", {})
+        if strategy.get("type", "RollingUpdate") == "RollingUpdate":
+            surge = strategy.get("rollingUpdate", {}).get("maxSurge", 0)
+            if isinstance(surge, str) and re.fullmatch(r"[0-9]+%", surge):
+                surge = int(surge[:-1])
+            if type(surge) is not int or not 0 <= surge <= 10000:
+                raise ValueError()
+            return 2 if surge else 1
+        if strategy["type"] != "OnDelete":
+            raise ValueError()
+        return 1
     if kind == "Deployment":
         strategy = spec.get("strategy", {})
         if strategy.get("type", "RollingUpdate") == "RollingUpdate":
