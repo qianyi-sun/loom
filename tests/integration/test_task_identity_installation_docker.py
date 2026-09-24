@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -149,3 +150,49 @@ async def test_handoff_preserves_numeric_ownership_when_account_names_differ(san
     result = await verifier.exec("stat -c '%u:%g' /data/marker")
     assert result.return_code == 0, result.stderr
     assert result.stdout.strip() == b"1201:1201"
+
+
+async def test_private_grading_inputs_do_not_change_the_tasks_file_manifest(sandboxes, tmp_path, monkeypatch):
+    from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
+    from loom.service_execution_sandbox_task import run_verifier
+    from loom.trial.workspace_snapshot import _export_workspace_archive
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    agent, verifier, _ = sandboxes
+    task, trial, _ = _inputs()
+    task.verifier.args["script_path"] = "verifier/run.sh"
+    controller = tmp_path / "controller"
+    (controller / ".loom").mkdir(parents=True)
+    (controller / "tests").mkdir()
+    (controller / "tests/private-marker").write_text("private grading input")
+    (controller / "verifier").mkdir()
+    (controller / "verifier/run.sh").write_bytes(offline_verifier_run_sh_bytes())
+    (controller / "verifier/harbor-offline.sh").write_text("""set -eu
+test "$(cat /tests/private-marker)" = 'private grading input'
+test "$PWD" = /app
+python - <<'PY'
+from pathlib import Path
+root = Path('/app')
+expected = set((root / 'manifest').read_text().splitlines())
+actual = {str(p) for p in root.rglob('*') if p.is_file()}
+assert actual == expected, (actual, expected)
+assert (root / 'answer').read_text() == 'answer'
+PY
+echo 1 > /logs/verifier/reward.txt
+echo '{}' > /logs/verifier/ctrf.json
+""")
+    created = await agent.exec(
+        "mkdir /app; printf answer > /app/answer; "
+        "printf '/app/answer\\n/app/manifest\\n' > /app/manifest"
+    )
+    assert created.return_code == 0, created.stderr
+    await agent.stop_processes()
+    await _export_workspace_archive(agent, PurePosixPath("/app"), controller / ".loom/workspace.tar")
+    # The fixture checks readiness; the production entrypoint owns its connection.
+    await verifier.stop()
+    connection = ServiceSandboxDriver(tmp_path / "verifier/sandbox.sock",
+                                      capabilities=verifier.capabilities, network_policy=NoNetwork())
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda *_: connection)
+    await run_verifier(controller, task, trial)
+    result = json.loads((controller / ".loom/verifier/output.json").read_bytes())
+    assert result["rewards"] == {"resolved": 1, "passed": 1}
