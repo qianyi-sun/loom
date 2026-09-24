@@ -1604,6 +1604,57 @@ async def test_trial_detail_carries_ready_flags(
     assert body["trajectory_ready"] is False
 
 
+@pytest.mark.parametrize(
+    ("state", "started", "indexed", "ready"),
+    [
+        ("failed", False, False, False),
+        ("cancelled", False, False, False),
+        ("failed", True, False, True),
+        ("failed", False, True, True),
+    ],
+)
+async def test_terminal_trial_without_execution_does_not_advertise_atif(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+    postgres_url: str,
+    state: str,
+    started: bool,
+    indexed: bool,
+    ready: bool,
+) -> None:
+    app, raw, team_id, trial_ids = trials_setup
+    trial_id = trial_ids[0]
+    now = datetime.now(UTC)
+    sync_engine = create_engine(postgres_url)
+    try:
+        with sessionmaker(sync_engine)() as session:
+            session.execute(update(Trial).where(Trial.id == trial_id).values(
+                state=state,
+                started_at=now - timedelta(seconds=1) if started else None,
+                finished_at=now,
+                attempt_count=int(started),
+                failure_reason="task_image_build_failed" if state == "failed" else None,
+                result=None,
+                trajectory_index={
+                    "atif_uri": f"s3://trajectories/{team_id}/{trial_id}/atif.json",
+                } if indexed else {},
+            ))
+            session.commit()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://svc",
+        ) as client:
+            response = await client.get(
+                f"/api/v1/trials/{trial_id}",
+                headers={"Authorization": f"Bearer {raw}"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["atif_ready"] is ready
+        assert body["debug_evidence"]["evidence_refs"]["atif"]["ready"] is ready
+        assert body["trajectory_ready"] is started
+    finally:
+        sync_engine.dispose()
+
+
 async def test_filter_by_task_id(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:
