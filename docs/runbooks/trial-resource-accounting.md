@@ -80,6 +80,10 @@ These modules are loaded when execution observations are recorded, so importing
 the service entrypoint alone does not verify their availability. The image build
 also imports the diagnosis store and its dependencies without opening a database
 connection. A missing module fails the build before publication.
+The image explicitly installs SQLAlchemy's `asyncio` extra: SQLAlchemy 2.1 no
+longer installs `greenlet` by default, although the actuator's asynchronous
+database access requires it. Keep the clean-image import check when changing
+the image's standalone dependency list.
 
 `GET /api/v1/trials/{id}/debug` includes `execution_failure` with stage, role,
 incarnation, termination/start times, exit code, effective limits and supporting

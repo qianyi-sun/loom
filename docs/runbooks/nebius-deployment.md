@@ -639,6 +639,80 @@ evidence must still detect loss of the entire state tree. Its receipt means only
 runtime authority, database/migration, backup, HTTPS readiness and protected
 workflow integration remain installer responsibilities.
 
+The internal `nebius_management_stage` primitive stages one fixed management render
+phase with create-only, UID-bound recovery. Preserve each phase's private journal;
+do not rerun with an empty state directory to recover a missing or failed workload.
+Its read-only readiness observation checks the database, migration or service
+against the original recorded identity and current controller state. A staged
+CronJob or Ingress is not evidence of an uploaded backup, restore or working public
+management API. This primitive also has no direct shared-cluster CLI; it does not
+add a management-install operation to the protected workflow on its own.
+
+### Protected initial management installation
+
+`nebius-rollout` provides two manual actions, `management-preflight` and
+`management-install`, on `dev` in the protected `nebius-integration` environment.
+They share the existing rollout serialization. Neither accepts shell commands,
+manifests, credential values, a new capacity allocation or arbitrary code.
+
+Prepare the following outside the repository, on the operator-owned gateway:
+
+- A private `inputs.json` under `.loom/nebius-management`, using
+  `loom.nebius-management-private-inputs.v1`. It contains the management
+  `deployment`, exact published `candidate` and `profile`, bootstrap `binding`,
+  typed `prerequisites`, explicit `operator_connection`,
+  `operator_cloud_credentials` path, existing `ingress_config` path, current
+  standalone `foundation_candidate`, and `material_files` paths for the three
+  supplied runtime Secrets. Each supplied field comes from a distinct private
+  regular file, never an alias of an operator credential. Select the current
+  foundation without editing the historical ingress installation or journals.
+- Prerequisites pin the published candidate ID, scoped Nebius project/account/
+  group/key/bucket identities, StorageClass UID and parameters, and the actual
+  regional compute-disk and object-storage quota names/units. Provisioning and
+  backup identities are separate. Qualify the publication reader's read-only
+  authority, expiry and renewal separately: successful artifact retrieval proves
+  approved bytes, not the token's complete permission scope or renewal.
+- Public `loom.nebius-management-operation.v1` metadata with `source_sha`,
+  `candidate`, `installation_id`, `namespace`, `state_dir`, `anchor_dir`,
+  `inputs_path` and `inputs_sha256`. The three paths end in
+  `nebius-management/state`, `nebius-management/anchor` and
+  `nebius-management/inputs.json` respectively. The anchor is independent of
+  replaceable phase state. Pin the SHA256 of the private input file; do not put
+  its contents or the files it references into Actions variables/artifacts.
+
+The exact clean, integrated `source_sha` builds a deterministic tooling bundle
+with hashed dependencies and two first-party wheels. Prepare it with
+`python -m scripts.ops.nebius_management_rollout --operation preflight
+--requirements <locked-export> --evidence-dir <private-evidence>
+--prepare-bundle <new-bundle-path>` and the public metadata in
+`NEBIUS_MANAGEMENT_OPERATION_JSON`. The locked export uses the same `cluster`
+extra and `nebius-certificates` group as the workflow. The bundle contains no
+runtime/installation credentials or private input file.
+
+Using the existing approved operator route, preview
+`scripts/ops/install_nebius_management_entrypoint.py --bundle <bundle>
+--bundle-sha256 <exact-digest> --public-key <dedicated-key.pub>`; `--apply` installs
+the reviewed grant. It preserves other SSH grants and authorizes only the exact
+bundle with `loom-nebius-management-preflight-v1` or
+`loom-nebius-management-install-v1`. A different source, input digest or key
+authority requires a separately reviewed grant, not an unrestricted gateway key.
+Configure the public metadata as protected `NEBIUS_MANAGEMENT_OPERATION_JSON` and
+the dedicated transport key as `NEBIUS_MANAGEMENT_SSH_KEY`.
+
+Run preflight before install. `preflight_qualified` is a read-only observation,
+not a reservation or installed result. `pending` records a database, migration,
+backup or service readiness barrier; a later invocation with identical inputs
+reconciles existing identities before advancing. A failed/unknown outcome is not
+permission to delete state or blindly repeat a write. Preserve the entire state,
+anchor and generated recovery material. No automatic rollback crosses migration.
+
+`management_installed` requires runtime-authority probes, retained storage
+identity, a completed backup with off-node object readback, healthy management
+and authenticated public HTTPS. It does **not** prove restoring that backup,
+credential renewal, two-owner lifecycle, or shared task/build execution. Those
+remain separate installed acceptance steps; a green workflow alone does not
+establish the fully operational multi-person environment.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

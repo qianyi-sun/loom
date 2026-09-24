@@ -313,6 +313,44 @@ The receipt contains namespace/Secret UIDs, not credential material. This stage
 does not install runtime authority, supplied cloud/publication/backup credentials,
 database workloads or public routes, and does not establish management readiness.
 
+The installer's fixed manifest staging primitive consumes only named management
+renderer phases. It records server-defaulted intent before a single create per
+resource, freezes returned UIDs and Service allocations, and rejects ambiguous
+absence, replacement or configuration drift. Resource quantities are compared
+exactly across equivalent Kubernetes spellings; generated Job labels must bind to
+that Job's own UID. Namespace and policy checks continue at write boundaries.
+Read-only workload readiness additionally requires the recorded workload identity,
+current controller generation and complete rollout or migration status. It never
+recreates a missing workload or retries a failed migration. Backup schedule and
+Ingress creation are not backup/restore or public authentication proof. Independent
+installer-start evidence, authority qualification, prerequisite delivery and phase
+ordering remain responsibilities of the protected installer, not this primitive.
+
+The connected installer composes these phases with independent start evidence,
+actual service-account authority probes, retained PVC/PV/CSI identity, completed
+backup Job/object verification and authenticated public management readiness.
+Its read-only prerequisite adapter resolves exact candidate/profile bytes through
+the protected publication catalog, verifies the dedicated provisioning key and
+project-only grants, and checks a separate object-only backup identity. It rejects
+inherited or broader IAM permissions and backup-group grants on another bucket.
+Live platform sizing counts controller rollout/HPA maxima (including per-node
+DaemonSet surge), scheduled maintenance,
+pending/terminating Pods and the child allowance; UID-linked controller Pods are
+not counted twice. Storage-class identity, pending/expanding PVC demand, missing
+StatefulSet claims (including HPA maxima), and remaining provider disk quota are
+separate checks. The backup bucket and regional object-storage quota must have
+headroom for one full database-sized dump, including current objects, noncurrent
+versions and inflight multipart parts. Zero bucket maximum retains the provider's
+unlimited meaning, not a bypass of provider quota. Initial recovery evidence uses
+a versioned bucket without enabled lifecycle deletion/transition rules; retention
+automation is not established by the installer. Neither these observations nor an object
+readback prove restoration or authorize infrastructure expansion. The protected
+workflow exposes fixed preflight/install operations bound to exact integrated
+tooling and a separately stored, digest-pinned private input file. It transfers no
+operator or runtime credentials through Actions. Installed restoration, credential
+renewal and multi-owner acceptance must still be completed before this source-level
+installer can be described as an operational environment.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

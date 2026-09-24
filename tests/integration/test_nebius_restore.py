@@ -32,6 +32,7 @@ from loom.nebius_restore import (
 )
 from tests.support.minio import MINIO_TEST_IMAGE
 from tests.support.minio_images import prepare_test_image
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.docker
 
@@ -50,7 +51,7 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
     root = Path(__file__).resolve().parents[2]
     with (
         PostgresContainer("postgres:16") as source,
-        MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).waiting_for(
+        MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).with_kwargs(tmpfs={"/data": "rw,size=536870912"}).waiting_for(
             HttpWaitStrategy(9000, "/minio/health/cluster")
         ) as storage,
     ):
@@ -258,3 +259,85 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
         finally:
             restored.remove(force=True)
             client.close()
+
+
+def test_management_backup_restores_two_owner_identities_and_environment_registry(tmp_path, monkeypatch, platform_inputs):
+    from scripts.ops.nebius_management_proofs import verify_backup_object
+
+    from loom import nebius_platform_bootstrap as bootstrap
+    from loom.db.nebius_environment_schema import NebiusEnvironment, NebiusPlatformBudget
+    from loom.db.schema import TeamMembership, User
+    from loom.nebius_environment_contract import new_environment_registration
+    from loom_service.password_auth import hash_password, verify_password
+    from tests.unit.test_nebius_environment_contract import foundation_from
+
+    tables = ("users", "teams", "team_memberships", "nebius_environments", "nebius_platform_budgets")
+    snapshot = "SELECT jsonb_build_object('schema', (SELECT version_num FROM alembic_version)," + ",".join(
+        f"'{name}', (SELECT jsonb_agg(row ORDER BY row::text) FROM (SELECT to_jsonb(t) row FROM {name} t) q)"
+        for name in tables) + ");"
+    with (PostgresContainer("postgres:16", dbname="loom") as source,
+          MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).with_kwargs(tmpfs={"/data": "rw,size=536870912"}).waiting_for(
+              HttpWaitStrategy(9000, "/minio/health/cluster")) as storage):
+        url = make_url(source.get_connection_url()).set(drivername="postgresql+psycopg")
+        connection = url.set(drivername="postgresql").render_as_string(hide_password=False)
+        monkeypatch.setattr(bootstrap, "database_url", lambda *_args: connection)
+        monkeypatch.setenv("LOOM_DB_URL", connection)
+        monkeypatch.setenv("LOOM_DB_SERVICE_PASSWORD", "management-restore-test-only-" + "x" * 24)
+        bootstrap.bootstrap_management_database({"namespace": "loom-nebius-management"})
+        foundation = foundation_from(platform_inputs[0])
+        engine = create_engine(url)
+        try:
+            with engine.begin() as db:
+                for name in ("alice", "bob"):
+                    owner, team = uuid4(), uuid4()
+                    db.execute(insert(Team).values(id=team, name=name))
+                    db.execute(insert(User).values(id=owner, username=name, username_normalized=name, status="active",
+                                                  password_hash=hash_password("restore-test-" + name)))
+                    db.execute(insert(TeamMembership).values(team_id=team, user_id=owner, role="owner"))
+                    registration = new_environment_registration(foundation, environment_id=uuid4(), incarnation=uuid4(),
+                        owner_user_id=owner, owner_team_id=team, slug=name)
+                    row = registration.model_dump()
+                    db.execute(insert(NebiusEnvironment).values(**{key: row[key] for key in row if key in NebiusEnvironment.__table__.columns}))
+                db.execute(insert(NebiusPlatformBudget).values(cluster_id=foundation.platform_config["cluster_id"],
+                    cpu_millis=3000, memory_mib=8192, storage_mib=20480, ephemeral_storage_mib=32768))
+                baseline = db.execute(text(snapshot)).scalar_one()
+        finally:
+            engine.dispose()
+        dump = source.get_wrapped_container().exec_run(["pg_dump", "-U", source.username, "-d", source.dbname, "-Fc", "--no-owner"])
+        assert dump.exit_code == 0
+        digest = hashlib.sha256(dump.output).hexdigest()
+        cfg = storage.get_config()
+        s3 = boto3.client("s3", endpoint_url="http://" + cfg["endpoint"], aws_access_key_id=cfg["access_key"],
+                          aws_secret_access_key=cfg["secret_key"], region_name="us-east-1")
+        bucket, namespace = "management-recovery-test", "loom-nebius-management"
+        s3.create_bucket(Bucket=bucket)
+        s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+        key = namespace + "/2026/09/24/000000-" + digest[:12] + ".dump"
+        s3.put_object(Bucket=bucket, Key=key, Body=dump.output, Metadata={"sha256": digest})
+        proof = verify_backup_object(client=s3, bucket=bucket, namespace=namespace, job_uid=str(uuid4()),
+            report={"backup_key": key, "sha256": digest, "bytes": len(dump.output)}, max_bytes=16 * 1024**2)
+        request = {"namespace": namespace, "buckets": {"backup": bucket}, "backup_key": proof["key"], "max_backup_bytes": 16 * 1024**2}
+        download_backup(request, s3, tmp_path)
+        client = docker.from_env()
+        restored = client.containers.run("postgres:16", command=["sleep", "300"], entrypoint=[], detach=True,
+            user="999:999", read_only=True, network_mode="none",
+            tmpfs={"/restore": "rw,uid=999,gid=999,size=536870912", "/code": "rw,uid=999,gid=999,size=1048576"})
+        try:
+            for directory, files in (("/restore", {"loom.dump": (tmp_path / "loom.dump").read_bytes()}),
+                                     ("/code", {"restore.sh": RESTORE_SCRIPT.encode(), "records.sql": snapshot.encode()})):
+                subprocess.run(["docker", "exec", "-i", restored.id, "tar", "-x", "-C", directory],
+                               input=archive(files), check=True, capture_output=True)
+            result = restored.exec_run(["sh", "/code/restore.sh"])
+            assert result.exit_code == 0
+            actual = json.loads(restored.exec_run(["cat", "/restore/records.json"]).output)
+            assert actual == baseline
+            assert {row["application_namespace"] for row in actual["nebius_environments"]} == {"loom-dev-alice", "loom-dev-bob"}
+            assert len({row["owner_user_id"] for row in actual["nebius_environments"]}) == 2
+            owners = {row["username"]: row for row in actual["users"] if row["username"] in {"alice", "bob"}}
+            assert set(owners) == {"alice", "bob"}
+            assert all(verify_password("restore-test-" + name, row["password_hash"]) for name, row in owners.items())
+            assert restored.exec_run(["test", "-f", "/restore/database-stopped"]).exit_code == 0
+        finally:
+            restored.remove(force=True)
+            client.close()
+            s3.close()
