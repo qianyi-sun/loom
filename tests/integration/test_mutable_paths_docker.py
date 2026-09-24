@@ -4,34 +4,24 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from tests.integration.test_task_identity_installation_docker import (  # noqa: F401
+    native_binary,
+    sandboxes,
+)
 from tests.integration.test_workspace_snapshot_docker import docker_drivers  # noqa: F401
 
 pytestmark = pytest.mark.docker
 
 
 @pytest.fixture
-async def reference_drivers():
-    import docker
-
-    from loom.driver.base import StartOptions
-    from loom.driver.docker import DockerDriver
-
-    docker.from_env().ping()
-    drivers = [DockerDriver(image="python:3.12-slim-bookworm", workspace=PurePosixPath("/workspace"))
-               for _ in range(2)]
-    try:
-        for driver in drivers:
-            await driver.start(options=StartOptions())
-        yield tuple(drivers)
-    finally:
-        for driver in drivers:
-            await driver.stop(delete=True)
+async def reference_drivers(sandboxes):  # noqa: F811
+    yield tuple(sandboxes[:2])
 
 
 async def _reference_fixture(drivers):
     for driver in drivers:
         result = await driver.exec(
-            "mkdir -p /usr/local/bin /cache; cp /usr/local/bin/python3.12 /usr/local/bin/interpreter; "
+            "mkdir -p /workspace /usr/local/bin /cache; cp /usr/local/bin/python3.11 /usr/local/bin/interpreter; "
             "echo baseline > /cache/baseline", user="root")
         assert result.return_code == 0, result.stderr
     result = await drivers[0].exec(

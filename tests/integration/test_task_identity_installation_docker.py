@@ -293,7 +293,8 @@ async def test_native_virtualenv_handoff_preserves_external_interpreter_and_alia
     assert executed.return_code == 0 and executed.stdout.strip() == b"preserved"
 
 
-async def test_mutated_reference_cannot_forge_its_fingerprint_with_task_utilities(sandboxes, tmp_path):
+@pytest.mark.parametrize("mutation_stage", ["before_export", "during_export"])
+async def test_mutated_reference_cannot_forge_its_fingerprint_with_task_utilities(sandboxes, tmp_path, mutation_stage):
     from loom.trial.workspace_snapshot import WorkspaceSnapshotError
 
     agent, verifier, _ = sandboxes
@@ -303,10 +304,17 @@ async def test_mutated_reference_cannot_forge_its_fingerprint_with_task_utilitie
 original=$(sha256sum < /usr/local/bin/python3.11)
 printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$original" > /usr/local/bin/sha256sum
 chmod 0755 /usr/local/bin/sha256sum
-printf X | dd of=/usr/local/bin/python3.11 bs=1 seek=100 conv=notrunc status=none
 ln -s /usr/local/bin/python3.11 /cache/python
 """)
     assert forged.return_code == 0, forged.stderr
+    mutation = "printf X | dd of=/usr/local/bin/python3.11 bs=1 seek=100 conv=notrunc status=none"
+    if mutation_stage == "before_export":
+        assert (await agent.exec(mutation)).return_code == 0
+    else:
+        wrapper = tmp_path / "tar"
+        wrapper.write_text('#!/bin/sh\n' + mutation + '\nexec /bin/tar "$@"\n')
+        wrapper.chmod(0o755)
+        await agent.upload(wrapper, PurePosixPath("/usr/local/bin/tar"))
     await agent.stop_processes()
     paths = (PurePosixPath("/cache"),)
     options = {"workdir": PurePosixPath("/app"),

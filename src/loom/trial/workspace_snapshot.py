@@ -381,8 +381,16 @@ def _symlink_components(
         assert root is not None
         if not target.is_relative_to(root):
             raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {raw}")
-        return True, target.relative_to(root).parts
-    return False, target.parts
+        # Keep terminal slash/dot tokens: they are traversal after a file,
+        # even though PurePosixPath would silently remove them.
+        parts = raw.split("/")[1:]
+        for component in root.parts[1:]:
+            while parts and parts[0] in {"", "."}:
+                parts.pop(0)
+            if not parts or parts.pop(0) != component:
+                raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {raw}")
+        return True, tuple(parts)
+    return False, tuple(raw.split("/"))
 
 
 def _hardlink_target(raw: str) -> PurePosixPath:
@@ -415,6 +423,8 @@ def _resolve_symlink_chain(
     expansions = 1
     while pending:
         part = pending.popleft()
+        if part in {"", "."}:
+            continue
         if part == "..":
             if not stack:
                 raise WorkspaceSnapshotError(f"workspace symlink target escapes workdir: {start}")

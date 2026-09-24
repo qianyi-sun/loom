@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -256,5 +257,39 @@ func TestExecRejectionReasonCodes(t *testing.T) {
 				t.Fatal("request data leaked")
 			}
 		})
+	}
+}
+
+func TestDownloadDescriptorMetadataAndBudget(t *testing.T) {
+	c := testClient(t)
+	path := filepath.Join(t.TempDir(), "reference")
+	if err := os.WriteFile(path, []byte("payload"), 0751); err != nil {
+		t.Fatal(err)
+	}
+	for _, budget := range []string{"7", "6", "0", "-1", "invalid"} {
+		req, _ := http.NewRequest("GET", "http://sandbox/file", nil)
+		query := req.URL.Query()
+		query.Set("path", path)
+		query.Set("max_bytes", budget)
+		req.URL.RawQuery = query.Encode()
+		response, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if budget == "7" {
+			if response.StatusCode != 200 || string(data) != "payload" ||
+				response.Header.Get("X-File-Unix-Mode") != "100751" ||
+				response.Header.Get("X-File-UID") != fmt.Sprint(os.Getuid()) ||
+				response.Header.Get("X-File-GID") != fmt.Sprint(os.Getgid()) {
+				t.Fatalf("missing descriptor metadata: %v", response.Header)
+			}
+		} else if response.StatusCode != 400 && response.StatusCode != 413 {
+			t.Fatalf("accepted reference budget %q: %d", budget, response.StatusCode)
+		}
 	}
 }

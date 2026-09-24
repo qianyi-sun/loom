@@ -756,7 +756,13 @@ the task may declare exact `environment.mutable_path_reference_files`, such as
 runtime mounts and private verifier paths. No component of a reference path may
 be a symlink. Source and fresh-verifier SHA-256, size, mode and numeric ownership
 must match before any mutable directory is cleared. Reference inspection is
-bounded to 256 MiB in total. A version-2 mutable manifest binds those fingerprints;
+bounded to 256 MiB in total. The native file RPC pins each path component without
+following links, reads metadata from the file descriptor, and applies the remaining
+byte budget before streaming. The trusted controller hashes the bytes after all
+source archive commands complete; task-owned shell and hash tools are not trusted.
+The fresh verifier is checked before restore and again afterward. Drivers without
+trusted reference inspection reject the declaration explicitly.
+A version-2 mutable manifest binds those fingerprints;
 tasks without references retain version 1. Original link strings and internal
 aliases are preserved, but an external reference must terminate the link chain:
 suffix traversal, external hardlinks and archived entries below links remain

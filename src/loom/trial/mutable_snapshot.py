@@ -15,8 +15,9 @@ import json
 import shlex
 import tarfile
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from loom.errors import DriverError
 from loom.mutable_paths import (
     MAX_MUTABLE_BYTES,
     MAX_MUTABLE_ENTRIES,
@@ -63,37 +64,29 @@ def _archive_evidence(
     return {"size_bytes": size, "expanded_bytes": expanded, "entries": count, "sha256": digest}
 
 
+@runtime_checkable
+class _ReferenceInspector(Protocol):
+    async def inspect_reference_file(
+        self, path: PurePosixPath, *, max_bytes: int,
+    ) -> dict[str, int | str]: ...
+
+
 async def _reference_evidence(
     driver: Driver, references: tuple[PurePosixPath, ...],
 ) -> list[dict[str, int | str]]:
-    """Fingerprint exact executable leaves without following any symlink.
-
-    The caller quiesces the source; the verifier is fresh and has no task
-    processes. References may not overlap any directory this restore changes.
-    """
+    """Inspect through trusted native RPC, never task-modifiable userland."""
+    if not references:
+        return []
+    if not isinstance(driver, _ReferenceInspector):
+        raise WorkspaceSnapshotError("driver lacks trusted mutable path reference inspection")
     records: list[dict[str, int | str]] = []
-    total = 0
+    remaining = MAX_MUTABLE_BYTES
     for path in references:
-        quoted = shlex.quote(str(path))
-        checks = [f"test ! -L {shlex.quote(str(part))}" for part in (*reversed(path.parents), path)]
-        checks.extend((f"test -f {quoted}", f"test -x {quoted}",
-                       f'test "$(stat -c %s {quoted})" -le {MAX_MUTABLE_BYTES}'))
-        result = await driver.exec(
-            " && ".join(checks) + f" && stat -c '%s %a %u %g' {quoted} && sha256sum < {quoted}",
-        )
         try:
-            if result.return_code or result.stderr or result.truncated:
-                raise ValueError("inspection failed")
-            size, mode, uid, gid, digest, marker = result.stdout.decode("ascii").split()
-            if marker != "-" or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-                raise ValueError("invalid fingerprint")
-            record: dict[str, int | str] = {"path": str(path), "size_bytes": int(size),
-                "mode": int(mode, 8), "uid": int(uid), "gid": int(gid), "sha256": digest}
-            total += int(size)
-            if total > MAX_MUTABLE_BYTES:
-                raise ValueError("reference files exceed bounded inspection size")
-        except (ValueError, UnicodeError) as exc:
+            record = await driver.inspect_reference_file(path, max_bytes=remaining)
+        except DriverError as exc:
             raise WorkspaceSnapshotError(f"cannot fingerprint mutable path reference file: {path}") from exc
+        remaining -= int(record["size_bytes"])
         records.append(record)
     return records
 
@@ -152,7 +145,6 @@ async def export_mutable_paths(
     # Never leave an old manifest certifying an incomplete newer export.
     manifest = directory / "manifest.json"
     manifest.unlink(missing_ok=True)
-    references = await _reference_evidence(driver, reference_files)
     for root in paths:
         await _check_root(driver, root)
     if paths:
@@ -163,6 +155,9 @@ async def export_mutable_paths(
         evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files)
         records.append({"path": str(root), "archive": archive.name, **evidence})
         _check_totals(records)
+    # Export commands execute task-owned utilities. Inspect references only
+    # after every source command has completed.
+    references = await _reference_evidence(driver, reference_files)
     temporary = directory / "manifest.json.tmp"
     document = {"schema_version": 2 if reference_files else 1, "paths": records,
                 **({"reference_files": references} if reference_files else {})}
@@ -225,3 +220,5 @@ async def import_mutable_paths(
         await _import_workspace_archive(
             driver, directory / f"{index}.tar", root, preserve_acls=preserve_acls,
         )
+    if await _reference_evidence(driver, reference_files) != references:
+        raise WorkspaceSnapshotError("mutable path reference changed during restore")
