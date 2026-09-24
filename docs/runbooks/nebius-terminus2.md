@@ -450,7 +450,7 @@ Trixie suffixes. Preparation retains the
 original application interpreter and PATH; plain pip verifiers inherit system
 packages so compiled PyROOT dependencies remain available. Validate the actual
 image and original verifier before execution; accepting a tag does not qualify
-its upstream contents. Alpine and Fedora variants remain unsupported.
+its upstream contents. Alpine variants of Python, Node and PHP images, and Fedora bases, remain unsupported.
 
 Official `archlinux:latest`, `archlinux:base` and `archlinux:base-devel` final
 images are also supported, including local stage inheritance. Preparation adds
@@ -464,6 +464,20 @@ temporary package cache and preserves the image's existing package cache. Debian
 names. This image support does not grant mounts, devices or kernel privileges;
 declare supported directory state separately and qualify its private-verifier
 handoff before running an original task.
+
+Official versioned `alpine:3.x` and `alpine:3.x.y` final images support the
+same separate verifier environment, including explicitly requested musl Python
+versions available through uv. Only the explicit `apk add --no-cache package ...`
+bootstrap in an unconditional script preamble is relocated (comments and common
+`set` options may precede it). APK inside task setup, branches or functions,
+arbitrary APK commands, local APK files and repository overrides require review. APK and Debian bootstrap dependencies are
+not translated between distributions. Preparation simulates the harness package
+transaction and rejects upgrades, downgrades, removals or reinstalls of authored
+packages; a post-install inventory also rejects repository drift. Existing APK
+caches remain intact. This prepares harness/verifier dependencies only: it does
+not install task-required tools such as wget unless the supplied verifier itself
+explicitly requests them. Such overlap must be resolved before original-task
+acceptance. Validate actual package state transfer and runtime egress separately.
 
 Prebuilt images, malformed
 Dockerfile `SHELL`, selected build targets, floating Git dependencies and

@@ -256,3 +256,64 @@ def test_arch_preparation_retains_authored_packages_and_offline_cache(tmp_path: 
         except docker.errors.ImageNotFound:
             pass
         client.close()
+
+
+@pytest.mark.timeout(600)
+def test_alpine_preparation_retains_authored_packages_and_wget_task(tmp_path: Path):
+    import docker
+
+    original = (
+        "FROM alpine:3.20\n"
+        "RUN cp /lib/apk/db/installed /authored-packages && mkdir -p /var/cache/apk && "
+        "printf task-input > /var/cache/apk/loom-authored-cache\nWORKDIR /app\n"
+    )
+    (tmp_path / "Dockerfile").write_text(original)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test.sh").write_text(
+        "apk add --no-cache curl\nuvx --python 3.13 --with pytest==8.4.1 --with pytest-json-ctrf==0.3.5 pytest /tests/test_example.py\n"
+    )
+    (tmp_path / "tests/test_example.py").write_text("# Private verifier input must not enter the task image.\n")
+    environment = {"dockerfile": "Dockerfile", "docker_build_context": ".", "workdir": "/app"}
+    prepare_nebius_terminus_image(tmp_path, environment)
+    tag = "loom-preparation-alpine-test:" + uuid4().hex
+    client = docker.from_env()
+    container = None
+    try:
+        result = subprocess.run(
+            ["docker", "build", "--tag", tag, "--file", str(tmp_path / environment["dockerfile"]), str(tmp_path)],
+            capture_output=True, text=True, timeout=480,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        container = client.containers.run(
+            tag, entrypoint="/bin/sh", command=["-ec", (
+                'test "$(id -u)" = 65532; test "$HOME" = /home/agent; '
+                'test "$(cat /var/cache/apk/loom-authored-cache)" = task-input; '
+                'test "$(cat /etc/alpine-release | cut -d. -f1,2)" = 3.20; '
+                'test ! -e /tests/test_example.py; test ! -e /app/get-docker.sh; apk info -e musl; ! apk info -e wget; '
+                'tmux -V; asciinema --version; tar --version; '
+                '/opt/verifier/bin/python -m pytest --version; '
+                'printf "%s\\n" "def test_interpreter():" "    import sys; assert sys.version_info[:2] == (3, 13)" '
+                '> /tests/test_example.py; '
+                '/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_example.py; '
+                '/opt/verifier/bin/python -c \'import json; '
+                'assert json.load(open("/logs/verifier/ctrf.json"))["results"]["summary"]["passed"] == 1\'; '
+                '/opt/verifier/bin/python -c \'from pathlib import Path; '
+                'parse=lambda path: {dict(line.split(":", 1) for line in record.splitlines() if ":" in line)["P"]: '
+                'dict(line.split(":", 1) for line in record.splitlines() if ":" in line)["V"] '
+                'for record in Path(path).read_text().strip().split("\\n\\n")}; '
+                'before=parse("/authored-packages"); after=parse("/lib/apk/db/installed"); '
+                'assert all(after.get(name)==version for name, version in before.items())\'; '
+                'test -s /opt/verifier/resolved-requirements.txt'
+            )], network_mode="none", cap_drop=["ALL"],
+            security_opt=["no-new-privileges"], detach=True,
+        )
+        assert container.wait(timeout=30)["StatusCode"] == 0, container.logs().decode(errors="replace")
+        assert (tmp_path / "Dockerfile").read_text() == original
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        try:
+            client.images.remove(tag, force=True)
+        except docker.errors.ImageNotFound:
+            pass
+        client.close()

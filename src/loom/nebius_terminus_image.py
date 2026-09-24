@@ -53,6 +53,17 @@ def _apt_bootstrap_packages(command: str) -> tuple[str, ...] | None:
     return names
 
 
+def _apk_bootstrap_packages(command: str) -> tuple[str, ...] | None:
+    if not re.match(r"apk\b", command):
+        return None
+    words = shlex.split(command)
+    names = tuple(words[3:])
+    if (words[:3] != ["apk", "add", "--no-cache"] or not names
+            or any(not _PACKAGE.fullmatch(name) or ".apk" in name for name in names)):
+        raise ValueError("nebius-terminus: unsupported apk bootstrap")
+    return names
+
+
 def _unwrap_installer_guards(lines: list[str]) -> list[str]:
     """Unwrap only complete installer-only missing-curl/uv guards.
 
@@ -113,6 +124,8 @@ class HarborOfflineBootstrap:
     index_args: tuple[str, ...] = ()
     downloads: tuple[tuple[str, str], ...] = ()
     system_site_packages: bool = False
+    apk_packages: tuple[str, ...] = ()
+    uses_apt: bool = False
 
 
 def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
@@ -137,6 +150,8 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         raise ValueError("nebius-terminus: incomplete shell continuation")
     output: list[str] = []
     packages: list[str] = []
+    alpine_packages: list[str] = []
+    uses_apt = False
     requirements: list[str] = []
     indexes: list[str] = []
     downloads: list[tuple[str, str]] = []
@@ -182,10 +197,24 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             output.append(line)
             continue
         if re.fullmatch(r"apt-get update(?: -qq)?", command):
+            uses_apt = True
             continue
         apt_packages = _apt_bootstrap_packages(command)
         if apt_packages is not None:
+            uses_apt = True
             packages.extend(apt_packages)
+            continue
+        apk_packages = _apk_bootstrap_packages(command)
+        if apk_packages is not None:
+            # Only a preamble can be relocated without interpreting shell
+            # control flow. An APK command inside an uncalled function or false
+            # branch must not become unconditional image installation.
+            preamble = {":", "set -e", "set -eu", "set -eux", "set -euo pipefail",
+                        "set -euxo pipefail", "set -o pipefail"}
+            if any(previous.strip() and not previous.lstrip().startswith("#")
+                   and previous.strip() not in preamble for previous in output):
+                raise ValueError("nebius-terminus: APK bootstrap requires an unconditional preamble")
+            alpine_packages.extend(apk_packages)
             continue
         if _UV_INSTALL.fullmatch(command):
             installer_count += 1
@@ -293,7 +322,7 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
             downloads.append((url, destination))
             output.append(f"cp /opt/verifier-assets/{destination} {destination}\n")
             continue
-        if re.search(r"\b(?:apt-get|apt|pip|pip3|uv|uvx|curl|wget)\b", command):
+        if re.search(r"\b(?:apt-get|apt|apk|pip|pip3|uv|uvx|curl|wget)\b", command):
             raise ValueError(
                 "nebius-terminus: unsupported online bootstrap command in tests/test.sh"
             )
@@ -321,6 +350,8 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
         index_args=tuple(indexes),
         downloads=tuple(downloads),
         system_site_packages=pip_mode and venv is None,
+        apk_packages=tuple(sorted(set(alpine_packages))),
+        uses_apt=uses_apt,
     )
 
 
@@ -439,6 +470,32 @@ def _arch_package_install() -> str:
     rm -rf "$loom_prep_cache" && trap - EXIT"""
 
 
+def _alpine_package_install(packages: tuple[str, ...]) -> str:
+    """Fail preparation if APK would change an authored package version.
+
+    Simulation catches dependency upgrades before installation. Rechecking the
+    inventory rejects a repository change between resolution and installation.
+    Only our temporary evidence is removed; authored APK caches survive.
+    """
+    inventory = "awk '/^P:/ {name=substr($0,3)} /^V:/ {print name,substr($0,3)}' /lib/apk/db/installed"
+    return f"""loom_prep_cache=$(mktemp -d /tmp/loom-alpine-preparation.XXXXXX) && \
+    trap 'rm -rf "$loom_prep_cache"' EXIT && \
+    {inventory} > "$loom_prep_cache/installed" && \
+    apk add --no-cache --simulate {shlex.join(packages)} > "$loom_prep_cache/transaction" && \
+    if grep -Eq '\\) (Upgrading|Downgrading|Purging|Reinstalling) ' "$loom_prep_cache/transaction"; then \
+        echo 'nebius-terminus: Alpine harness preparation would change authored packages; use an explicitly reviewed compatible image/repository snapshot' >&2; \
+        exit 1; \
+    fi && \
+    apk add --no-cache {shlex.join(packages)} && \
+    {inventory} > "$loom_prep_cache/prepared" && \
+    while IFS= read -r loom_package; do \
+        if ! grep -Fxq "$loom_package" "$loom_prep_cache/prepared"; then \
+            echo "nebius-terminus: Alpine preparation changed authored package $loom_package" >&2; exit 1; \
+        fi; \
+    done < "$loom_prep_cache/installed" && \
+    rm -rf "$loom_prep_cache" && trap - EXIT"""
+
+
 def _preparation_dockerfile(
     original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
 ) -> str:
@@ -466,7 +523,8 @@ def _preparation_dockerfile(
                 raise ValueError("nebius-terminus: duplicate Dockerfile stage alias")
             stages[alias] = final_base
     arch = final_base in {"archlinux:latest", "archlinux:base", "archlinux:base-devel"}
-    if not arch and not re.fullmatch(
+    alpine = re.fullmatch(r"alpine:3\.[0-9]+(?:\.[0-9]+)?", final_base) is not None
+    if not (arch or alpine) and not re.fullmatch(
         r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+"
         r"|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?"
         r"|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?)"
@@ -477,13 +535,15 @@ def _preparation_dockerfile(
     ):
         raise ValueError(
             "nebius-terminus: image preparation supports Debian/Ubuntu final base images "
-            "and official Arch Linux latest/base/base-devel images only"
+            "and official versioned Alpine or Arch Linux latest/base/base-devel images only"
         )
-    if arch and bootstrap.apt_packages:
+    if (arch or alpine) and (bootstrap.apt_packages or bootstrap.uses_apt):
         raise ValueError(
-            "nebius-terminus: Arch Linux images cannot use a Debian package bootstrap; "
+            f"nebius-terminus: {'Arch Linux' if arch else 'Alpine'} images cannot use a Debian package bootstrap; "
             "provide an explicitly reviewed verifier dependency preparation"
         )
+    if not alpine and bootstrap.apk_packages:
+        raise ValueError("nebius-terminus: APK bootstrap requires an official Alpine final image")
     custom_shell = False
     for instruction in instructions:
         if instruction.keyword != "SHELL":
@@ -570,9 +630,12 @@ def _preparation_dockerfile(
         )
     # Authored caches may be offline task inputs (for example Poetry wheels).
     # Disable only our uv download cache; never delete the image's HOME cache.
+    alpine_packages = tuple(sorted({"bash", "ca-certificates", "curl", "tmux", "asciinema",
+                                    "shadow", "python3", "tar", *bootstrap.apk_packages}))
     package_install = (_arch_package_install() if arch else
+                       _alpine_package_install(alpine_packages) if alpine else
                        f"apt-get update -qq && apt-get install -y --no-install-recommends {' '.join(packages)}")
-    package_cleanup = "true" if arch else "rm -rf /var/lib/apt/lists/*"
+    package_cleanup = "true" if arch or alpine else "rm -rf /var/lib/apt/lists/*"
     preparation = run(f"""export UV_NO_CACHE=1 && {package_install} && \\
     {python_setup} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
