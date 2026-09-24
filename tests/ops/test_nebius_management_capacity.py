@@ -131,3 +131,41 @@ def test_heavier_old_replicaset_is_reserved_during_rollout(platform):
     rs["metadata"]["ownerReferences"] = [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "api", "uid": dep["metadata"]["uid"], "controller": True}]
     platform["controllers"].append(rs)
     assert qualify(platform)["required"]["cpu_millis"] == 2200
+
+
+@pytest.mark.parametrize("surge", [1, "10%", 5, "100%"])
+def test_daemonset_surge_reserves_one_extra_pod_per_matching_node(platform, surge):
+    from scripts.ops.nebius_management_capacity import ManagementCapacityError
+
+    ds = workload("DaemonSet", "agent", cpu="1000m")
+    ds["spec"]["updateStrategy"] = {"type": "RollingUpdate", "rollingUpdate": {
+        "maxUnavailable": 0, "maxSurge": surge}}
+    platform["controllers"] = [ds]
+    # The 500m child reserve plus two 1000m daemon Pods fits exactly.
+    assert qualify(platform)["required"]["cpu_millis"] == 2500
+    assert qualify(platform)["required"]["pods"] == 6
+    platform["nodes"][0]["status"]["allocatable"]["cpu"] = "2499m"
+    with pytest.raises(ManagementCapacityError):
+        qualify(platform)
+
+
+@pytest.mark.parametrize("strategy", [{}, {"type": "OnDelete"}, {
+    "type": "RollingUpdate", "rollingUpdate": {"maxSurge": 0}}, {
+    "type": "RollingUpdate", "rollingUpdate": {"maxSurge": "0%"}}])
+def test_daemonset_without_surge_needs_one_pod_per_node(platform, strategy):
+    ds = workload("DaemonSet", "agent", cpu="1000m")
+    ds["spec"]["updateStrategy"] = strategy
+    platform["controllers"] = [ds]
+    assert qualify(platform)["required"]["cpu_millis"] == 1500
+
+
+@pytest.mark.parametrize("strategy", [{"type": "Mystery"}, {
+    "type": "RollingUpdate", "rollingUpdate": {"maxSurge": -1}}])
+def test_unknown_daemonset_strategy_never_qualifies(platform, strategy):
+    from scripts.ops.nebius_management_capacity import ManagementCapacityError
+
+    ds = workload("DaemonSet", "agent")
+    ds["spec"]["updateStrategy"] = strategy
+    platform["controllers"] = [ds]
+    with pytest.raises(ManagementCapacityError):
+        qualify(platform)
