@@ -109,6 +109,28 @@ def test_untracked_namespace_is_never_adopted(tmp_path):
     assert not api.creates and api.secrets is None
 
 
+def test_prepared_namespace_with_untracked_material_is_rejected_before_create(tmp_path):
+    from dataclasses import asdict
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_management_bootstrap import BootstrapError, bootstrap_management
+
+    binding, api = setup()
+    state = tmp_path / "bootstrap"
+    state.mkdir(mode=0o700)
+    record = {
+        "schema": "loom.nebius-management-bootstrap.v1", "binding": asdict(binding),
+        "operation_id": str(uuid4()), "stage": "namespace_prepared", "namespace_uid": None,
+    }
+    private_state._atomic_json(state / "bootstrap.json", record)
+    (state / "material").mkdir(mode=0o700)
+    before = (state / "bootstrap.json").read_bytes()
+    with pytest.raises(BootstrapError, match="untracked management material"):
+        bootstrap_management(binding=binding, api=api, state_dir=state)
+    assert not api.creates and api.secrets is None
+    assert (state / "bootstrap.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("change", ["missing", "uid", "owner", "pss", "deleting", "cluster"])
 def test_namespace_or_cluster_drift_prevents_more_credential_writes(tmp_path, change):
     from scripts.ops.nebius_management_bootstrap import BootstrapError, bootstrap_management
