@@ -7,6 +7,78 @@ import pytest
 from tests.loom_cli.test_local_compatibility_report import _report, _write_bundle
 
 
+def _harbor_bundle(tmp_path, dockerfile):
+    bundle = _write_bundle(tmp_path, "harbor-shell")
+    (bundle / "task.toml").write_text('version = "1.0"\n[metadata]\nname = "Harbor shell fixture"\n')
+    (bundle / "environment/Dockerfile").write_text(dockerfile)
+    return bundle
+
+
+@pytest.mark.parametrize("shell", [
+    "sh", "/bin/sh", "/usr/bin/sh", "bash", "/bin/bash", "/usr/bin/bash",
+    "zsh", "/bin/zsh", "/usr/bin/zsh",
+])
+def test_harbor_bare_shell_cmd_records_reference_runner_conversion(tmp_path, capsys, shell):
+    bundle = _harbor_bundle(tmp_path, f'FROM ubuntu:24.04\nCMD ["{shell}"]\n')
+    before = {path: path.read_bytes() for path in bundle.rglob("*") if path.is_file()}
+
+    rc, payload = _report(tmp_path, capsys)
+
+    assert rc == 0
+    report = payload["compatibility_report"]["tasks"][0]
+    assert report["status"] == "converted"
+    assert report["diagnostics"] == []
+    change, = [item for item in report["changes"] if item["field"] == "environment.dockerfile.CMD"]
+    assert change["category"] == "equivalent_conversion"
+    assert change["before"] == f'["{shell}"]' and change["after"] is None
+    assert change["source_location"] == f"{bundle}/environment/Dockerfile:2"
+    assert "Harbor" in change["reason"] and "Bash" in change["reason"]
+    assert payload["compatibility_report"]["runtime_verified"] is False
+    assert any("registry-image startup" in item for item in payload["compatibility_report"]["limitations"])
+    assert {path: path.read_bytes() for path in bundle.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("directive", [
+    'CMD ["bash", "-c", "initialize"]', 'CMD ["bash", "--login"]',
+    'CMD ["/custom/bash"]', 'CMD ["/start.sh"]', 'CMD bash',
+    'CMD ["bash", 1]', 'CMD ["bash",]', 'CMD [["bash"]]', 'ENTRYPOINT ["bash"]',
+])
+def test_harbor_real_or_unrecognized_startup_still_requires_review(tmp_path, capsys, directive):
+    _harbor_bundle(tmp_path, "FROM ubuntu:24.04\n" + directive + "\n")
+
+    rc, payload = _report(tmp_path, capsys)
+
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    assert any(item["code"] == "dockerfile_startup_overridden" for item in report["diagnostics"])
+    assert not any(item["field"] == "environment.dockerfile.CMD" for item in report["changes"])
+
+
+def test_harbor_shell_conversion_preserves_inherited_entrypoint_diagnostic(tmp_path, capsys):
+    bundle = _harbor_bundle(tmp_path, 'FROM ubuntu:24.04 AS base\nENTRYPOINT ["/start.sh"]\n'
+                            'CMD ["bash"]\nFROM base\n')
+
+    rc, payload = _report(tmp_path, capsys)
+
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    diagnostic, = report["diagnostics"]
+    assert diagnostic["source_location"] == f"{bundle}/environment/Dockerfile:2"
+    assert "ENTRYPOINT" in diagnostic["reason"]
+    change, = [item for item in report["changes"] if item["field"] == "environment.dockerfile.CMD"]
+    assert change["source_location"] == f"{bundle}/environment/Dockerfile:3"
+
+
+@pytest.mark.parametrize("final", ["FROM ubuntu:24.04\n", 'FROM base\nENTRYPOINT ["/start.sh"]\n'])
+def test_harbor_unused_or_reset_shell_cmd_is_not_reported_as_conversion(tmp_path, capsys, final):
+    _harbor_bundle(tmp_path, 'FROM ubuntu:24.04 AS base\nCMD ["bash"]\n' + final)
+
+    _, payload = _report(tmp_path, capsys)
+
+    report = payload["compatibility_report"]["tasks"][0]
+    assert not any(item["field"] == "environment.dockerfile.CMD" for item in report["changes"])
+
+
 def test_preserved_identities_require_runtime_qualification(tmp_path, capsys):
     bundle = _write_bundle(tmp_path, "identity", user="root")
     path = bundle / "task.toml"
