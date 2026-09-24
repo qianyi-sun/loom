@@ -656,6 +656,8 @@ Python cannot satisfy the verifier dependencies. The task's interpreter and PATH
 remain unchanged. Explicit verifier Python versions are retained, and plain
 `pip install` bootstraps keep the image interpreter and its system packages.
 Resolved verifier dependency versions are recorded in the prepared image.
+The verifier tool directory is protected from mutable state transfers and
+mutable reference declarations, including references to its descendants.
 
 Literal local `COPY`/`ADD` sources are checked against their declared build
 context. Dockerfile heredoc bodies and `COPY --from` references are not mistaken
