@@ -289,7 +289,7 @@ def test_alpine_preparation_retains_authored_packages_and_wget_task(tmp_path: Pa
                 'test "$(id -u)" = 65532; test "$HOME" = /home/agent; '
                 'test "$(cat /var/cache/apk/loom-authored-cache)" = task-input; '
                 'test "$(cat /etc/alpine-release | cut -d. -f1,2)" = 3.20; '
-                'test ! -e /tests/test_example.py; test ! -e /app/get-docker.sh; ! apk info --exists wget; '
+                'test ! -e /tests/test_example.py; test ! -e /app/get-docker.sh; apk info -e musl; ! apk info -e wget; '
                 'tmux -V; asciinema --version; tar --version; '
                 '/opt/verifier/bin/python -m pytest --version; '
                 'printf "%s\\n" "def test_interpreter():" "    import sys; assert sys.version_info[:2] == (3, 13)" '
