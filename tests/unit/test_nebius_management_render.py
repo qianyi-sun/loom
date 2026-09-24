@@ -94,6 +94,25 @@ def test_manager_has_only_its_own_database_api_backup_and_shared_ingress(managem
     assert management_inputs == before
 
 
+def test_manager_accepts_current_publication_without_inheriting_standalone_task_policy(management_inputs):
+    deployment, _, profile = management_inputs
+    foundation = deployment["installation"]["foundation"]
+    config = json.loads(foundation["platform_config_json"])
+    config["task_identity_policy"] = {"mode": "private-root-v1", "target_id": config["target_id"],
+                                      "execution_namespace": config["execution_namespace"]}
+    foundation["platform_config_json"] = json.dumps(config)
+    profile["supports_task_identity"] = True
+    before = copy.deepcopy(management_inputs)
+    result = render(management_inputs)
+    assert management_inputs == before
+    assert not any(doc["kind"].startswith("ValidatingAdmissionPolicy") for doc in documents(result))
+    assert all(doc["metadata"].get("namespace", deployment["namespace"]) == deployment["namespace"]
+               for doc in documents(result))
+    assert "task_identity_policy" not in result.config
+    namespace = next(doc for doc in documents(result) if doc["kind"] == "Namespace")
+    assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+
+
 def test_runtime_mounts_only_explicit_separate_authorities(management_inputs):
     docs = documents(render(management_inputs))
     service = next(d for d in docs if d["kind"] == "Deployment")

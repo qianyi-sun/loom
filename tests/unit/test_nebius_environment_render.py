@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import subprocess
 import sys
 from pathlib import Path
@@ -124,10 +125,30 @@ def test_child_cannot_start_execution_or_duplicate_capacity_collection(platform_
     assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"] == "false"
 
 
-def test_child_rejects_task_identity_readiness_under_restricted_pss(platform_inputs):
-    platform_inputs[2]["supports_task_identity"] = True
-    with pytest.raises(ValueError, match=r"task identity.*restricted"):
-        rendered(platform_inputs)
+@pytest.mark.parametrize("foundation_policy", [False, True])
+def test_disabled_child_preserves_capable_profile_without_inheriting_task_authority(platform_inputs, foundation_policy):
+    config, _, profile = platform_inputs
+    profile["supports_task_identity"] = True
+    if foundation_policy:
+        config["task_identity_policy"] = {"mode": "private-root-v1", "target_id": config["target_id"],
+                                          "execution_namespace": config["execution_namespace"]}
+    before = copy.deepcopy(platform_inputs)
+    result = rendered(platform_inputs)
+    assert platform_inputs == before
+    assert result.execution_enabled is False
+    assert "task_identity_policy" not in result.config
+    cm = named(result, "ConfigMap", "loom-platform-config")
+    assert json.loads(cm["data"]["profile.json"])["supports_task_identity"] is True
+    assert "task_identity_policy" not in json.loads(cm["data"]["environment.json"])
+    docs = documents(result)
+    assert not any(doc["kind"].startswith("ValidatingAdmissionPolicy") for doc in docs)
+    assert all(doc["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
+               for doc in docs if doc["kind"] == "Namespace")
+    quotas = [doc for doc in docs if doc["kind"] == "ResourceQuota"]
+    assert len(quotas) == 2 and all(doc["spec"]["hard"]["pods"] == "0" for doc in quotas)
+    cp = named(result, "Deployment", "loom-control-plane")
+    env = {row["name"]: row.get("value") for row in cp["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED"] == "false"
 
 
 def test_platform_envelope_covers_surge_bootstrap_backup_and_retained_storage(platform_inputs):
