@@ -20,7 +20,12 @@ pytestmark = [pytest.mark.docker, pytest.mark.timeout(180)]
 
 
 @pytest.mark.parametrize("custom_shell", [False, True])
-def test_image_preparation_preserves_authored_package_caches(tmp_path, custom_shell):
+@pytest.mark.parametrize("bootstrap", [
+    "uvx --with pytest==8.4.1 pytest /tests/test.py\n",
+    "uvx -p 3.13 --with pytest==8.4.1 pytest /tests/test.py\n",
+    "pip install pytest==8.4.1\npytest /tests/test.py\n",
+], ids=["uvx-unpinned", "uvx-pinned", "pip"])
+def test_image_preparation_preserves_authored_package_caches(tmp_path, custom_shell, bootstrap):
     """Execute generated preparation; only external package downloads are fixtures."""
     import docker
 
@@ -33,7 +38,7 @@ def test_image_preparation_preserves_authored_package_caches(tmp_path, custom_sh
     if custom_shell:
         source += 'SHELL ["/bin/bash", "-e", "-c"]\n'
     (tmp_path / "environment/Dockerfile").write_text(source)
-    (tmp_path / "tests/test.sh").write_text("uvx --with pytest==8.4.1 pytest /tests/test.py\n")
+    (tmp_path / "tests/test.sh").write_text(bootstrap)
     environment = {"dockerfile": "environment/Dockerfile", "docker_build_context": "environment",
                    "workdir": "/app", "user": "root", "environment": {"HOME": "/root"}}
     prepare_nebius_terminus_image(tmp_path, environment)
@@ -49,7 +54,9 @@ def test_image_preparation_preserves_authored_package_caches(tmp_path, custom_sh
 set -eu
 printf '%s\\n' "${UV_NO_CACHE-unset}" >> /tmp/verifier-cache-policy
 case "$1" in
+  python) test "$2" = install ;;
   venv) mkdir -p /opt/verifier/bin ;;
+  tool) test "$2" = install; mkdir -p "$UV_TOOL_DIR/pytest/bin" ;;
   pip) test "$2" = install || test "$2" = freeze ;;
   *) exit 2 ;;
 esac
@@ -69,7 +76,9 @@ for path in (cache/'pypoetry/artifacts/wheel', cache/'pip/wheel', cache/'uv/task
     assert path.is_file(), f'preparation deleted authored cache: {path}'
     assert path.read_bytes() == b'original offline dependency'
     assert path.stat().st_mode & 0o777 == 0o640
-assert pathlib.Path('/tmp/verifier-cache-policy').read_text().splitlines() == ['1', '1', '1']
+cache_policy = pathlib.Path('/tmp/verifier-cache-policy').read_text().splitlines()
+assert cache_policy and set(cache_policy) == {'1'}, cache_policy
+assert pathlib.Path('/opt/verifier/bin').is_dir()
 assert 'UV_NO_CACHE' not in os.environ
 print('authored caches preserved; verifier downloads uncached')
 """
