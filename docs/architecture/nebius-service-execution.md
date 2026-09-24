@@ -748,25 +748,39 @@ Present-only snapshots retain the existing manifest version. There are at most 1
 100,000 entries and 256 MiB aggregate archived/expanded content. Runtime and
 verifier roots, overlapping roots, symlink ancestors, escaping links, special
 files and cross-root hardlinks are rejected. Relative and absolute symlink
-targets must resolve within their own declared root; original target strings
-are preserved. Validation follows directory links before resolving `..` and
+targets may resolve within their own declared root or terminate at a file in
+another declared mutable root; original target strings are preserved.
+File links across roots require the complete archive group to be validated
+before any directory is restored. Every target must be an archived regular
+file, an in-root hardlink with a regular target, a chain ending at such a file,
+or an exact immutable reference qualified below. Missing and absent targets,
+cross-root directory links, and entries nested under any non-directory are
+rejected. Cross-root targets use canonical absolute paths or leading-parent
+relative paths; suffix and interior-parent traversal are rejected.
+Validation follows internal directory links before resolving `..` and
 rejects any intermediate private path, escape, cycle or chain over 40 links.
 Ownership that the verifier cannot
 restore is an explicit handoff failure. This does not copy an entire writable
 container layer or expose private verifier dependencies to task mutations.
 
 For present mutable roots, the native sandbox extracts each validated archive
-into a fresh staging directory inside its destination before removing baseline
-entries. The static runtime's `/restore-directory` RPC then promotes the staged
+into a fresh staging directory inside its destination. The complete group is
+staged before removing any present root's baseline entries, so command links
+between directories cannot break staging of a later root. The static runtime's
+`/restore-directory` RPC then promotes the staged
 children without starting a shell while the old tree is incomplete. This permits
-restoring declared loader and shared-library directories. Descriptor-pinned,
+restoring declared loader and shared-library directories. Present roots are
+restored before absent roots are removed, since the baseline shell may depend
+on a directory that is absent from the final state. Descriptor-pinned,
 no-follow traversal rejects protected roots, symlink ancestors and staging-name
 collisions before deletion. Promotion preserves deletions, links, ownership,
 root mode, timestamps and declared POSIX ACLs, including read-only final roots.
 The destination's parent need not be writable. Promotion is not crash-atomic;
 an ambiguous RPC failure is a preparation failure, and sandbox teardown owns
 cleanup so a shell cleanup cannot race an in-progress promotion. Drivers without
-native directory promotion retain the existing extraction path.
+native directory promotion retain the existing extraction path for independent
+roots; file links between roots require native group staging and otherwise fail
+before verifier commands or changes.
 
 For a mutable-directory virtualenv that links to an unchanged image interpreter,
 the task may declare exact `environment.mutable_path_reference_files`, such as
@@ -791,7 +805,8 @@ parent components followed by the exact declared reference path, for example
 `/usr/lib/libcrypto.so.3 -> ../../lib/libcrypto.so.3`. Mutable source and verifier
 root ancestors must pass their existing no-symlink checks. Interior parent
 traversal, trailing slash/dot and traversal after an external leaf remain invalid;
-this does not permit links between mutable roots. Workspace references retain
+links between mutable roots use the separate group-file checks above.
+Workspace references retain
 the literal absolute-target requirement. This declaration never transfers edits
 to the referenced file.
 
