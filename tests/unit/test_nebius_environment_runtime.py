@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -123,6 +125,28 @@ async def test_invalid_projected_token_fails_before_transmission(connection, tmp
             await http.get("/api/v1/namespaces")
     await credentials.close()
     assert str(error.value) == "kubernetes_credentials_unavailable"
+
+
+async def test_rejected_projected_token_directory_does_not_leak_descriptors(connection, tmp_path):
+    from loom_service.environment_management.kubernetes_credentials import (
+        ProjectedKubernetesConnection,
+        ProjectedKubernetesCredentials,
+    )
+
+    descriptors = Path("/proc/self/fd")
+    if not descriptors.is_dir():
+        pytest.skip("descriptor accounting requires Linux procfs")
+    token = tmp_path / "token"
+    token.mkdir()
+    credentials = ProjectedKubernetesCredentials(ProjectedKubernetesConnection(
+        kind="projected_service_account", endpoint=connection.endpoint,
+        ca_file=connection.ca_file, token_file=token,
+    ))
+    before = len(list(descriptors.iterdir()))
+    for _ in range(5):
+        with pytest.raises(ValueError, match="projected Kubernetes credential unavailable"):
+            await credentials.get_token()
+    assert len(list(descriptors.iterdir())) == before
 
 
 @pytest.mark.parametrize("change", ["http", "foreign_path", "both", "implicit"])
