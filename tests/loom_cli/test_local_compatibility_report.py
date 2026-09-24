@@ -67,6 +67,7 @@ def _report(root: Path, capsys: pytest.CaptureFixture[str], *, profile: bool = T
     "printf '%s\\n' 'set -e' 'pytest /tests/test_outputs.py' > /app/check.sh",
     "printf '%s' 'py' 'test /tests/test_outputs.py' > /app/check.sh",
     "echo -n 'pytest /tests/test_outputs.py' > /app/check.sh",
+    "printf '%s\\n' 'set -e # fail fast' 'pytest /tests/test_outputs.py' > /app/check.sh",
 ])
 def test_report_blocks_image_authored_public_script_using_private_pytest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
@@ -100,6 +101,8 @@ def test_report_blocks_image_authored_public_script_using_private_pytest(
     "echo 'uvx cowsay pytest /tests/test_outputs.py' > /app/check.sh",
     "echo 'uvx --from pytest cowsay /tests/test_outputs.py' > /app/check.sh",
     "echo 'pytest /app/test_public.py > /tests/test_outputs.py' > /app/check.sh",
+    "printf '%s\\n' 'pytest /app/test_public.py # public checks' 'echo /tests/test_outputs.py' > /app/check.sh",
+    "echo 'echo \";\" pytest /tests/test_outputs.py' > /app/check.sh",
 ])
 def test_report_does_not_infer_private_runtime_dependency_from_unrelated_text(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
