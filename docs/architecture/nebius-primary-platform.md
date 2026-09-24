@@ -267,6 +267,14 @@ execution and lifecycle acceptance must still be qualified before enabling owner
 creation. A healthy management process is not evidence that personal environments
 or shared execution are operational.
 
+An approved runtime profile may describe private-root task support even while
+management and its initial children do not execute tasks. Their renderers preserve
+that profile but do not inherit the standalone target's task-identity admission
+policy or execution writers. Children remain restricted-PSS namespaces with
+zero-Pod execution/build quotas and disabled scheduling; management has no execution
+stack. Standalone rendering still requires its exact target-scoped policy before
+claiming that task support is installed.
+
 ### Management deployment manifests
 
 `loom_service.environment_management.deployment.render_management` renders the
