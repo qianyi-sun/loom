@@ -542,10 +542,11 @@ OPENHANDS_PATHS = ('/opt/openhands-python', '/opt/openhands-sdk-venv', '/opt/ope
 OPENHANDS_COPIES = ''.join(f'COPY --from=terminalworld_openhands_runtime_cache {p} {p}\n' for p in OPENHANDS_PATHS)
 
 
-def test_terminus_derivation_omits_complete_foreign_agent_cache_only(tmp_path):
+@pytest.mark.parametrize("task_setup", ["RUN mkdir /task-data\n", "RUN printf 'alpha\u2028omega' > /task-data\n"])
+def test_terminus_derivation_omits_complete_foreign_agent_cache_only(tmp_path, task_setup):
     env = bundle(tmp_path)
     source = tmp_path / 'environment/Dockerfile'
-    task_image = 'FROM ubuntu:22.04\nRUN mkdir /task-data\nCOPY data /task-data\nCMD ["/bin/bash"]\n'
+    task_image = 'FROM ubuntu:22.04\n' + task_setup + 'COPY data /task-data\nCMD ["/bin/bash"]\n'
     original = OPENHANDS_STAGE + task_image + OPENHANDS_COPIES
     source.write_text(original)
     assert prepare_nebius_terminus_image(tmp_path, env)
