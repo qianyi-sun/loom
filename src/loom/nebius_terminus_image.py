@@ -19,7 +19,8 @@ from loom.sandbox_identity import SandboxIdentityV1, resolve_sandbox_identity
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
 _DOCKERFILE_SUFFIX = ".loom-nebius"
 _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
-_REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*\Z")
+_REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?\Z")
+_DISTRIBUTION_SUFFIXES = (".whl", ".zip", ".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz", ".txz")
 _UV_INSTALL = re.compile(
     r"curl -LsSf https://astral\.sh/uv/\d+\.\d+\.\d+/install\.sh\s*\|\s*sh\s*\Z",
 )
@@ -145,14 +146,21 @@ def adapt_harbor_test_script(script: str) -> HarborOfflineBootstrap:
     venv_activated = False
 
     def requirement(value: str) -> str:
-        if _REQUIREMENT.fullmatch(value):
+        # Installers interpret bare archive filenames as local sources, even
+        # though their spelling also fits a Python distribution name.
+        if _REQUIREMENT.fullmatch(value) and (
+            "==" in value or not value.lower().endswith(_DISTRIBUTION_SUFFIXES)
+        ):
             return value
         # Expand only a literal commit variable, never arbitrary shell expressions.
         for name, commit in constants.items():
             value = value.replace("${" + name + "}", commit)
         if re.fullmatch(r"git\+https://[A-Za-z0-9.-]+/[A-Za-z0-9_./-]+\.git@[0-9a-f]{40}", value):
             return value
-        raise ValueError("nebius-terminus: verifier requirements must use exact version pins")
+        raise ValueError(
+            "nebius-terminus: verifier requirements must be package names, exact version pins, "
+            "or HTTPS Git sources pinned to full commits"
+        )
 
     def pytest_command(arguments: list[str], *, module: bool = False) -> str:
         if not arguments or any(
@@ -434,6 +442,7 @@ def _preparation_dockerfile(
     preparation = run(f"""apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
     {python_setup} && \\
     loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
+    loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
     {identity_setup} && \\
     {workspace_setup} && \\
     rm -rf /var/lib/apt/lists/* /root/.cache""")
