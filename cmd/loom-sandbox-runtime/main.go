@@ -280,13 +280,30 @@ func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not a regular file", 400)
 		return
 	}
-	if info.Size() > s.maxTransfer {
+	limit := s.maxTransfer
+	if raw := r.URL.Query().Get("max_bytes"); raw != "" {
+		requested, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || requested < 0 || requested > limit {
+			http.Error(w, "invalid file budget", 400)
+			return
+		}
+		limit = requested
+	}
+	if info.Size() > limit {
 		http.Error(w, "file too large", 413)
+		return
+	}
+	metadata, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		http.Error(w, "file metadata unavailable", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
 	w.Header().Set("X-File-Mode", strconv.FormatUint(uint64(info.Mode().Perm()), 8))
+	w.Header().Set("X-File-Unix-Mode", strconv.FormatUint(uint64(metadata.Mode), 8))
+	w.Header().Set("X-File-UID", strconv.FormatUint(uint64(metadata.Uid), 10))
+	w.Header().Set("X-File-GID", strconv.FormatUint(uint64(metadata.Gid), 10))
 	_, _ = io.CopyN(w, f, info.Size())
 }
 

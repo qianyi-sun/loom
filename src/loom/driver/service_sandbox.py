@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import os
 import re
 import shlex
@@ -253,6 +254,53 @@ class ServiceSandboxDriver:
             self._requests.discard(task)
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    async def inspect_reference_file(
+        self, path: PurePosixPath, *, max_bytes: int,
+    ) -> dict[str, int | str]:
+        """Hash a pinned regular executable through the trusted native file RPC.
+
+        The server rejects symlinks in every path component and reads metadata
+        from the same descriptor it streams. No task-owned executable is used.
+        """
+        client = self._running_client()
+        limit = min(max_bytes, self._max_transfer)
+        if limit < 0:
+            raise DriverError("reference inspection budget is negative")
+        task = asyncio.current_task()
+        assert task is not None
+        self._requests.add(task)
+        try:
+            async with client.stream(
+                "GET", "/file", params={"path": str(path), "max_bytes": str(limit)}, timeout=120,
+            ) as response:
+                response.raise_for_status()
+                try:
+                    size = int(response.headers["Content-Length"])
+                    mode = int(response.headers["X-File-Unix-Mode"], 8)
+                    uid = int(response.headers["X-File-UID"])
+                    gid = int(response.headers["X-File-GID"])
+                    if (not 0 <= size <= limit or not stat.S_ISREG(mode)
+                            or not mode & 0o111 or not 0 <= uid < 2**32
+                            or not 0 <= gid < 2**32):
+                        raise ValueError("invalid file metadata")
+                except (KeyError, ValueError) as exc:
+                    raise DriverError("reference metadata or inspection budget invalid") from exc
+                digest = hashlib.sha256()
+                received = 0
+                async for chunk in response.aiter_bytes():
+                    received += len(chunk)
+                    if received > size:
+                        raise DriverError("reference content exceeds declared size")
+                    digest.update(chunk)
+                if received != size:
+                    raise DriverError("reference content differs from declared size")
+                return {"path": str(path), "size_bytes": size, "mode": stat.S_IMODE(mode),
+                        "uid": uid, "gid": gid, "sha256": digest.hexdigest()}
+        except httpx.HTTPError as exc:
+            raise DriverError("sandbox reference inspection failed") from exc
+        finally:
+            self._requests.discard(task)
 
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
         if policy != self._network_policy:

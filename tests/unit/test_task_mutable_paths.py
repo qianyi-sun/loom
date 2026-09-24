@@ -42,3 +42,27 @@ def test_original_path_classes_are_not_rewritten():
              "/build", "/mnt", "/home/agent"]
     env = EnvironmentConfig(os="linux", workdir="/app", mutable_paths=paths)
     assert env.model_dump(mode="json")["mutable_paths"] == paths
+
+
+def test_exact_mutable_reference_files_round_trip_without_changing_defaults():
+    env = EnvironmentConfig(os="linux", workdir="/app", mutable_paths=["/root/.cache/pypoetry"],
+                            mutable_path_reference_files=["/usr/local/bin/python3.9"])
+    assert env.mutable_path_reference_files == (PurePosixPath("/usr/local/bin/python3.9"),)
+    assert env.model_dump(mode="json")["mutable_path_reference_files"] == ["/usr/local/bin/python3.9"]
+    assert "mutable_path_reference_files" not in EnvironmentConfig(os="linux").model_dump(mode="json")
+
+
+@pytest.mark.parametrize("references", [
+    ["/"], ["relative"], ["/usr/../tests/private"], ["/app/tool"], ["/cache/tool"],
+    ["/tests/private"], ["/loom/tool"], ["/opt/verifier/bin/python"], ["/run/tool"],
+    ["/usr/bin/python", "/usr/bin/python"], [f"/usr/bin/ref{i}" for i in range(17)],
+])
+def test_reference_files_cannot_overlap_transferred_or_private_state(references):
+    with pytest.raises(ValidationError):
+        EnvironmentConfig(os="linux", workdir="/app", mutable_paths=["/cache"],
+                          mutable_path_reference_files=references)
+
+
+def test_reference_files_require_mutable_directory_declaration():
+    with pytest.raises(ValidationError):
+        EnvironmentConfig(os="linux", mutable_path_reference_files=["/usr/bin/python"])

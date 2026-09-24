@@ -264,3 +264,62 @@ echo '{}' > /logs/verifier/ctrf.json
     await run_verifier(controller, task, trial)
     result = json.loads((controller / ".loom/verifier/output.json").read_bytes())
     assert result["rewards"] == {"resolved": 1, "passed": 1}
+
+
+async def test_native_virtualenv_handoff_preserves_external_interpreter_and_aliases(sandboxes, tmp_path):
+    agent, verifier, _ = sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec("mkdir -p /app /root/.cache/task")).return_code == 0
+    made = await agent.exec(
+        "/usr/local/bin/python3.11 -m venv --without-pip /root/.cache/task/venv && "
+        "echo cache-state > /root/.cache/task/marker && "
+        "find /root/.cache/task/venv/bin -type l -exec readlink {} \\;"
+    )
+    assert made.return_code == 0, made.stderr
+    assert b"/usr/local/bin/python3.11" in made.stdout
+    await agent.stop_processes()
+    paths = (PurePosixPath("/root/.cache/task"),)
+    options = {"workdir": PurePosixPath("/app"),
+               "reference_files": (PurePosixPath("/usr/local/bin/python3.11"),)}
+    await export_mutable_paths(agent, paths, tmp_path / "snapshot", **options)
+    await import_mutable_paths(verifier, paths, tmp_path / "snapshot", **options)
+    links = await verifier.exec("find /root/.cache/task/venv/bin -type l -exec readlink {} \\;")
+    assert links.return_code == 0 and links.stdout == made.stdout
+    executed = await verifier.exec(
+        "/root/.cache/task/venv/bin/python -c 'import sys; from pathlib import Path; "
+        "assert sys.prefix == \"/root/.cache/task/venv\"; "
+        "assert Path(\"/root/.cache/task/marker\").read_text() == \"cache-state\\n\"; print(\"preserved\")'"
+    )
+    assert executed.return_code == 0 and executed.stdout.strip() == b"preserved"
+
+
+@pytest.mark.parametrize("mutation_stage", ["before_export", "during_export"])
+async def test_mutated_reference_cannot_forge_its_fingerprint_with_task_utilities(sandboxes, tmp_path, mutation_stage):
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+    agent, verifier, _ = sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec("mkdir -p /app /cache; echo untouched > /cache/baseline")).return_code == 0
+    forged = await agent.exec(r"""set -eu
+original=$(sha256sum < /usr/local/bin/python3.11)
+printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$original" > /usr/local/bin/sha256sum
+chmod 0755 /usr/local/bin/sha256sum
+ln -s /usr/local/bin/python3.11 /cache/python
+""")
+    assert forged.return_code == 0, forged.stderr
+    mutation = "printf X | dd of=/usr/local/bin/python3.11 bs=1 seek=100 conv=notrunc status=none"
+    if mutation_stage == "before_export":
+        assert (await agent.exec(mutation)).return_code == 0
+    else:
+        wrapper = tmp_path / "tar"
+        wrapper.write_text('#!/bin/sh\n' + mutation + '\nexec /bin/tar "$@"\n')
+        wrapper.chmod(0o755)
+        await agent.upload(wrapper, PurePosixPath("/usr/local/bin/tar"))
+    await agent.stop_processes()
+    paths = (PurePosixPath("/cache"),)
+    options = {"workdir": PurePosixPath("/app"),
+               "reference_files": (PurePosixPath("/usr/local/bin/python3.11"),)}
+    await export_mutable_paths(agent, paths, tmp_path / "snapshot", **options)
+    with pytest.raises(WorkspaceSnapshotError, match="reference"):
+        await import_mutable_paths(verifier, paths, tmp_path / "snapshot", **options)
+    assert (await verifier.exec("cat /cache/baseline")).stdout.strip() == b"untouched"

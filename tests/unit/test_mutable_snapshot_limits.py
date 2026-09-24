@@ -36,3 +36,27 @@ def test_archive_evidence_refuses_symlink(tmp_path):
     link.symlink_to(target)
     with pytest.raises(WorkspaceSnapshotError, match="regular file"):
         snapshot._archive_evidence(link)
+
+
+async def test_reference_budget_is_shared_and_drivers_without_trusted_inspection_fail(monkeypatch):
+    from pathlib import PurePosixPath
+
+    from loom.errors import DriverError
+
+    references = (PurePosixPath('/bin/first'), PurePosixPath('/bin/second'))
+    with pytest.raises(WorkspaceSnapshotError, match='trusted'):
+        await snapshot._reference_evidence(object(), references)
+
+    inspected = []
+
+    class Inspector:
+        async def inspect_reference_file(self, path, *, max_bytes):
+            inspected.append((path, max_bytes))
+            if max_bytes < 7:
+                raise DriverError('reference over budget')
+            return {'size_bytes': 7}
+
+    monkeypatch.setattr(snapshot, 'MAX_MUTABLE_BYTES', 10)
+    with pytest.raises(WorkspaceSnapshotError, match='reference'):
+        await snapshot._reference_evidence(Inspector(), references)
+    assert inspected == [(references[0], 10), (references[1], 3)]

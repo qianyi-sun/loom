@@ -113,6 +113,7 @@ class EnvironmentConfig(BaseModel):
     healthcheck: HealthcheckSpec | None = None
     workdir: PurePosixPath = PurePosixPath("/workspace")
     mutable_paths: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
+    mutable_path_reference_files: tuple[PurePosixPath, ...] = Field(default=(), max_length=16)
     preserve_acls: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     service_lifecycle: ServiceLifecycleConfig | None = None
     execution_requirements: TaskExecutionRequirementsV1 | None = Field(
@@ -141,15 +142,19 @@ class EnvironmentConfig(BaseModel):
         payload: dict[str, Any] = handler(self)
         if not self.mutable_paths:
             payload.pop("mutable_paths", None)
+        if not self.mutable_path_reference_files:
+            payload.pop("mutable_path_reference_files", None)
         if self.service_lifecycle is None:
             payload.pop("service_lifecycle", None)
         return payload
 
     @model_validator(mode="after")
     def _validate_mutable_paths(self) -> EnvironmentConfig:
-        from loom.mutable_paths import validate_mutable_paths
+        from loom.mutable_paths import validate_mutable_paths, validate_mutable_reference_files
 
         validate_mutable_paths(self.mutable_paths, workdir=self.workdir)
+        validate_mutable_reference_files(self.mutable_path_reference_files,
+                                         paths=self.mutable_paths, workdir=self.workdir)
         return self
 
     @model_validator(mode="after")

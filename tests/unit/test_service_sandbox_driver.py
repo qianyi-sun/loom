@@ -215,3 +215,69 @@ def test_unrecognized_exec_reason_is_not_published() -> None:
     response = httpx.Response(400, request=request, headers={"X-Loom-Sandbox-Error": "private-value"})
     error = SandboxRPCError("/exec", httpx.HTTPStatusError("private-error", request=request, response=response))
     assert str(error) == "sandbox exec failed (HTTP 400; http_error)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers", [
+    {"Content-Length": "9"},
+    {"X-File-Unix-Mode": "100644"},
+    {"X-File-Unix-Mode": "120755"},
+    {"X-File-UID": "-1"},
+    {"X-File-GID": "invalid"},
+])
+async def test_reference_rejects_bad_metadata_before_reading_body(tmp_path, headers):
+    import httpx
+
+    class UnreadableBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            pytest.fail("rejected reference content must not be read")
+            yield b""
+
+    metadata = {"Content-Length": "7", "X-File-Unix-Mode": "100755",
+                "X-File-UID": "0", "X-File-GID": "0", **headers}
+
+    def handle(request):
+        assert request.url.params["max_bytes"] == "7"
+        return httpx.Response(200, headers=metadata, stream=UnreadableBody())
+
+    driver = driver_for(tmp_path / "unused.sock")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://sandbox")
+    try:
+        with pytest.raises(DriverError, match="reference"):
+            await driver.inspect_reference_file(PurePosixPath("/bin/interpreter"), max_bytes=7)
+        assert not driver._requests
+    finally:
+        await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_reference_inspection_and_closes_stream(tmp_path):
+    import httpx
+
+    reading, closed = asyncio.Event(), asyncio.Event()
+
+    class PendingBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            reading.set()
+            await asyncio.Event().wait()
+            yield b'x'
+
+        async def aclose(self):
+            closed.set()
+
+    def handle(request):
+        return httpx.Response(200, stream=PendingBody(), headers={
+            'Content-Length': '1', 'X-File-Unix-Mode': '100755',
+            'X-File-UID': '0', 'X-File-GID': '0'})
+
+    driver = driver_for(tmp_path / 'unused.sock')
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url='http://sandbox')
+    inspection = asyncio.create_task(driver.inspect_reference_file(PurePosixPath('/bin/python'), max_bytes=1))
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=2)
+        await driver.stop()
+        with pytest.raises(asyncio.CancelledError):
+            await inspection
+        assert closed.is_set() and not driver._requests
+    finally:
+        await driver.stop()
