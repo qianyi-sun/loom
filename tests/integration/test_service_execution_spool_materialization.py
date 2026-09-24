@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import urllib3
+from alembic import command
 from minio import Minio
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
@@ -30,6 +31,7 @@ from loom.db.schema import (
     Artifact,
     LlmCall,
     ServiceExecutionLease,
+    ServiceExecutionLeaseHistory,
     Task,
     TaskImageMaterialization,
     Team,
@@ -60,6 +62,7 @@ from loom_control_plane.service_execution_output import (
     ServiceExecutionPeerV1,
 )
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+from tests.integration.test_migration_service_execution_materialization import _config
 from tests.integration.test_service_execution_leases import (
     _complete_output_contract,
     _reserve,
@@ -132,14 +135,15 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery",
-    [pytest.param(False, False, False, False, False, False, id="direct"),
-     pytest.param(True, False, False, False, False, False, id="terminus"),
-     pytest.param(True, True, False, False, False, False, id="accounting-repair"),
-     pytest.param(True, True, True, False, False, False, id="prepared-snapshot"),
-     pytest.param(True, False, False, True, False, False, id="typed-failure"),
-     pytest.param(True, False, False, False, True, False, id="verifier-archive"),
-     pytest.param(True, False, False, False, True, True, id="verifier-archive-corrupt")],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade",
+    [pytest.param(False, False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, False, id="verifier-archive-corrupt"),
+     pytest.param(True, False, False, False, True, False, True, id="verifier-archive-history-upgrade")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
@@ -148,6 +152,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     typed_failure: bool,
     archival_recovery: bool,
     corrupt_recovery: bool,
+    archival_history_upgrade: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -541,6 +546,14 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 await session.rollback()
             assert not await materializer().run_once(lease_id=lease.id)
             assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=uuid4())
+            async with sessions() as session:
+                histories_before = {
+                    item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                    for item in (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                        ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                }
+            if archival_history_upgrade:
+                await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
             requeues = await asyncio.gather(*(
                 materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
                 for _ in range(2)
@@ -549,6 +562,17 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
                 assert current.materialization_recovery_requested_at is not None
+                histories = (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                    ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                assert {item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                        for item in histories if item.id in histories_before} == histories_before
+                new_history = [item for item in histories if item.id not in histories_before]
+                assert len(new_history) == (0 if archival_history_upgrade else 1)
+                if not archival_history_upgrade:
+                    assert datetime.fromisoformat(new_history[0].snapshot_json[
+                        "materialization_recovery_requested_at"
+                    ]) == current.materialization_recovery_requested_at
+                    assert new_history[0].snapshot_json["materialization_state"] == "pending"
                 with pytest.raises(DBAPIError, match="archival recovery requires one diagnosed deleted verifier attempt"):
                     await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
                         "WHERE id=:id"), {"id": lease.id})
@@ -635,6 +659,41 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert next(event.payload for event in events if event.kind == "verifier_end")["result"]["rewards"] == {"passed": 0.0}
                 assert artifact.artifact_metadata["legacy_verifier_archival_recovery"]["error_code"] == "verifier_reward_drift"
             assert len({event.seq for event in events}) == len(events)
+
+        if archival_history_upgrade:
+            async with sessions() as session:
+                lease_before = await session.scalar(text(
+                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id})
+            await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
+            async with sessions() as session:
+                assert await session.scalar(text(
+                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id}) == lease_before
+                trial = await session.get(Trial, trial_id)
+                assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
+                        trial.failure_message, trial.attempt_count) == original_outcome
+                first_history = (await session.execute(text(
+                    "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
+                    "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all()
+            # A rollback/re-upgrade must retain the first audit and never append a duplicate.
+            await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
+            await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
+            async with sessions() as session:
+                assert (await session.execute(text(
+                    "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
+                    "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all() == first_history
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                histories = (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                    ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                assert {item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                        for item in histories if item.id in histories_before} == histories_before
+                new_history = [item for item in histories if item.id not in histories_before]
+                assert len(new_history) == 1, "Upgrade must observe the already-committed recovery"
+                assert datetime.fromisoformat(new_history[0].snapshot_json[
+                    "materialization_recovery_requested_at"
+                ]) == current.materialization_recovery_requested_at
+                assert new_history[0].snapshot_json["materialization_state"] == "committed"
+                assert new_history[0].changed_at >= current.materialization_committed_at
 
         if legacy_repair:
             from loom_control_plane.service_execution_accounting_repair import repair_accounting

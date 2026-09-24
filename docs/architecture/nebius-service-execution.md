@@ -569,8 +569,11 @@ drift remains an integrity error.
 
 The [archival recovery command](../runbooks/nebius-verifier-archive-recovery.md)
 selects an owning team and deleted, finalized current-attempt lease with committed
-source and `verifier_reward_drift`. It records a one-use timestamp in lease
-history and requeues only archival work. Database guards reject other terminal
+source and `verifier_reward_drift`. It records a one-use timestamp and requeues
+only archival work. Migration `0158` includes that timestamp in the history trigger
+and appends a current snapshot for recoveries from `0157` that lack one. It retains
+the original timestamp, lease values, Trial outcome and existing history rows; the
+new snapshot time records the later observation, not an earlier recovery event. Database guards reject other terminal
 reopenings or changes to execution identity/state. Normal claim fencing, source
 validation and canonical acknowledgement still apply. Recovery, including a
 failed recovery, preserves the Trial's original outcome, failure and finish time.
