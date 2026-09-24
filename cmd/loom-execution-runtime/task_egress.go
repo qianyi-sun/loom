@@ -117,7 +117,7 @@ func (a *taskEgressAudit) record(d webDestination, outcome string) {
 }
 
 func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, digest string, deadline time.Time) (net.Conn, error) {
-	endpoint := b.endpoint("/internal/service-execution/task-egress")
+	endpoint := b.endpoint("/task-egress")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
