@@ -29,7 +29,7 @@ def configuration(tmp_path):
         "state_dir": str(tmp_path / "nebius-ingress" / "state"),
         "certificate_config": str(tmp_path / "nebius-certificates" / "installation.json"),
         "kubeconfig": str(tmp_path / "kubeconfig"), "kubectl": "/usr/local/bin/kubectl",
-        "cluster_id": "mk8s-e00fixture", "api_server": "https://192.0.2.1:443",
+        "cluster_id": "mk8scluster-e00fixture", "api_server": "https://192.0.2.1:443",
         "ingress_class": "loom-shared",
         "image": "cr.eu-north1.nebius.cloud/registry/loom-shared-ingress@sha256:" + "c" * 64,
         "binding": {
@@ -132,6 +132,17 @@ def test_metadata_fails_closed_before_extraction(tmp_path, field, value):
     files = inputs(tmp_path)
     config = configuration(tmp_path)
     config[field] = value
+    files["installation.json"] = json.dumps(config).encode()
+    with pytest.raises(module().BootstrapError):
+        module().prepare_release(archive(files))
+    assert not (tmp_path / "nebius-ingress").exists()
+
+
+@pytest.mark.parametrize("cluster_id", ["mk8s-e00fixture", "mk8scluster-", "mk8scluster-UPPER", "mk8scluster-a/other"])
+def test_invalid_cluster_identity_rejected_before_creating_private_release(tmp_path, cluster_id):
+    files = inputs(tmp_path)
+    config = configuration(tmp_path)
+    config["cluster_id"] = cluster_id
     files["installation.json"] = json.dumps(config).encode()
     with pytest.raises(module().BootstrapError):
         module().prepare_release(archive(files))

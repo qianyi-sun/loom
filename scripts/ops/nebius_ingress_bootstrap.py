@@ -51,6 +51,8 @@ def validate_config(config: dict[str, Any]) -> None:
         for key in ("source_sha", "candidate"):
             if not re.fullmatch(r"[0-9a-f]{40}", config[key]):
                 raise ValueError()
+        if not re.fullmatch(r"mk8scluster-[a-z0-9]+", config["cluster_id"]):
+            raise ValueError()
         for key in ("installation_id", "certificate_installation_id", "namespace_uid", "kube_system_uid"):
             value = config["binding"][key]
             if str(UUID(value)) != value or UUID(value).int == 0:

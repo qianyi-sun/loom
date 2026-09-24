@@ -20,6 +20,7 @@ def loading_client(monkeypatch):
     monkeypatch.setattr(fixture.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(config, "load_kube_config_from_dict", lambda payload: None)
     core = SimpleNamespace(get_api_resources=lambda **kwargs: object())
+    core.read_namespaced_service = lambda *args, **kwargs: SimpleNamespace(spec=SimpleNamespace(cluster_ip="10.43.0.1"))
     batch = object()
     monkeypatch.setattr(client, "CoreV1Api", lambda: core)
     monkeypatch.setattr(client, "BatchV1Api", lambda: batch)
@@ -88,6 +89,54 @@ def test_client_missing_system_namespace_has_bounded_wait(loading_client):
     with pytest.raises(AssertionError, match="kube-system"):
         fixture._load_client(container)
     assert clock[0] == 90
+
+
+@pytest.mark.parametrize("pending", ["absent", "unallocated"])
+def test_client_waits_for_bootstrap_service_allocation(loading_client, pending):
+    container, core, batch, clock = loading_client
+    core.read_namespace = lambda *args, **kwargs: object()
+    reads = []
+
+    def service(name, namespace, *, _request_timeout):
+        assert (name, namespace) == ("kubernetes", "default") and 0 < _request_timeout <= 5
+        reads.append(1)
+        if len(reads) == 1:
+            if pending == "absent":
+                raise ApiException(status=404, reason="service allocator bootstrap pending")
+            return SimpleNamespace(spec=SimpleNamespace(cluster_ip=None))
+        return SimpleNamespace(spec=SimpleNamespace(cluster_ip="10.43.0.1"))
+
+    core.read_namespaced_service = service
+    assert fixture._load_client(container)[1:] == (core, batch)
+    assert len(reads) == 2 and clock[0] > 0
+
+
+def test_client_missing_bootstrap_service_has_bounded_wait(loading_client):
+    container, core, _, clock = loading_client
+    core.read_namespace = lambda *args, **kwargs: object()
+
+    def missing(*args, **kwargs):
+        raise ApiException(status=404, reason="service allocator bootstrap pending")
+
+    core.read_namespaced_service = missing
+    with pytest.raises(AssertionError, match="Service"):
+        fixture._load_client(container)
+    assert clock[0] == 90
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_bootstrap_service_observation_does_not_retry_other_errors(loading_client, status):
+    container, core, _, clock = loading_client
+    core.read_namespace = lambda *args, **kwargs: object()
+    error = ApiException(status=status, reason="not a missing service")
+
+    def failed(*args, **kwargs):
+        raise error
+
+    core.read_namespaced_service = failed
+    with pytest.raises(ApiException) as caught:
+        fixture._load_client(container)
+    assert caught.value is error and clock[0] == 0
 
 
 @pytest.mark.parametrize("status", [403, 500])
