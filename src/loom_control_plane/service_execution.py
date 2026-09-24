@@ -660,6 +660,9 @@ async def reserve_trial_execution(
         raise ServiceExecutionConflict("execution target health is stale")
     if runtime_contract.execution_class_id != execution_class_id:
         raise ServiceExecutionConflict("runtime plan binds a different execution class")
+    if (runtime_contract.node_resource_allocation is not None
+            and runtime_contract.node_resource_allocation.target_id != target_id):
+        raise ServiceExecutionConflict("runtime allocation binds a different execution target")
     class_contract = ExecutionClassV1.model_validate(execution_class.spec_json)
     # The Trial association is the authority for user task images. Hold both
     # rows through reservation so retirement cannot race a new execution.
@@ -1505,7 +1508,8 @@ async def record_execution_event(
         lease.last_event_ordinal = ordinal
     if event_kind == "heartbeat" and advances_projection:
         lease.last_heartbeat_at = observed_at
-    if event_kind in _EVENT_TO_OBSERVED and advances_projection:
+    if (event_kind in _EVENT_TO_OBSERVED and advances_projection
+            and not (event_kind == "failed" and lease.finalized_at is not None)):
         lease.observed_state = _EVENT_TO_OBSERVED[event_kind]
     if event_kind == "kubernetes_observed" and advances_projection:
         normalized_state = payload.get("normalized_state")
@@ -1732,6 +1736,22 @@ async def record_execution_event(
                 # Native attempts do not call the legacy worker PATCH /state.
                 # Update the durable Trial so list, batch and monitor agree.
                 trial.state = "running"
+    if event_kind in {"kubernetes_observed", "failed", "finalized"}:
+        from loom.execution_diagnosis_store import read_execution_failure
+
+        # Facts can arrive after runtime finalization or out of delivery order.
+        # Enrich the existing failed outcome; never reopen it or alter artifacts.
+        await session.flush()
+        diagnosis = await read_execution_failure(session, lease)
+        if diagnosis is not None:
+            lease.error_class = "permanent"
+            lease.error_code = "oom_killed"
+            lease.error_message = diagnosis["message"]
+            diagnosed_trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            if (diagnosed_trial is not None and diagnosed_trial.state == "failed"
+                    and diagnosed_trial.attempt_count == lease.attempt):
+                diagnosed_trial.failure_reason = "oom_killed"
+                diagnosed_trial.failure_message = diagnosis["message"]
     lease.updated_at = datetime.now(UTC)
     await session.flush()
     return event, False
@@ -2099,8 +2119,8 @@ async def finalize_failed_service_execution(
     lease.finalized_at = observed_at
     lease.observed_state = "finalized"
     trial.state = "failed"
-    trial.failure_reason = "native_execution_failed"
-    trial.failure_message = message
+    trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
+    trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
     trial.finished_at = observed_at
     await enqueue_execution_transition(
         session,

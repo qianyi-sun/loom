@@ -111,7 +111,10 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
             current = await session.get(ServiceExecutionLease, lease.id)
             assert current.observed_state == "failed"
             assert current.error_code == ("oom_killed" if initial_oom else "failed")
-            assert current.error_message == "task-sandbox lost its attempt process state"
+            if initial_oom:
+                assert "OOMKilled" in current.error_message
+            else:
+                assert current.error_message == "task-sandbox lost its attempt process state"
             assert current.revoked_at is None
             assert current.output_commit_state == "not_started"
             assert kubernetes.delete_count == 0
@@ -151,7 +154,8 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
         async with sessions() as session:
             trial = await session.get(Trial, trial_id)
             assert trial.state == "failed"
-            assert "SandboxRestarted" in trial.failure_message
+            assert ("OOMKilled" if initial_oom else "SandboxRestarted") in trial.failure_message
+            assert trial.failure_reason == ("oom_killed" if initial_oom else "native_execution_failed")
         # A final status update can first arrive on the deletion path.
         kubernetes.jobs[lease.job_name] = kubernetes.jobs[lease.job_name].model_copy(
             update={
@@ -173,6 +177,13 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
                     )
                 ).all()
             )
+            if initial_oom:
+                from loom.execution_diagnosis_store import read_execution_failure
+                current = await session.get(ServiceExecutionLease, lease.id)
+                retained = await read_execution_failure(session, current)
+                assert retained["reason"] == "oom_killed"
+                assert retained["container_incarnation"] == 0
+                assert retained["supporting_events"]
             assert any(
                 event.payload_json["container_diagnostics"][0]["previous_termination"]["reason"]
                 == ("OOMKilled" if initial_oom else "Error")

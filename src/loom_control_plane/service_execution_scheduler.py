@@ -33,6 +33,7 @@ from loom.task_image_materialization import (
     resolve_prepared_task,
 )
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import reserve_trial_execution
 
 _LOG = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ async def _reserve_service_candidate(
     task_revision = _task_revision(grant.task_checksum if grant else row["task_checksum"])
     source_provenance = (grant.task_source_provenance if grant
                          else dict(row["task_source_provenance"] or {}))
+    allocate_resources = False
     binding = task.service_execution
     if binding is not None:
         if (row["batch_runtime_profile"] or {}).get("task_resource_requests", {}).get(row["task_id"]):
@@ -268,6 +270,7 @@ async def _reserve_service_candidate(
         if raw_profile is None:
             return None
         runtime_profile = ServiceExecutionRuntimeProfileV1.model_validate(raw_profile)
+        allocate_resources = runtime_profile.resource_allocation_policy == "node-share-v1"
         if runtime_profile.logical_pool_id != pool_id:
             raise ValueError("queued service-execution runtime profile pool drift")
         runtime_plan = compile_service_execution_plan(
@@ -299,6 +302,9 @@ async def _reserve_service_candidate(
         target_id = target.id
         try:
             async with session.begin_nested():
+                allocated_plan = (await allocate_target_resources(
+                    session, runtime_plan, target_id=target_id, now=current_time,
+                ) if allocate_resources else runtime_plan)
                 lease = await reserve_trial_execution(
                     session,
                     request_id=canonical_uuid5(
@@ -310,7 +316,7 @@ async def _reserve_service_candidate(
                             "target_id": target_id,
                             "task_revision_sha256": task_revision,
                             "runtime_contract_sha256": canonical_digest(
-                                runtime_plan.canonical_payload()
+                                allocated_plan.canonical_payload()
                             ),
                         },
                     ),
@@ -318,7 +324,7 @@ async def _reserve_service_candidate(
                     execution_class_id=runtime_plan.execution_class_id,
                     target_id=target_id,
                     requirements=requirements,
-                    runtime_contract=runtime_plan,
+                    runtime_contract=allocated_plan,
                     image_admission_keyring=image_admission_keyring,
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
                     deadline_at=deadline_at,

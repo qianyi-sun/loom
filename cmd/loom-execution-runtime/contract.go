@@ -116,7 +116,16 @@ type executionResourceRequests struct {
 	VerifierSandbox *resources `json:"verifier_sandbox,omitempty"`
 }
 
+type nodeResourceAllocation struct {
+	Policy        string    `json:"policy"`
+	TargetID      string    `json:"target_id"`
+	UsableNode    resources `json:"usable_node"`
+	BaselineSlots int64     `json:"baseline_slots"`
+	DeclaredTask  resources `json:"declared_task"`
+}
+
 type plan struct {
+	NodeResourceAllocation     *nodeResourceAllocation    `json:"node_resource_allocation,omitempty"`
 	TaskEgress                 *webAllowlist              `json:"task_egress,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
@@ -330,7 +339,7 @@ func (p plan) validate() error {
 		if !sandboxes["task-sandbox"] || !sandboxes["verifier-sandbox"] {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
-		if p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
+		if p.NodeResourceAllocation == nil && p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
 			return fmt.Errorf("controller sizing must preserve task-derived storage")
 		}
 		if p.ResourceRequests != nil {
@@ -360,6 +369,46 @@ func (p plan) validate() error {
 			}
 			if !configured {
 				return fmt.Errorf("resource requests must configure at least one container")
+			}
+		}
+	}
+	if allocation := p.NodeResourceAllocation; allocation != nil {
+		if allocation.Policy != "node-share-v1" || len(allocation.TargetID) == 0 || len(allocation.TargetID) > 80 {
+			return fmt.Errorf("invalid node resource allocation policy or target")
+		}
+		if err := allocation.UsableNode.validate(); err != nil {
+			return err
+		}
+		if err := allocation.DeclaredTask.validate(); err != nil {
+			return err
+		}
+		slots := allocation.UsableNode.CPUMillis / 1000
+		if slots < 1 {
+			slots = 1
+		}
+		if allocation.BaselineSlots != slots {
+			return fmt.Errorf("node allocation slot count does not match usable CPU")
+		}
+		minimum := allocation.DeclaredTask
+		if p.TaskResources.CPUMillis < minimum.CPUMillis || p.TaskResources.MemoryMiB < minimum.MemoryMiB || p.TaskResources.EphemeralStorageMiB < minimum.EphemeralStorageMiB {
+			return fmt.Errorf("node allocation cannot reduce declared task requirements")
+		}
+		if p.ResourceRequests != nil {
+			controller := p.TaskResources
+			if p.ControllerResources != nil {
+				controller = *p.ControllerResources
+			}
+			for _, pair := range []struct {
+				request *resources
+				limit   resources
+			}{
+				{p.ResourceRequests.Controller, controller},
+				{p.ResourceRequests.TaskSandbox, p.TaskResources},
+				{p.ResourceRequests.VerifierSandbox, p.TaskResources},
+			} {
+				if pair.request != nil && pair.request.MemoryMiB != pair.limit.MemoryMiB {
+					return fmt.Errorf("node allocation memory requests must equal limits")
+				}
 			}
 		}
 	}

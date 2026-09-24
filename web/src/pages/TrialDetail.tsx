@@ -178,6 +178,24 @@ function MaterializationCard({
         }
       />
       <Card.Body className="space-y-4">
+        {materialization.resource_allocation ? (
+          <section aria-label="Execution resource allocation" className="space-y-2">
+            <h3 className="font-semibold">Reserved execution resources</h3>
+            <p className="text-sm text-slate-600">
+              Task requirements are minimums. Memory reservations equal container limits;
+              the controller and both sandboxes share the node budget.
+            </p>
+            <ul className="space-y-1 text-sm">
+              {materialization.resource_allocation.containers.map((container) => (
+                <li key={container.role}>
+                  <strong>{container.role}</strong>: {container.requests.cpu_millis / 1000} CPU reserved,
+                  {" "}{container.requests.memory_mib / 1024} GiB memory reserved / {container.limits.memory_mib / 1024} GiB limit,
+                  {" "}{container.requests.ephemeral_storage_mib / 1024} GiB temporary storage reserved.
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatCard label="Backend" value={materialization.backend} />
           <StatCard label="Pool" value={materialization.pool_id} />

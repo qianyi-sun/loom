@@ -557,6 +557,14 @@ describe("TrialDetail trajectory section", () => {
         ...TRIAL_BODY,
         state: "materializing",
         materialization: {
+          resource_allocation: {
+            policy: "node-share-v1", baseline_slots: 16,
+            declared_task: { cpu_millis: 1000, memory_mib: 4096, ephemeral_storage_mib: 2048 },
+            pod_requests: { cpu_millis: 2200, memory_mib: 15360, ephemeral_storage_mib: 8192 },
+            containers: [{ role: "task-sandbox",
+              requests: { cpu_millis: 1000, memory_mib: 7168, ephemeral_storage_mib: 2048 },
+              limits: { cpu_millis: 1000, memory_mib: 7168, ephemeral_storage_mib: 2048 } }],
+          },
           state: "committed",
           lifecycle_stage: "materializing",
           compute_state: "succeeded",
@@ -609,6 +617,9 @@ describe("TrialDetail trajectory section", () => {
       { route: `/trials/${TRIAL_ID}` },
     );
 
+    expect(await screen.findByRole("region", { name: "Execution resource allocation" })).toHaveTextContent(
+      "7 GiB memory reserved / 7 GiB limit",
+    );
     expect(await screen.findByText("Securing complete Trial output")).toBeInTheDocument();
     expect(screen.getByText("Complete Trial bundle ready")).toBeInTheDocument();
     expect(screen.getByText("Worker output transfer: committed")).toBeInTheDocument();

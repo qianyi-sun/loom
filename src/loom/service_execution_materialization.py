@@ -127,6 +127,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
     controller_resources: ControllerComputeResourcesV1 | None = None
+    resource_allocation_policy: Literal["node-share-v1"] | None = None
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
@@ -145,6 +146,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
         payload: dict[str, Any] = handler(self)
+        if self.resource_allocation_policy is None:
+            payload.pop("resource_allocation_policy", None)
         if not self.supports_task_web_egress:
             payload.pop("supports_task_web_egress", None)
         if not self.task_resource_requests:
@@ -198,6 +201,7 @@ def build_nebius_runtime_profile(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    resource_allocation_policy: Literal["node-share-v1"] | None = None,
 ) -> ServiceExecutionRuntimeProfileV1:
     """Construct publisher profiles with the class matching explicit capabilities.
 
@@ -205,6 +209,7 @@ def build_nebius_runtime_profile(
     builder to silently replace a declared catalog identity.
     """
     return ServiceExecutionRuntimeProfileV1(
+        resource_allocation_policy=resource_allocation_policy,
         candidate_sha=candidate_sha,
         execution_class_id=nebius_cpu_execution_class(
             supports_task_web_egress=supports_task_web_egress,

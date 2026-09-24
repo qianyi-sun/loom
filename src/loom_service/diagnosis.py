@@ -52,6 +52,13 @@ _BATCH_FAILURE_ACTIONS: dict[str, tuple[str, ...]] = {
 }
 
 _REASON_META: dict[str, _ReasonMeta] = {
+    "trial.oom_killed": _ReasonMeta(
+        label="Container memory limit exceeded", category="resource", attribution="resource_limit",
+        trial_summary="A container exceeded its memory limit and was terminated by the system.",
+        batch_summary="Failed trials include confirmed container memory-limit terminations.",
+        impact="Execution stopped; retained partial trajectories and usage remain available.",
+        actions=("inspect_trajectory", "generic"),
+    ),
     "trial.gateway_error": _ReasonMeta(
         label="Provider gateway failure",
         category="gateway",
@@ -560,7 +567,7 @@ def build_trial_diagnosis(evidence: Mapping[str, Any]) -> dict[str, Any]:
         )
     affected = 0 if active else 1
     actions = [_action(action_id, evidence=evidence) for action_id in meta.actions]
-    report = {
+    report: dict[str, Any] = {
         "schema_version": "1",
         "generated_at": _iso_now(),
         "entity": {
@@ -598,6 +605,14 @@ def build_trial_diagnosis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             }
         ],
     }
+    native = _mapping(evidence.get("execution_failure"))
+    if native.get("reason") == "oom_killed" and reason_code == "trial.oom_killed" and not active:
+        report["summary"] = str(native["message"])
+        report["evidence"].extend([
+            f"Stage: {native['stage']}; container: {native['container_role']}; incarnation: {native['container_incarnation']}.",
+            f"Termination: {native.get('terminated_at') or 'unknown'}; exit code: {native.get('exit_code')}; memory limit: {native.get('memory_limit_mib')} MiB.",
+            "Kernel termination evidence is independent of sampled peaks; missing peak data is not zero usage.",
+        ])
     return cast(dict[str, Any], redact_mapping(report))
 
 

@@ -40,6 +40,9 @@ from loom.db.schema import (
     TrialResourceUsage,
     User,
 )
+from loom.execution_diagnosis_store import execution_failure_groups, read_trial_execution_failure
+from loom.execution_resource_allocation import resource_allocation_summary
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
@@ -774,6 +777,9 @@ async def get_trial(
             }
     base["materialization"] = (
         {
+            "resource_allocation": (resource_allocation_summary(ExecutionRuntimePlanV1.model_validate(
+                materialization.runtime_contract_json,
+            )) if materialization.runtime_contract_json else None),
             "state": materialization.materialization_state,
             "lifecycle_stage": service_execution_lifecycle_stage(
                 trial_state=trial.state,
@@ -943,8 +949,12 @@ async def get_trial(
         trial,
         task=task,
         llm_calls=llm_calls,
+        execution_failure=await read_trial_execution_failure(s, trial),
         **debug_context,
     )
+    if trial.state == "failed" and debug_evidence["failure"].get("reason") == "oom_killed":
+        base["failure_reason"] = "oom_killed"
+        base["failure_message"] = debug_evidence["failure"]["message"]
     base["debug_evidence"] = debug_evidence
     base["diagnosis"] = build_trial_diagnosis(debug_evidence)
     plan_row = await load_model_switch_plan(s, trial.id)
@@ -1039,7 +1049,9 @@ async def get_trial_resource_usage(
         .scalars()
         .all()
     )
-    return resource_usage_response(rows)
+    response = resource_usage_response(rows)
+    response["termination_failures"] = await execution_failure_groups(s, trial_id=trial_id)
+    return response
 
 
 @router.get("/trials/{trial_id}/debug", response_model=wire.DebugEvidence, response_model_exclude_unset=True)
@@ -1086,6 +1098,7 @@ async def get_trial_debug(
         trial,
         task=task,
         llm_calls=llm_calls,
+        execution_failure=await read_trial_execution_failure(s, trial),
         **debug_context,
     )
 
@@ -1134,6 +1147,7 @@ async def get_trial_diagnosis(
         trial,
         task=task,
         llm_calls=llm_calls,
+        execution_failure=await read_trial_execution_failure(s, trial),
         **debug_context,
     )
     return build_trial_diagnosis(debug_evidence)

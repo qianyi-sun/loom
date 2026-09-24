@@ -454,3 +454,45 @@ async def test_rerun_preserves_requests_and_drops_unselected_entries(native_reso
         assert detail.json()["task_resource_requests"] == {
             f["task_ids"][0]: payload["task_resource_requests"][f["task_ids"][0]],
         }
+
+
+@pytest.mark.parametrize("node_share", [False, True])
+async def test_node_share_submission_does_not_reject_small_task_with_retired_default(
+    native_resource_batch, node_share,
+):
+    f = native_resource_batch
+    _set_default_requests(f)
+    profile = ServiceExecutionRuntimeProfileV1.model_validate_json(
+        f["app"].state.settings.service_execution_runtime_profile_json,
+    )
+    if node_share:
+        profile = profile.model_copy(update={"resource_allocation_policy": "node-share-v1"})
+    f["app"].state.settings = f["app"].state.settings.model_copy(update={
+        "service_execution_runtime_profile_json": profile.model_dump_json(),
+    })
+    with f["sessions"]() as session:
+        for task_id in f["task_ids"]:
+            task = session.get(Task, task_id)
+            config = deepcopy(task.config)
+            config["environment"]["memory_mb"] = 256
+            task.config = config
+        session.commit()
+    payload = deepcopy(f["payload"])
+    payload.pop("task_resource_requests")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=f["app"]), base_url="http://svc") as client:
+        response = await client.post("/api/v1/batches", json=payload,
+            headers={"Authorization": "Bearer " + f["raw"]})
+    if not node_share:
+        assert response.status_code == 400 and "exceed hard limits" in response.text
+        return
+    assert response.status_code == 201, response.text
+    with f["sessions"]() as session:
+        batch = session.get(Batch, UUID(response.json()["batch_id"]))
+        frozen = ServiceExecutionRuntimeProfileV1.model_validate(batch.service_execution_runtime_profile)
+        assert frozen.task_resource_requests == {}
+        task = session.get(Task, f["task_ids"][0])
+        plan = compile_service_execution_plan(task=TaskConfig.model_validate(task.config),
+            trial=TrialConfig.model_validate(payload["trial_config"]), profile=frozen,
+            task_id=task.id, task_revision_sha256="sha256:" + task.checksum,
+            source_provenance=task.source_provenance)
+        assert plan.task_resources.memory_mib == 256

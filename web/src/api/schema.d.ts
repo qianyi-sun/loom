@@ -3556,6 +3556,10 @@ export interface components {
             evidence_refs?: {
                 [key: string]: unknown;
             };
+            /** Execution Failure */
+            execution_failure?: {
+                [key: string]: unknown;
+            } | null;
             failure: components["schemas"]["DebugEvidenceFailure"];
             /** Generated At */
             generated_at?: string;
@@ -3841,6 +3845,28 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** ExecutionContainerAllocation */
+        ExecutionContainerAllocation: {
+            limits: components["schemas"]["ExecutionResourceValues"];
+            requests: components["schemas"]["ExecutionResourceValues"];
+            /** Role */
+            role: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ExecutionResourceAllocation */
+        ExecutionResourceAllocation: {
+            /** Baseline Slots */
+            baseline_slots: number;
+            /** Containers */
+            containers: components["schemas"]["ExecutionContainerAllocation"][];
+            declared_task: components["schemas"]["ExecutionResourceValues"];
+            pod_requests: components["schemas"]["ExecutionResourceValues"];
+            /** Policy */
+            policy: string;
+        } & {
+            [key: string]: unknown;
+        };
         /**
          * ExecutionResourceRequestsV1
          * @description Optional scheduling requests; the task's executable limits stay intact.
@@ -3849,6 +3875,17 @@ export interface components {
             controller?: components["schemas"]["_ContainerResourceRequestsV1"] | null;
             task_sandbox?: components["schemas"]["_ContainerResourceRequestsV1"] | null;
             verifier_sandbox?: components["schemas"]["_ContainerResourceRequestsV1"] | null;
+        };
+        /** ExecutionResourceValues */
+        ExecutionResourceValues: {
+            /** Cpu Millis */
+            cpu_millis: number;
+            /** Ephemeral Storage Mib */
+            ephemeral_storage_mib: number;
+            /** Memory Mib */
+            memory_mib: number;
+        } & {
+            [key: string]: unknown;
         };
         /** FinalTrialSelection */
         FinalTrialSelection: {
@@ -7205,6 +7242,7 @@ export interface components {
             pod_terminated_at: string | null;
             /** Pool Id */
             pool_id: string;
+            resource_allocation?: components["schemas"]["ExecutionResourceAllocation"] | null;
             source_bundle: components["schemas"]["TrialDetailMaterializationVariant0SourceBundleVariant0"] | null;
             /** Source Cleanup Attempts */
             source_cleanup_attempts: number;

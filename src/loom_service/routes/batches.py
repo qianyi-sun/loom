@@ -45,6 +45,7 @@ from loom.db.schema import (
     User,
     Worker,
 )
+from loom.execution_diagnosis_store import execution_failure_groups
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
@@ -2287,6 +2288,7 @@ async def get_batch_resource_usage(
     )
     response = resource_usage_response(rows)
     response["batch_id"] = str(batch_id)
+    response["termination_failures"] = await execution_failure_groups(s, batch_id=batch_id)
     response["trials_with_telemetry"] = len({row.trial_id for row in rows})
     return response
 

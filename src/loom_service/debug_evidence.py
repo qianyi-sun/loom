@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
@@ -668,6 +669,7 @@ def build_trial_debug_evidence(
     worker: Any | None = None,
     last_event: Any | None = None,
     stale_running_decision: Any | None = None,
+    execution_failure: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     generated_at = now or datetime.now(UTC)
@@ -700,7 +702,12 @@ def build_trial_debug_evidence(
         trial,
         llm_calls_count=len(llm_calls),
     )
-    if no_call_failure is not None:
+    if execution_failure is not None and trial.state == "failed":
+        failure = classify_trial_outcome(SimpleNamespace(
+            state=trial.state, result=trial.result, failure_reason="oom_killed",
+            failure_message=execution_failure["message"],
+        ))
+    elif no_call_failure is not None:
         failure = no_call_failure
     elif (
         missing_required_failure := _missing_required_artifacts_failure(
@@ -710,6 +717,7 @@ def build_trial_debug_evidence(
     ) is not None:
         failure = missing_required_failure
     evidence = {
+        "execution_failure": execution_failure,
         "schema_version": "1",
         "generated_at": generated_at.isoformat(),
         "entity": {

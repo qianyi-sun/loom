@@ -61,11 +61,37 @@ alert on:
 These surfaces use the parent trial/batch team authorization. A legacy trial
 returns `items: []` plus aggregate `telemetry_status: unavailable`.
 
+## Confirmed native OOM failures
+
+The existing trial debug/diagnosis endpoints and `loom eval diagnose trial <trial-id>` report
+confirmed Kubernetes `OOMKilled` terminations independently of periodic usage
+samples. A sampled peak below the limit does not disprove a brief OOM spike;
+missing measurements remain unknown, never zero.
+
+The durable execution event history binds evidence to the lease, Job, Pod,
+container role and restart incarnation. Later authoritative termination evidence
+can enrich the original failed incarnation, including after runtime finalization.
+Exit 137 alone is insufficient. A replacement container's OOM cannot reclassify
+an earlier failure, and subsequent cleanup errors cannot overwrite a confirmed
+cause. Terminal outcomes and already-produced artifacts are preserved.
+
+`GET /api/v1/trials/{id}/debug` includes `execution_failure` with stage, role,
+incarnation, termination/start times, exit code, effective limits and supporting
+event ordinal. The diagnosis report used by the CLI and Web includes the same
+explanation and evidence. Facts remain readable after Pod cleanup from persisted
+events and the immutable execution plan. Unknown timestamps/limits are explicit.
+
+Both resource-usage endpoints additionally expose `termination_failures`, grouped
+by task, container role and effective CPU/memory/storage limits, with a
+`confirmed_oom_attempts` count. These are confirmed termination counts, separate
+from sampled peaks and telemetry completeness. They do not trigger automatic
+resource escalation or retries.
+
 ## Capacity calibration
 
 A bounded, explicit per-Batch request comparison may use a sampled cohort via
 [the native Terminus request override](nebius-terminus2.md#per-task-measured-overrides).
-Keep hard limits and fleet defaults unchanged and report incomplete telemetry.
+Use the frozen Trial allocation when comparing limits and reservations, and report incomplete telemetry.
 This comparison does not establish generally calibrated slot limits.
 
 For fleet-wide defaults, do not change slot limits from a small smoke. Collect at least 1,000
