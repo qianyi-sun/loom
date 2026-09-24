@@ -504,6 +504,13 @@ This proves routing, not management API availability or multi-owner acceptance.
 Scheduled renewal/delivery and DNS-token renewal remain separate operational work
 before accepting unattended management or personal environments.
 
+Ordinary application rollout also applies the existing `loom-web-origin` Service.
+Its `kubectl.kubernetes.io/last-applied-configuration` annotation is bookkeeping,
+not routing state: origin qualification ignores only that annotation when comparing
+the retained staging snapshot. The original journal remains unchanged. Service UID,
+ownership markers, other metadata, allocation, selector and ports still must match;
+this exception does not authorize adopting or modifying a different backend.
+
 ### Render management manifests
 
 Management HTTP requests default to a 1 MiB body limit, eight in-flight requests

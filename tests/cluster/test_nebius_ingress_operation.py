@@ -34,7 +34,6 @@ from scripts.ops.nebius_ingress_rollout import build_wheels
 from scripts.ops.nebius_ingress_stage import _snapshot as staged_snapshot
 
 from loom.nebius_platform_render import _service
-
 from tests.cluster.test_nebius_shared_ingress import (
     PYTHON,
     TRAEFIK,
@@ -409,6 +408,13 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             public.metadata.uid, public.spec.cluster_ip, public.spec.ports, public.spec.external_i_ps)
         assert after.metadata.annotations["foreign"] == "retained"
         assert core.read_namespaced_secret("legacy-tls", namespace).data == legacy.data
+        # Reconcile the backend exactly as an ordinary application rollout does
+        # before qualifying DNS. The initial staging journal is immutable.
+        stage_path = state / "stage" / (binding.installation_id + ".json")
+        completed_stage = stage_path.read_bytes()
+        ordinary_origin = _service("loom-web-origin", namespace, 443, 8443)
+        ordinary_origin["spec"]["selector"] = {"app": "loom-web"}
+        _run(container, "kubectl", "apply", "-f", "-", payload=json.dumps(ordinary_origin))
         # DNS publication uses the actual installed observer but a fake provider;
         # failure after the pair is created cannot alter ingress or pause work.
         cutover_path = state / "cutover/cutover.json"
@@ -434,6 +440,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
         assert publish_dns(**arguments, wait=lambda value: None)["status"] == "dns_published"
         assert dns.posts == ["*.dev", "management"]
         assert cutover_path.read_bytes() == completed_cutover
+        assert stage_path.read_bytes() == completed_stage
         alpn = original_context(cadata=old_tls["tls.crt"])
         alpn.set_alpn_protocols(["acme-tls/1"])
         with socket.create_connection((address, 443), timeout=5) as stream:
