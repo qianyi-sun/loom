@@ -730,6 +730,15 @@ container layer or expose private verifier dependencies to task mutations.
 The workdir snapshot also replaces public image and bundle contents rather than
 overlaying them, so files and symlinks removed by the agent stay absent during
 grading. Freshly staged private verifier inputs and their ancestors survive.
+For the exact generated Harbor wrapper at `verifier/run.sh`, the native runner
+instead stages private inputs at `/loom/verifier/task`. Private inputs and the
+verifier result then stay outside the public working directory, so recursive
+task inventories observe the same public files before and during grading.
+`LOOM_TASK_DIR` points to the private input root; the verifier command still
+runs with the original task working directory. Recognition checks the entire
+immutable wrapper, not markers or fragments. Custom and modified scripts retain
+their relative workspace layout, and ordinary script-verifier arguments are
+unchanged.
 Archive validation, a complete non-following destination inventory, and checks
 for symlink destinations and conflicting private ancestors precede deletion.
 Native cleanup and extraction both run as the sandbox's declared identity.

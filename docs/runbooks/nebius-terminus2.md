@@ -350,6 +350,15 @@ records that reward and original exit code before returning the same failure.
 This preserves outcome metadata without turning setup or verifier failures into
 successful execution. Missing or invalid rewards remain errors.
 
+For an exact generated Harbor wrapper, the isolated verifier stages its tests
+and scripts at the reserved private input root `/loom/verifier/task`,
+exports that location as `LOOM_TASK_DIR`, and runs the script with the task's
+original working directory. Its result is written outside that working directory
+as well. This keeps private grading files out of task file inventories while
+preserving the original `/tests` paths, assertions and reward logic. Recognition
+requires the generated script path and complete wrapper bytes. Custom or modified
+scripts retain their relative input layout; verifier arguments are unchanged.
+
 Task-specific setup, pytest arguments, reward logic and the complete private
 `tests/` tree are preserved. Unsupported bootstrap forms, custom verifier
 adapters or image shapes fail with an adaptation error; configuration admission

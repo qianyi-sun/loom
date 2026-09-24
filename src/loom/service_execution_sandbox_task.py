@@ -30,6 +30,7 @@ from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
+from loom.nebius_terminus_ingest import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.service_execution_task import (
     ServiceExecutionTaskError,
     _safe_workspace_path,
@@ -48,6 +49,16 @@ from loom.trial.workspace_snapshot import (
 
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
+_PRIVATE_VERIFIER_INPUT_ROOT = PurePosixPath("/loom/verifier/task")
+
+
+def _uses_harbor_private_inputs(workspace: Path, task: TaskConfig) -> bool:
+    """Recognize only our complete immutable wrapper, never custom scripts."""
+    if task.verifier.args.get("script_path") != VERIFIER_SCRIPT_PATH:
+        return False
+    wrapper = _safe_workspace_path(workspace, VERIFIER_SCRIPT_PATH)
+    expected = offline_verifier_run_sh_bytes()
+    return wrapper.is_file() and wrapper.stat().st_size == len(expected) and wrapper.read_bytes() == expected
 
 
 def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
@@ -300,6 +311,8 @@ async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
 ) -> None:
+    separate_private_inputs = _uses_harbor_private_inputs(workspace, task)
+    input_root = _PRIVATE_VERIFIER_INPUT_ROOT if separate_private_inputs else task.environment.workdir
     driver = sandbox_driver("verifier-sandbox", task)
     driver_started = False
     failure: BaseException | None = None
@@ -322,7 +335,7 @@ async def _run_verifier(
         await driver.start()
         driver_started = True
         await materialize_workspace(
-            driver=driver, task_dir=workspace, dst=task.environment.workdir,
+            driver=driver, task_dir=workspace, dst=input_root,
             policy=_POLICY, phase="verifier",
             excluded_paths=(".loom/**",),
         )
@@ -339,11 +352,17 @@ async def _run_verifier(
                 workdir=task.environment.workdir,
                 preserve_acls=task.environment.preserve_acls,
             )
-        remote_output = task.environment.workdir / ".loom/verifier/output.json"
+        remote_output = (
+            _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
+            else task.environment.workdir / ".loom/verifier/output.json"
+        )
+        script_path = str(task.verifier.args["script_path"])
+        if separate_private_inputs:
+            script_path = str(input_root / script_path)
         result = await driver.exec(
-            "/bin/sh " + shlex.quote(str(task.verifier.args["script_path"])),
+            "/bin/sh " + shlex.quote(script_path),
             cwd=task.environment.workdir,
-            env={"LOOM_TASK_DIR": str(task.environment.workdir),
+            env={"LOOM_TASK_DIR": str(input_root),
                  "LOOM_VERIFIER_OUTPUT": str(remote_output)},
             timeout_sec=(trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
             * trial.verifier_timeout_multiplier,

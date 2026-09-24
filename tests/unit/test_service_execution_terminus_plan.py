@@ -80,23 +80,6 @@ def test_terminus_rejects_missing_controller_and_disabled_private_isolation():
     assert "private_workspace_isolation_required" in reasons
 
 
-@pytest.mark.parametrize("root", ["/app", "/tests", "/loom/verifier/task/../task", True, []])
-def test_private_verifier_input_root_requires_the_reserved_location(root):
-    task, trial, _ = _inputs()
-    task.verifier.args["private_input_root"] = root
-    reasons = automatic_service_execution_rejections(task, trial, source_provenance=_provenance())
-    assert "private_verifier_input_root_unsupported" in reasons
-
-
-def test_private_verifier_input_root_requires_isolated_terminus_execution():
-    task, trial, _ = _inputs()
-    task.verifier.args["private_input_root"] = "/loom/verifier/task"
-    reasons = automatic_service_execution_rejections(
-        task, trial.model_copy(update={"agent_name": "direct-completion"}), source_provenance=_provenance(),
-    )
-    assert "private_verifier_input_root_unsupported" in reasons
-
-
 def _events():
     _, trial, _ = _inputs()
     now = datetime.now(UTC)

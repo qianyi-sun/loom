@@ -177,18 +177,29 @@ async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_error", [False, True])
-@pytest.mark.parametrize("separate_private_inputs", [False, True])
+@pytest.mark.parametrize("wrapper_kind", ["native", "harbor", "modified_harbor", "same_size_modified_harbor"])
 async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool, separate_private_inputs: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool, wrapper_kind: str,
 ):
+    from loom.nebius_terminus_ingest import offline_verifier_run_sh_bytes
+
     task, trial, _ = _inputs()
-    if separate_private_inputs:
-        task.verifier.args["private_input_root"] = "/loom/verifier/task"
+    separate_private_inputs = wrapper_kind == "harbor"
+    if wrapper_kind != "native":
+        task.verifier.args["script_path"] = "verifier/run.sh"
     (tmp_path / "instruction.md").write_text("Produce answer.txt")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/check.py").write_text("trusted assertions")
     (tmp_path / "verifier").mkdir()
     (tmp_path / "verifier/check.sh").write_text("trusted verifier")
+    if wrapper_kind != "native":
+        wrapper = offline_verifier_run_sh_bytes()
+        if wrapper_kind == "modified_harbor":
+            wrapper += b"\n"
+        elif wrapper_kind == "same_size_modified_harbor":
+            wrapper = wrapper.replace(b"# Loom", b"# loom", 1)
+            assert len(wrapper) == len(offline_verifier_run_sh_bytes())
+        (tmp_path / "verifier/run.sh").write_bytes(wrapper)
     (tmp_path / "solution").mkdir()
     (tmp_path / "solution/solve.sh").write_text("private oracle")
     agent, verifier = Sandbox(), Sandbox()
@@ -232,10 +243,12 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
         assert verifier.filesystem[private_root / "tests/check.py"] == b"trusted assertions"
         assert env["LOOM_TASK_DIR"] == str(private_root)
         if separate_private_inputs:
-            assert cmd == "/bin/sh /loom/verifier/task/verifier/check.sh"
+            assert cmd == "/bin/sh /loom/verifier/task/verifier/run.sh"
             assert env["LOOM_VERIFIER_OUTPUT"] == "/loom/verifier/output.json"
             assert not any(path.is_relative_to("/app/tests") or path.is_relative_to("/app/verifier")
                            or path.is_relative_to("/app/solution") for path in verifier.filesystem)
+        else:
+            assert cmd == "/bin/sh " + task.verifier.args["script_path"]
         assert verifier.filesystem[PurePosixPath("/app/answer.txt")] == b"42"
         assert verifier.filesystem[PurePosixPath("/app/fixture.txt")] == b"baked fixture"
         assert not any(str(path).startswith("/app/.loom/") for path in verifier.filesystem)
