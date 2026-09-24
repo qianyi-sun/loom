@@ -1395,3 +1395,30 @@ test("empty stdout and stderr stay in diagnostics without reuse actions", async 
   expect(screen.queryByRole("button", { name: "Reuse stdout.txt" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Reuse stderr.txt" })).not.toBeInTheDocument();
 });
+
+test("numbered process artifacts separate diagnostic stderr and empty stdout from reusable results", async () => {
+  const artifact = detailBatch.artifact_inventory.reports[0];
+  mockRunLibrary({ detailOverride: {
+    ...detailBatch,
+    artifact_inventory: { ...detailBatch.artifact_inventory, reusable_outputs: [
+      { ...artifact, key: "trial/files/01-agent.stderr", relative_path: "files/01-agent.stderr", role: "reusable_outputs", size: 42, can_reuse: true },
+      { ...artifact, key: "trial/files/03-agent.stderr", relative_path: undefined, role: "reusable_outputs", size: 42, can_reuse: true },
+      { ...artifact, key: "trial/files/02-verifier.stdout", relative_path: "files/02-verifier.stdout", role: "reusable_outputs", size: 0, can_reuse: true },
+      { ...artifact, key: "trial/files/04-verifier.stdout", relative_path: "files/04-verifier.stdout", role: "reusable_outputs", size: 42, can_reuse: true },
+      { ...artifact, key: "trial/files/05-verifier.stdout", relative_path: "files/05-verifier.stdout", role: "reusable_outputs", size: 42, can_reuse: false },
+      { ...artifact, key: "trial/files/result.json", relative_path: "files/result.json", role: "reusable_outputs", size: 42, can_reuse: true },
+    ] },
+  } });
+  renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>, { route: "/library/batches/batch-alpha" });
+  const diagnostics = (await screen.findByRole("heading", { name: "Logs/diagnostics" })).closest("section")!;
+  for (const name of ["files/01-agent.stderr", "03-agent.stderr", "files/02-verifier.stdout"]) {
+    expect(within(diagnostics).getByText(name, { exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Reuse ${name}` })).not.toBeInTheDocument();
+  }
+  const outputs = screen.getByRole("heading", { name: "Reusable outputs" }).closest("section")!;
+  for (const name of ["files/04-verifier.stdout", "files/result.json"]) {
+    expect(within(outputs).getByRole("button", { name: `Reuse ${name}` })).toBeEnabled();
+  }
+  expect(within(outputs).getByText("files/05-verifier.stdout", { exact: true })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Reuse files/05-verifier.stdout" })).not.toBeInTheDocument();
+});

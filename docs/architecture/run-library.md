@@ -265,6 +265,9 @@ show archive-relative names (or a filename when unavailable); storage keys and
 scan internals are in File details. A diagnostic download permitted by the API
 does not imply that pending or blocked content is approved for sharing or reuse.
 Empty stdout and stderr stay in diagnostics rather than reusable outputs.
+This includes numbered process captures such as `files/01-agent.stderr`; their
+download action remains available under existing permissions, but Reuse is hidden.
+Nonempty numbered stdout files and result files retain the API's reuse eligibility.
 
 Pipeline lists show an explicit empty state and bind date drafts to URL history
 (UTC dates). Run detail prioritizes status, failure, progress, graph and outputs;

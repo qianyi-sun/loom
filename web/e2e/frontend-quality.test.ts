@@ -94,7 +94,23 @@ for (const scenario of ["runs", "run-detail", "provider-detail", "pipeline-artif
           created_at: batch.created_at,
         }
       : detail
-        ? batch
+        ? {
+            ...batch,
+            artifact_inventory: {
+              ...batch.artifact_inventory,
+              reusable_outputs: [
+                ["files/01-agent.stderr", 42],
+                ["files/02-verifier.stdout", 0],
+                ["files/03-verifier.stdout", 42],
+                ["files/result.json", 42],
+              ].map(([path, size]) => ({
+                key: `quality-trial/${path}`, relative_path: path, size,
+                role: "reusable_outputs", trial_id: "quality-trial", can_reuse: true,
+                share_status: "shared", safety_state: "safe", redaction_state: "not_required",
+                download_url: `/api/v1/trials/quality-trial/artifact?key=${path}`,
+              })),
+            },
+          }
         : {
             items: pipeline
               ? [
@@ -156,6 +172,17 @@ for (const scenario of ["runs", "run-detail", "provider-detail", "pipeline-artif
           .first()
           .evaluate((el) => el.getBoundingClientRect().height),
       ).toBeLessThan(500);
+    }
+    if (detail) {
+      const diagnostics = page.locator("section").filter({ has: page.getByRole("heading", { name: "Logs/diagnostics", exact: true }) });
+      const outputs = page.locator("section").filter({ has: page.getByRole("heading", { name: "Reusable outputs", exact: true }) });
+      for (const name of ["files/01-agent.stderr", "files/02-verifier.stdout"]) {
+        await expect(diagnostics.getByText(name, { exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: `Reuse ${name}`, exact: true })).toHaveCount(0);
+      }
+      for (const name of ["files/03-verifier.stdout", "files/result.json"]) {
+        await expect(outputs.getByRole("button", { name: `Reuse ${name}`, exact: true })).toBeEnabled();
+      }
     }
     if (pipeline && testInfo.project.name === "chromium-mobile") {
       const scroll = page.getByRole("region", { name: "Pipeline artifacts scroll area" });
