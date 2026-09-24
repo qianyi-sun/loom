@@ -87,6 +87,14 @@ and request the `asyncio` extra explicitly. SQLAlchemy 2.1 no longer installs
 requires it. Keep the pin aligned when upgrading the locked version, and retain
 the clean-image import check for the greenlet-backed asynchronous bridge.
 
+Observation delivery order is not container start order. When snapshots disagree
+on the start time for the same role and restart incarnation, diagnosis resolves
+the earliest known start across the retained observations before selecting OOM
+evidence. A replacement timestamp in an initially stale `lastState` must not
+exclude the original container's later-arriving termination record. Job, Pod,
+role and restart identity still bound the evidence; exit 137 alone remains
+insufficient.
+
 `GET /api/v1/trials/{id}/debug` includes `execution_failure` with stage, role,
 incarnation, termination/start times, exit code, effective limits and supporting
 event ordinal. The diagnosis report used by the CLI and Web includes the same

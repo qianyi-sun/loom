@@ -52,11 +52,16 @@ def test_oom_of_another_identity_cannot_reclassify_original_failure(mutation):
     assert _diagnose([first, later]) is None
 
 
-def test_initial_missing_last_state_can_be_enriched_and_diagnosis_uses_existing_report():
+@pytest.mark.parametrize("replacement_terminated", [False, True])
+def test_initial_missing_last_state_can_be_enriched_and_diagnosis_uses_existing_report(replacement_terminated):
     from loom_service.diagnosis import build_trial_diagnosis
 
     first = _event(1)
     first["payload"]["container_diagnostics"][0].pop("previous_termination")
+    if replacement_terminated:
+        first["payload"]["container_diagnostics"][0]["current_termination"] = {
+            "reason": "Error", "exit_code": 1, "started_at": "2026-09-23T21:19:34Z",
+        }
     result = _diagnose([first, _event(2, reason="OOMKilled")])
     assert result is not None
     report = build_trial_diagnosis({
@@ -80,3 +85,51 @@ def test_fixture_oom_uses_the_bound_fixture_limit_and_cannot_name_another_fixtur
     assert result["memory_limit_mib"] == 128
     event["payload"]["container_diagnostics"][0]["name"] = "fixture-other"
     assert execution_failure_diagnosis([event], plan=fixture_plan(), job_uid="job", pod_uid="pod") is None
+
+
+@pytest.mark.parametrize("previous", [False, True])
+@pytest.mark.parametrize("role", ["task-sandbox", "fixture-server"])
+def test_delayed_original_oom_corrects_replacement_timestamp_in_first_observation(previous, role):
+    # tw_100459: ordinal 5 attributed the replacement's short-lived Error to
+    # lastState at restart_count=1; ordinals 8/9 later exposed the original OOM.
+    first = _event(5, started="2026-09-23T21:19:34Z")
+    ending = first["payload"]["container_diagnostics"][0]["previous_termination"]
+    ending.update(exit_code=1, signal=None, finished_at="2026-09-23T21:19:34Z")
+    unknown = deepcopy(first)
+    unknown["ordinal"] = 7
+    unknown["payload"]["container_diagnostics"][0]["current_termination"] = {
+        "reason": "ContainerStatusUnknown", "exit_code": 137,
+        "started_at": None, "finished_at": None,
+    }
+    assert _diagnose([first, unknown]) is None
+    oom = _event(8, reason="OOMKilled", restarts=int(previous), previous=previous)
+    oom["payload"].update(normalized_state="oom_killed",
+                          reason="SandboxRestarted" if previous else "SandboxTerminated")
+    if previous:
+        oom["payload"]["container_diagnostics"][0]["current_termination"] = ending
+    events = [unknown, oom, first]
+    for event in events:
+        event["payload"]["container_diagnostics"][0]["name"] = role
+    plan = _plan()[1]
+    if role == "fixture-server":
+        from tests.unit.test_task_fixtures import _plan as fixture_plan
+
+        plan = fixture_plan()
+    unchanged = deepcopy(events)
+    result = execution_failure_diagnosis(events, plan=plan, job_uid="job", pod_uid="pod")
+    assert result is not None
+    assert result["container_incarnation"] == 0
+    assert result["started_at"] == "2026-09-23T21:06:14Z"
+    assert result["terminated_at"] == "2026-09-23T21:19:33Z"
+    assert result["evidence_ordinal"] == 8
+    assert result["container_role"] == role
+    assert result["stage"] == ("fixture" if role == "fixture-server" else "agent")
+    assert result["memory_limit_mib"] == (128 if role == "fixture-server" else 4096)
+    assert events == unchanged
+
+
+def test_late_original_non_oom_prevents_misattributing_first_observed_replacement_oom():
+    replacement = _event(1, reason="OOMKilled", started="2026-09-23T21:20:00Z")
+    original = _event(2, reason="Error", restarts=0, previous=False)
+    # Resolve identity over all available evidence before selecting an OOM.
+    assert _diagnose([replacement, original]) is None

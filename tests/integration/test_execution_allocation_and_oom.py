@@ -97,7 +97,10 @@ async def test_scheduler_freezes_node_share_in_lease_and_finance(postgres_url, n
 
 
 @pytest.mark.parametrize("already_failed", [False, True])
-async def test_delayed_oom_replaces_generic_cause_but_preserves_outcome_and_output(postgres_url, already_failed):
+@pytest.mark.parametrize("replacement_timestamp", [False, True])
+async def test_delayed_oom_replaces_generic_cause_but_preserves_outcome_and_output(
+    postgres_url, already_failed, replacement_timestamp,
+):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -123,6 +126,12 @@ async def test_delayed_oom_replaces_generic_cause_but_preserves_outcome_and_outp
                 "reason": "SandboxRestarted", "message": "generic sandbox loss",
                 "container_diagnostics": [{"name": "task-sandbox", "restart_count": 1}],
             }
+            if replacement_timestamp:
+                first["container_diagnostics"][0]["previous_termination"] = {
+                    "reason": "Error", "exit_code": 1,
+                    "started_at": (now + timedelta(seconds=1)).isoformat(),
+                    "finished_at": (now + timedelta(seconds=1)).isoformat(),
+                }
             await record_execution_event(session, lease_id=lease.id, generation=lease.generation,
                 ordinal=1, event_kind="kubernetes_observed", payload=first, observed_at=now)
             if already_failed:
