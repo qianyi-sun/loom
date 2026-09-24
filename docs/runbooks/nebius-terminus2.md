@@ -355,7 +355,9 @@ into the agent workspace is not a repair. The diagnostic follows local image
 stage inheritance and reports the original Dockerfile line without changing
 the package. It is a source check, not a shell interpreter: dynamically generated
 scripts, heredoc bodies, copied scripts and registry-image contents still need
-task-author review. Independent public checks and private scoring must preserve
+task-author review. Later overwrites or deletion are not evaluated, so a finding
+does not prove that the final image still contains the dependency. Independent
+public checks and private scoring must preserve
 the original task contract; see [#1263](https://github.com/qianyi-sun/loom/issues/1263).
 The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
