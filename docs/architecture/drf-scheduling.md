@@ -108,6 +108,11 @@ don't write it. Four predicates today:
 | `gpu_vendor`       | `requires.gpu`             | `worker_gpu_vendors`        |
 | `network_policies` | task's egress allow/deny   | `worker_network_policies` (superset) |
 
+Network requirements include the baseline and every agent/verifier step policy.
+`web-allowlist` remains a distinct requirement during submission; it is not
+broadened to `public` or reduced to `gateway-only`. Native Nebius admission
+additionally requires the frozen runtime profile to enable task web egress.
+
 `cpu_arch` is intentionally conservative for mixed x86_64/ARM64 fleets.
 Missing legacy `requires_caps.cpu_arch` is treated as `x86_64`, so new ARM64
 workers do not claim pre-existing tasks such as SWE-Bench images whose task

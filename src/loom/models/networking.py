@@ -1,4 +1,4 @@
-"""NetworkPolicy tagged union — four policies the runtime knows about.
+"""NetworkPolicy tagged union for declared task networking requirements.
 
 Spec §4.2 (Supporting types).
 """
