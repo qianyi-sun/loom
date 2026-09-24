@@ -25,12 +25,12 @@ import httpx
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
+from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.models.capabilities import Capabilities
 from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
-from loom.nebius_terminus_ingest import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.service_execution_task import (
     ServiceExecutionTaskError,
     _safe_workspace_path,
