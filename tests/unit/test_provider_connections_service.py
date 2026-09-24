@@ -8,6 +8,7 @@ real Postgres.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import socket
@@ -390,6 +391,7 @@ def test_default_pricing_source(provider_type: str, expected: str) -> None:
 
 import httpx  # noqa: E402
 
+import loom_service.provider_connections_service as pcs  # noqa: E402
 from loom_service.provider_connections_service import (  # noqa: E402
     classify_preflight_failure,
     preflight_failure_kind,
@@ -653,6 +655,87 @@ async def test_preflight_timeout_is_recorded_as_inconclusive() -> None:
     assert classify_preflight_failure(
         result.error_code, result.http_status,
     ) == "inconclusive"
+
+
+def _dripping_response(chunks: int, interval: float) -> httpx.Response:
+    """200 whose body keeps making progress: one byte every `interval`s.
+
+    Each chunk arrives well inside any per-read timeout, so only a total
+    deadline can stop it.
+    """
+
+    class _Drip(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[override]
+            for _ in range(chunks):
+                await asyncio.sleep(interval)
+                yield b" "
+
+    return httpx.Response(200, stream=_Drip())
+
+
+async def test_preflight_total_deadline_stops_slow_dripping_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#948 review: per-read timeouts alone let a dripping body run long."""
+    monkeypatch.setattr(pcs, "_GENERATION_PROBE_TIMEOUT_SEC", 0.05)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return _dripping_response(chunks=40, interval=0.01)  # ~0.4s total
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        "drip-model",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+    elapsed = loop.time() - started
+
+    assert result.status == "failed"
+    assert result.error_code == "timeout"
+    assert "timeout after 0.05s" in (result.error_message or "")
+    assert classify_preflight_failure(
+        result.error_code, result.http_status,
+    ) == "inconclusive"
+    assert elapsed < 0.3
+
+
+async def test_preflight_total_deadline_allows_response_within_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pcs, "_GENERATION_PROBE_TIMEOUT_SEC", 1.0)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return _dripping_response(chunks=3, interval=0.01)
+
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        "quick-model",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "valid"
+    assert result.http_status == 200
+
+
+async def test_preflight_propagates_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation must not be swallowed into a timeout result."""
+    monkeypatch.setattr(pcs, "_GENERATION_PROBE_TIMEOUT_SEC", 5.0)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return _dripping_response(chunks=500, interval=0.01)
+
+    task = asyncio.create_task(preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        "slow-model",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.parametrize(

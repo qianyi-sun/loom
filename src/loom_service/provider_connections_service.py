@@ -18,6 +18,7 @@ FastAPI request fixture; the routes file is a thin orchestrator.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from dataclasses import dataclass
@@ -540,16 +541,23 @@ async def preflight_model(
                 # invoking this helper and block forbidden DNS/IP results.
                 # Runtime egress policy also gates the stored resolved IP set.
                 # codeql[py/full-ssrf]
-                resp = await client.post(
-                    path, headers=headers, json=body,
-                )
-            except httpx.TimeoutException as e:
+                # HTTPX timeouts bound each connect/read/write step, not the
+                # whole request: an upstream dripping bytes inside the read
+                # timeout could hold the probe open indefinitely. The total
+                # deadline makes the probe genuinely bounded (#948). Caller
+                # cancellation still propagates as CancelledError.
+                async with asyncio.timeout(_GENERATION_PROBE_TIMEOUT_SEC):
+                    resp = await client.post(
+                        path, headers=headers, json=body,
+                    )
+            except (httpx.TimeoutException, TimeoutError) as e:
+                detail = str(e) or "total deadline exceeded"
                 return ModelPreflightResult(
                     status="failed",
                     http_status=None,
                     error_code="timeout",
                     error_message=_redact_secret(
-                        f"timeout after {_GENERATION_PROBE_TIMEOUT_SEC}s: {e}",
+                        f"timeout after {_GENERATION_PROBE_TIMEOUT_SEC}s: {detail}",
                         api_key,
                     ),
                 )
