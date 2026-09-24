@@ -114,6 +114,29 @@ def test_authority_identity_must_match_owned_namespace(inputs, tmp_path):
     assert not inputs[2].creates
 
 
+def test_authority_readiness_requires_current_checked_policies_without_writes(inputs, tmp_path):
+    from scripts.ops.nebius_management_authority_stage import management_authority_ready
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    state = tmp_path / "state"
+    stage(inputs, state)
+    args = dict(authority=inputs[0], binding=inputs[1], api=inputs[2], state_dir=state)
+    assert management_authority_ready(**args) is False
+    for doc in inputs[2].resources.values():
+        if doc["kind"] == "ValidatingAdmissionPolicy":
+            doc["metadata"]["generation"] = 2
+            doc["status"] = {"observedGeneration": 2, "typeChecking": {"expressionWarnings": []}}
+    assert management_authority_ready(**args) is True
+    policy = next(doc for doc in inputs[2].resources.values() if doc["kind"] == "ValidatingAdmissionPolicy")
+    policy["status"]["observedGeneration"] = 1
+    assert management_authority_ready(**args) is False
+    policy["status"]["observedGeneration"] = 2
+    policy["status"]["typeChecking"]["expressionWarnings"] = [{"warning": "invalid expression"}]
+    with pytest.raises(ManagementStageError, match="policy"):
+        management_authority_ready(**args)
+    assert len(inputs[2].creates) == 9
+
+
 def test_https_authority_rejects_arbitrary_grants_before_network(inputs):
     from scripts.ops.nebius_management_authority_stage import HTTPSManagementAuthorityAPI
     from scripts.ops.nebius_management_stage import ManagementStageError

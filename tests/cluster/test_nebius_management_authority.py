@@ -20,8 +20,10 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 @pytest.mark.timeout(180)
 def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(tmp_path):
     from kubernetes import client
+    from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
     from scripts.ops.nebius_management_authority_stage import (
         HTTPSManagementAuthorityAPI,
+        management_authority_ready,
         stage_management_authority,
     )
     from scripts.ops.nebius_management_bootstrap import (
@@ -81,8 +83,18 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
                 break
             assert time.monotonic() < deadline, "admission policy was not type checked"
             time.sleep(0.1)
+        with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            assert management_authority_ready(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
         token = core.create_namespaced_service_account_token("loom-management-provisioner", authority.namespace,
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token
+        account_uid = core.read_namespaced_service_account("loom-management-provisioner", authority.namespace).metadata.uid
+        with HTTPSManagementAuthorityProbe(authority=authority, service_account_uid=account_uid,
+                                          api_server=endpoint, ssl_context=trust, token=token) as probe:
+            deadline = time.monotonic() + 20
+            while not probe.qualify():
+                assert time.monotonic() < deadline, "runtime authority did not qualify"
+                time.sleep(0.1)
         with httpx.Client(base_url=endpoint, verify=trust, headers={"Authorization": "Bearer " + token},
                           trust_env=False, follow_redirects=False, timeout=20) as http:
             own = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "loom-dev-alice", "labels": {

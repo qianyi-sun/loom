@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
-
 from tests.ops.test_nebius_management_bootstrap import BootstrapAPI
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_management_supplied import material as material
@@ -184,3 +183,35 @@ def test_installation_input_change_is_rejected_before_any_new_resources(installa
     with pytest.raises(ManagementInstallError):
         run(installation, tmp_path)
     assert len(installation[1].store.creates) == before
+
+
+def test_installer_accounts_for_retained_one_shot_backup_scratch(installation):
+    from scripts.ops.nebius_management_install import render_installation
+
+    rendered = render_installation(installation[0])
+    job = rendered.files["85-backup-verify.yaml"][0]
+    assert job["spec"]["backoffLimit"] == 0
+    assert "ttlSecondsAfterFinished" not in job["spec"]
+    assert rendered.platform_envelope.ephemeral_storage_mib == 21504
+
+
+@pytest.mark.parametrize("blocked", ["backup", "public"])
+def test_external_backup_or_public_auth_failure_cannot_report_installation_complete(installation, tmp_path, blocked):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api = installation[1]
+    run(installation, tmp_path)
+    api.complete("StatefulSet")
+    run(installation, tmp_path)
+    api.complete("Job")
+    run(installation, tmp_path)
+    api.complete("Job")
+    api.block = blocked
+    if blocked == "public":
+        run(installation, tmp_path)
+        api.complete("Deployment")
+    with pytest.raises(ManagementInstallError) as error:
+        run(installation, tmp_path)
+    assert "private-" not in str(error.value)
+    if blocked == "backup":
+        assert not any(doc["kind"] in {"Deployment", "Ingress"} for doc in api.store.resources.values())
