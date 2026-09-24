@@ -206,3 +206,26 @@ def test_final_readback_catches_earlier_resource_changed_by_last_create(inputs, 
     with pytest.raises(ManagementStageError):
         run(inputs, tmp_path / "stage")
     assert len(api.creates) == 5
+
+
+@pytest.mark.parametrize("change", ["host_network", "privileged", "extra_credentials"])
+def test_workload_defaulting_cannot_expand_runtime_privileges(inputs, tmp_path, change):
+    from scripts.ops.nebius_management_stage import ManagementStageError, stage_management_resources
+
+    def mutate(doc):
+        if doc["kind"] != "Deployment":
+            return
+        pod = doc["spec"]["template"]["spec"]
+        if change == "host_network":
+            pod["hostNetwork"] = True
+        elif change == "privileged":
+            pod["containers"][0]["securityContext"]["privileged"] = True
+        else:
+            pod["containers"][0]["envFrom"] = [{"secretRef": {"name": "unapproved"}}]
+
+    rendered, binding, api = inputs
+    api.default_change = mutate
+    with pytest.raises(ManagementStageError, match="defaulting"):
+        stage_management_resources(rendered=rendered, phase="40-services.yaml", binding=binding, api=api,
+                                   state_dir=tmp_path / "stage")
+    assert not api.creates
