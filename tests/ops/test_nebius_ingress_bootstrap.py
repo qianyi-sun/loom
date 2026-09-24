@@ -221,10 +221,13 @@ def test_dns_report_rejects_unqualified_targets_and_strips_private_fields(change
 def qualify_installed_watchdog(release, python, tmp_path):
     """Use actual installed module bytes, including for the full-bundle probe."""
     observed = tmp_path / "children.json"
+    # Existence signals a complete snapshot; never expose a partially written JSON file.
     child = (
-        "import json,os,subprocess,sys,time; "
+        "import json,os,subprocess,sys,time; from pathlib import Path; "
         "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); "
-        "open(sys.argv[1],'w').write(json.dumps([os.getpid(),p.pid,dict(os.environ)])); time.sleep(60)"
+        "pending=Path(sys.argv[1]+'.tmp'); "
+        "pending.write_text(json.dumps([os.getpid(),p.pid,dict(os.environ)])); "
+        "pending.replace(sys.argv[1]); time.sleep(60)"
     )
     parent = (
         "import sys; sys.path.insert(0,sys.argv[1]); "
