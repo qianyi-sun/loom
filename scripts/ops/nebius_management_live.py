@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import ssl
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
@@ -44,6 +46,35 @@ from loom_service.environment_management.deployment import RenderedManagement
 class ManagementPrerequisites(Protocol):
     def preflight(self, request: ManagementInstallRequest, rendered: RenderedManagement) -> None: ...
     def public_route(self, request: ManagementInstallRequest) -> None: ...
+
+
+@contextmanager
+def backup_client(request: ManagementInstallRequest) -> Iterator[Any]:
+    """Only explicit backup credentials, bound HTTPS origin and no write retry."""
+    import boto3
+    from botocore.config import Config
+
+    config = request.deployment.installation.foundation.platform_config
+    endpoint = urlsplit(config["storage_endpoint"])
+    if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password:
+        raise ManagementInstallError("management backup endpoint unqualified")
+    credentials = request.material["loom-platform-storage"]
+    client = boto3.client("s3", endpoint_url=config["storage_endpoint"], region_name=config["region"],
+        aws_access_key_id=credentials["backup-access-key"], aws_secret_access_key=credentials["backup-secret-key"],
+        config=Config(retries={"total_max_attempts": 1, "mode": "standard"}, proxies={},
+                      connect_timeout=10, read_timeout=30, s3={"addressing_style": "path"}))
+
+    def exact_endpoint(request: Any, **_kwargs: Any) -> None:
+        url = request.url.decode() if isinstance(request.url, bytes) else request.url
+        target = urlsplit(url)
+        if (target.scheme, target.netloc) != (endpoint.scheme, endpoint.netloc):
+            raise ManagementInstallError("backup request left the qualified endpoint")
+
+    try:
+        client.meta.events.register_first("before-send.s3", exact_endpoint)
+        yield client
+    finally:
+        client.close()
 
 
 class HTTPSManagementInstallationAPI:
@@ -138,9 +169,6 @@ class HTTPSManagementInstallationAPI:
             raise ManagementInstallError("management runtime authority unavailable") from None
 
     def verify_backup(self, binding: ManagementBinding, rendered: RenderedManagement, job_uid: str) -> dict[str, Any]:
-        import boto3
-        from botocore.config import Config
-
         try:
             self._binding(binding)
             if rendered != self.rendered:
@@ -149,30 +177,9 @@ class HTTPSManagementInstallationAPI:
                                             ssl_context=self.ssl_context, token=self.token) as evidence:
                 report = evidence.backup_report(job_uid=job_uid)
             deployment = self.request.deployment
-            config = deployment.installation.foundation.platform_config
-            endpoint = urlsplit(config["storage_endpoint"])
-            if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password:
-                raise ValueError()
-            credentials = self.request.material["loom-platform-storage"]
-            client = boto3.client("s3", endpoint_url=config["storage_endpoint"], region_name=config["region"],
-                aws_access_key_id=credentials["backup-access-key"], aws_secret_access_key=credentials["backup-secret-key"],
-                config=Config(retries={"total_max_attempts": 1, "mode": "standard"}, proxies={},
-                              connect_timeout=10, read_timeout=30, s3={"addressing_style": "path"}))
-
-            def exact_endpoint(request: Any, **_kwargs: Any) -> None:
-                url = request.url.decode() if isinstance(request.url, bytes) else request.url
-                target = urlsplit(url)
-                if (target.scheme, target.netloc) != (endpoint.scheme, endpoint.netloc):
-                    raise ManagementInstallError("backup request left the qualified endpoint")
-
-            try:
-                # Includes SDK region-redirect attempts; a different host can
-                # never receive this bucket's signed request or credentials.
-                client.meta.events.register_first("before-send.s3", exact_endpoint)
+            with backup_client(self.request) as client:
                 return verify_backup_object(client=client, bucket=deployment.backup_bucket, namespace=binding.namespace,
                     job_uid=job_uid, report=report, max_bytes=deployment.postgres_storage_gi * 1024**3)
-            finally:
-                client.close()
         except ManagementInstallError:
             raise
         except Exception:

@@ -11,7 +11,9 @@ import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.ops.test_nebius_management_cloud_scope import cloud as cloud
 from tests.ops.test_nebius_management_install import installation as installation
+from tests.ops.test_nebius_management_prerequisites import checks as checks
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -21,7 +23,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(180)
-def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path, management_inputs, installation):
+def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path, management_inputs, installation, checks):
     from scripts.ops.nebius_management_bootstrap import (
         BootstrapBinding,
         HTTPSBootstrapAPI,
@@ -29,6 +31,10 @@ def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path,
     )
     from scripts.ops.nebius_management_install import render_installation
     from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_prerequisites import (
+        HTTPSManagementPrerequisites,
+        ManagementPrerequisiteError,
+    )
     from scripts.ops.nebius_management_stage import (
         HTTPSManagementStageAPI,
         ManagementStageError,
@@ -54,6 +60,29 @@ def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path,
         key.write_bytes(base64.b64decode(user["client-key-data"]))
         key.chmod(0o600)
         trust.load_cert_chain(certificate, key)
+        check = checks[0]
+        with HTTPSManagementPrerequisites(settings=check.settings, ingress=check.ingress,
+                certificate_config={}, ingress_state=tmp_path / "no-public-route", operator_cloud_credentials=tmp_path / "no-cloud-key",
+                api_server=endpoint, ssl_context=trust) as inventory:
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    nodes = inventory.inventory("v1", "nodes", "Node")
+                except ManagementPrerequisiteError:
+                    raw = inventory._request("GET", "/api/v1/nodes?limit=100")
+                    # Test-only diagnostics: just type metadata, never a Node or
+                    # Pod payload, operator configuration or Secret contents.
+                    pytest.fail(str({"type": (raw.get("apiVersion"), raw.get("kind")),
+                        "version": raw.get("metadata", {}).get("resourceVersion"),
+                        "item_types": [(row.get("apiVersion"), row.get("kind")) for row in raw.get("items", [])]}))
+                if nodes:
+                    break
+                assert time.monotonic() < deadline, "disposable node did not register"
+                time.sleep(0.1)
+            assert len(nodes) == 1 and nodes[0]["metadata"]["uid"]
+            assert inventory.inventory("apps/v1", "deployments", "Deployment") == []
+            assert inventory.inventory("batch/v1", "cronjobs", "CronJob") == []
+            assert inventory.inventory("autoscaling/v2", "horizontalpodautoscalers", "HorizontalPodAutoscaler") == []
         bootstrap = BootstrapBinding(management_inputs[0]["installation_id"],
                                      "loom-nebius-management", core.read_namespace("kube-system").metadata.uid)
         with HTTPSBootstrapAPI(binding=bootstrap, api_server=endpoint, ssl_context=trust) as api:

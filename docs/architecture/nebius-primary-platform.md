@@ -326,6 +326,21 @@ Ingress creation are not backup/restore or public authentication proof. Independ
 installer-start evidence, authority qualification, prerequisite delivery and phase
 ordering remain responsibilities of the protected installer, not this primitive.
 
+The connected installer composes these phases with independent start evidence,
+actual service-account authority probes, retained PVC/PV/CSI identity, completed
+backup Job/object verification and authenticated public management readiness.
+Its read-only prerequisite adapter resolves exact candidate/profile bytes through
+the protected publication catalog, verifies the dedicated provisioning key and
+project-only grants, and checks a separate object-only backup identity. It rejects
+inherited or broader IAM permissions and backup-group grants on another bucket.
+Live platform sizing counts controller rollout/HPA maxima, scheduled maintenance,
+pending/terminating Pods and the child allowance; UID-linked controller Pods are
+not counted twice. Storage-class identity, pending PVC demand and remaining
+provider disk quota are separate checks. Neither these observations nor an object
+readback prove restoration or authorize infrastructure expansion. The protected
+workflow entrypoint and installed multi-owner acceptance must still be completed
+before this source-level installer can be described as an operational environment.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

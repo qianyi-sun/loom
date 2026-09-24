@@ -12,8 +12,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from tests.ops.test_nebius_management_install import installation as installation
 from tests.ops.test_nebius_management_cloud_scope import cloud as cloud
+from tests.ops.test_nebius_management_install import installation as installation
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.unit.test_nebius_candidate_catalog import github_transport
 from tests.unit.test_nebius_candidate_catalog import publication as publication
@@ -73,7 +73,10 @@ async def test_supplied_candidate_cannot_substitute_for_github_publication(insta
 
 @pytest.fixture
 def checks(installation, cloud, tmp_path):
-    from scripts.ops.nebius_management_prerequisites import HTTPSManagementPrerequisites, ManagementPrerequisiteSettings
+    from scripts.ops.nebius_management_prerequisites import (
+        HTTPSManagementPrerequisites,
+        ManagementPrerequisiteSettings,
+    )
 
     request, _ = installation
     foundation = request.deployment.installation.foundation
@@ -117,6 +120,14 @@ def test_live_inventory_requires_complete_stable_pagination(checks):
     ])
     assert len(checks[0].inventory("v1", "nodes", "Node")) == 2
     assert "continue=next" in calls[1]
+
+
+def test_typed_api_collection_supplies_omitted_item_type_metadata(checks):
+    uid = str(uuid4())
+    respond_inventory(checks, [{"apiVersion": "v1", "kind": "NodeList", "metadata": {"resourceVersion": "9"},
+        "items": [{"metadata": {"name": "computeinstance-test", "uid": uid}}]}])
+    assert checks[0].inventory("v1", "nodes", "Node") == [{"apiVersion": "v1", "kind": "Node",
+        "metadata": {"name": "computeinstance-test", "uid": uid}}]
 
 
 @pytest.mark.parametrize("mutation", ["version", "repeat", "kind", "missing"])
