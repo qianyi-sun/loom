@@ -128,12 +128,23 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api()
                 "metadata": {"name": "loom-execution-observer", "namespace": "loom-dev-alice"},
                 "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "list", "watch"]},
                           {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]}]}
+            excessive = copy.deepcopy(role)
+            excessive["rules"].append({"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]})
+            denied = http.post(roles, json=excessive)
+            assert denied.status_code == 403
+            assert "management observer role boundary" in denied.text
             assert http.post(roles, json=role).status_code == 201
             observer = copy.deepcopy(binding)
             observer["metadata"]["name"] = "loom-execution-observer"
             observer["roleRef"].update(kind="Role", name="loom-execution-observer")
             observer["subjects"] = [{"kind": "ServiceAccount", "namespace": "loom-dev-alice", "name": "loom-execution-actuator"}]
             assert http.post(bindings, json=observer).status_code == 201
+            core.create_namespaced_service_account("loom-dev-alice", {"metadata": {"name": "loom-execution-actuator"}})
+            child_token = core.create_namespaced_service_account_token("loom-execution-actuator", "loom-dev-alice",
+                client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token
+            child_headers = {"Authorization": "Bearer " + child_token}
+            assert http.get(secrets + "/own", headers=child_headers).status_code == 403
+            assert http.get("/apis/batch/v1/namespaces/loom-dev-alice/jobs", headers=child_headers).status_code == 200
             role["metadata"]["name"] = "escalation"
             role["rules"] = [{"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}]
             assert http.post(roles, json=role).status_code == 403
