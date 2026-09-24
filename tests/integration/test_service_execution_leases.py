@@ -736,8 +736,9 @@ async def test_default_catalog_upgrade_preserves_existing_class_identity(postgre
         await engine.dispose()
 
 
+@pytest.mark.parametrize("operator_state", ["draining", "retired"])
 async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(
-    postgres_url: str,
+    postgres_url: str, operator_state: str,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -748,7 +749,7 @@ async def test_actuator_refreshes_target_health_during_drift_without_reenabling_
             await set_execution_target_health(
                 session,
                 target_id=target.target_id,
-                desired_state="draining",
+                desired_state=operator_state,
                 observed_state="ready",
                 health_status="healthy",
                 observed_at=now + timedelta(seconds=1),
@@ -782,7 +783,7 @@ async def test_actuator_refreshes_target_health_during_drift_without_reenabling_
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionTarget, target.target_id)
             assert persisted is not None
-            assert persisted.desired_state == "draining"
+            assert persisted.desired_state == operator_state
             assert persisted.observed_state == "ready"
             assert persisted.health_status == "healthy"
             assert persisted.health_observed_at == refreshed_at

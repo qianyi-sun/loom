@@ -345,6 +345,244 @@ class FakeKubectl(deploy.Kubectl):
         return ""
 
 
+def _current_primary(kube, config, files, target_id):
+    """An installed ConfigMap, independent of the proposed render."""
+    import copy
+
+    current = copy.deepcopy(next(row for row in files["10-config-network.yaml"]
+                                if row["kind"] == "ConfigMap"))
+    environment = {**config, "target_id": target_id}
+    current["data"]["environment.json"] = json.dumps(environment)
+    kube.objects["configmap", "loom-platform-config"] = current
+
+
+@pytest.mark.parametrize("retire_target", [None, "foreign-target"])
+def test_primary_target_change_requires_exact_explicit_retirement(rendered, monkeypatch, retire_target):
+    # Without this fence, an immutable-class replacement leaves the old target
+    # eligible for dispatch after its actuator has moved to the new identity.
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = retire_target
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_retirement_cannot_name_the_destination_or_fresh_install(rendered, monkeypatch, installed):
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = config["target_id"]
+    kube = FakeKubectl(config, files, database=installed)
+    if installed:
+        _current_primary(kube, config, files, config["target_id"])
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("changed", ["target_id", "execution_namespace", "region"])
+def test_target_replacement_rechecks_its_source_after_lock(rendered, monkeypatch, changed):
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = "previous-primary"
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+
+    def interleave(_kube, _ns, action, _owner, _candidate):
+        if action == "acquire":
+            current = kube.objects["configmap", "loom-platform-config"]["data"]
+            environment = json.loads(current["environment.json"])
+            environment[changed] = "concurrent-change"
+            current["environment.json"] = json.dumps(environment)
+        return {"status": "acquired" if action == "acquire" else "released"}
+
+    monkeypatch.setattr(deploy, "rollout_guard", interleave)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("changed", ["cluster_id", "namespace", "execution_namespace", "environment",
+                                     "regional_execution_targets"])
+def test_target_replacement_rejects_foreign_or_regional_source(rendered, changed):
+    args, config, _, files = rendered
+    args.retire_target = "previous-primary"
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    current = kube.objects["configmap", "loom-platform-config"]["data"]
+    environment = json.loads(current["environment.json"])
+    environment[changed] = [{}] if changed == "regional_execution_targets" else "foreign"
+    current["environment.json"] = json.dumps(environment)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("status", ["skipped_busy", "skipped_locked", "planned"])
+def test_target_replacement_plan_and_unavailable_guard_do_not_retire(rendered, monkeypatch, status):
+    args, config, _, files = rendered
+    args.apply = status != "planned"
+    args.retire_target = "previous-primary"
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    calls = []
+
+    def guard(_kube, _ns, action, _owner, _candidate):
+        calls.append(action)
+        return {"status": status}
+
+    monkeypatch.setattr(deploy, "rollout_guard", guard)
+    assert deploy.deploy(args, kube=kube)["status"] == status
+    assert calls == ([] if status == "planned" else ["acquire"])
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("failure", [None, "freshness", "backup", "retire", "apply", "target-readback"])
+def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendered, monkeypatch, failure):
+    args, config, _, files = rendered
+    args.apply = True
+    args.retire_target = "previous-primary"
+    calls = []
+
+    class ReplacingKubectl(FakeKubectl):
+        def run(self, *command, timeout=90):
+            if command[:2] == ("create", "job"):
+                calls.append("backup")
+            if command[0] == "exec" and "-c" in command:
+                action, previous, destination = command[-3:]
+                calls.append(action)
+                assert previous == "previous-primary" and destination == config["target_id"]
+                if (failure, action) in {("freshness", "validate"), ("retire", "retire"),
+                                        ("target-readback", "verify")}:
+                    raise RuntimeError("remote connection lost after possible commit")
+                return json.dumps({"previous_target_id": previous, "target_id": destination, "status": action})
+            if command[0] == "apply":
+                calls.append("apply")
+                if failure == "apply":
+                    raise RuntimeError("apply failed")
+            return super().run(*command, timeout=timeout)
+
+    kube = ReplacingKubectl(config, files, database=True)
+    kube.fail_backup = failure == "backup"
+    _current_primary(kube, config, files, "previous-primary")
+
+    def guard(_kube, _ns, action, _owner, _candidate):
+        calls.append(action)
+        return {"status": "acquired" if action == "acquire" else "released"}
+
+    monkeypatch.setattr(deploy, "rollout_guard", guard)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    if failure:
+        with pytest.raises((RuntimeError, deploy.DeploymentError)):
+            deploy.deploy(args, kube=kube)
+        evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+        assert evidence["dispatch_paused"] == (failure not in {"freshness", "backup"})
+    else:
+        result = deploy.deploy(args, kube=kube)
+        assert result["status"] == "complete"
+        assert result["target_replacement"] == {
+            "previous_target_id": "previous-primary", "target_id": config["target_id"],
+            "previous_target_retired": True, "active_target_verified": True,
+        }
+    if failure == "freshness":
+        assert calls == ["acquire", "validate", "release"]
+    elif failure == "backup":
+        assert calls == ["acquire", "validate", "backup", "release"]
+    else:
+        assert calls[:4] == ["acquire", "validate", "backup", "retire"]
+        assert ("release" in calls) == (failure is None)
+        if failure != "retire":
+            assert "apply" in calls[4:]
+        if failure is None:
+            assert calls[-2:] == ["verify", "release"]
+
+
+@pytest.mark.parametrize("response_mode", ["ok", "reused-target", "wrong-target", "http-error", "redirect",
+                                          "inactive-destination", "active-previous"])
+def test_retirement_program_calls_admin_api_without_exposing_credentials(tmp_path, response_mode):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    from urllib.error import HTTPError
+
+    secret = tmp_path / "secret.toml"
+    token = "local-fixture-admin-token"
+    secret.write_text('[admin]\ntoken = "' + token + '"\n')
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert self.path == "/admin/execution-capacity/status"
+            assert self.headers["Authorization"] == "Bearer " + token
+            rows = [{"target_id": "previous-primary", "desired_state": "active"}]
+            if response_mode == "reused-target":
+                rows.append({"target_id": "next-primary", "desired_state": "retired"})
+            elif response_mode in {"inactive-destination", "active-previous"}:
+                rows[0]["desired_state"] = "active" if response_mode == "active-previous" else "retired"
+                rows.append({"target_id": "next-primary",
+                             "desired_state": "active" if response_mode == "active-previous" else "retired"})
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"targets": rows}).encode())
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, self.headers["Authorization"], body))
+            self.send_response({"http-error": 403, "redirect": 307}.get(response_mode, 200))
+            if response_mode == "redirect":
+                self.send_header("Location", "/credential-leak")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "target_id": "foreign" if response_mode == "wrong-target" else "previous-primary",
+                **{key: body[key] for key in ("desired_state", "observed_state", "health_status")},
+                "health_observed_at": body["observed_at"],
+                "untrusted_extra": token,
+            }).encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    namespace = {"__name__": "retirement_fixture"}
+    try:
+        exec(deploy.TARGET_RETIRE_PROGRAM, namespace)
+        def invoke():
+            return namespace["target_action"](
+                "verify" if response_mode in {"inactive-destination", "active-previous"} else "retire",
+                "previous-primary", "next-primary", secret_file=secret,
+                origin=f"http://127.0.0.1:{server.server_port}",
+            )
+        if response_mode == "ok":
+            result = invoke()
+            assert result == {"previous_target_id": "previous-primary", "target_id": "next-primary",
+                              "status": "retire"}
+            assert token not in json.dumps(result)
+        else:
+            with pytest.raises(HTTPError if response_mode in {"http-error", "redirect"} else ValueError):
+                invoke()
+        if response_mode in {"reused-target", "inactive-destination", "active-previous"}:
+            assert requests == []
+            return
+        assert len(requests) == 1
+        path, authorization, body = requests[0]
+        assert path == "/admin/service-execution/targets/previous-primary/health"
+        assert authorization == "Bearer " + token
+        assert body == {"desired_state": "retired", "observed_state": "retired",
+                        "health_status": "unknown", "observed_at": body["observed_at"],
+                        "error_code": "target_replaced"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_reviewed_render_read_only_plan(rendered: tuple) -> None:
     args, config, _, files = rendered
     kube = FakeKubectl(config, files)

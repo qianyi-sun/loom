@@ -477,6 +477,103 @@ def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candid
     return result
 
 
+def validate_target_replacement(
+    current: dict[str, Any], config: dict[str, Any], retire_target: str | None,
+) -> None:
+    """Require an exact operator decision before replacing an immutable target."""
+    data = current.get("data", {})
+    previous = json.loads(data["environment.json"]) if "environment.json" in data else None
+    if retire_target is None:
+        if previous and previous["target_id"] != config["target_id"]:
+            raise DeploymentError("changed primary target requires --retire-target naming the installed target")
+        return
+    if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", retire_target)
+            or previous is None or previous["target_id"] != retire_target
+            or retire_target == config["target_id"]):
+        raise DeploymentError("target retirement must name the distinct installed primary target")
+    if previous.get("regional_execution_targets") or config.get("regional_execution_targets"):
+        raise DeploymentError("target retirement supports only a single-primary platform")
+    for key in ("cluster_id", "namespace", "execution_namespace", "environment"):
+        if previous[key] != config[key]:
+            raise DeploymentError("target replacement cannot change its platform boundary")
+
+
+# Execute stdlib-only code in the current control-plane Pod. The installed
+# candidate need not already contain this operator-side deployment enhancement.
+# Credentials remain in the Pod; redirects and environment proxies are disabled.
+TARGET_RETIRE_PROGRAM = '''
+import json
+import os
+import sys
+import tomllib
+import urllib.request
+from datetime import UTC, datetime
+from pathlib import Path
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+def target_action(action, previous_id, target_id, *, secret_file, origin):
+    with Path(secret_file).open("rb") as stream:
+        token = tomllib.load(stream)["admin"]["token"]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    def request(method, path, body=None):
+        req = urllib.request.Request(origin + path,
+            data=json.dumps(body).encode() if body is not None else None, method=method,
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with opener.open(req, timeout=30) as response:
+            if response.status != 200:
+                raise ValueError("target request rejected")
+            return json.load(response)
+    rows = request("GET", "/admin/execution-capacity/status")["targets"]
+    states = {row["target_id"]: row["desired_state"] for row in rows}
+    if len(states) != len(rows) or previous_id not in states:
+        raise ValueError("target inventory mismatch")
+    if action in {"validate", "retire"}:
+        if target_id in states:
+            raise ValueError("replacement target must be a fresh identity")
+        if action == "retire":
+            expected = {"target_id": previous_id, "desired_state": "retired",
+                        "observed_state": "retired", "health_status": "unknown"}
+            body = {key: value for key, value in expected.items() if key != "target_id"}
+            body.update(observed_at=datetime.now(UTC).isoformat(), error_code="target_replaced")
+            result = request("POST", "/admin/service-execution/targets/" + previous_id + "/health", body)
+            if any(result.get(key) != value for key, value in expected.items()):
+                raise ValueError("target retirement readback mismatch")
+    elif action == "verify":
+        if states.get(previous_id) != "retired" or states.get(target_id) != "active":
+            raise ValueError("target replacement activation mismatch")
+    else:
+        raise ValueError("invalid target action")
+    return {"previous_target_id": previous_id, "target_id": target_id, "status": action}
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(target_action(sys.argv[1], sys.argv[2], sys.argv[3],
+            secret_file=os.environ["LOOM_CP_ADMIN_SECRET_FILE"],
+            origin="http://127.0.0.1:8080")))
+    except Exception:
+        print("Target replacement check failed", file=sys.stderr)
+        sys.exit(1)
+'''
+
+
+def execution_target_action(
+    kube: Kubectl, namespace: str, action: str, previous_id: str, target_id: str,
+) -> None:
+    expected = {"previous_target_id": previous_id, "target_id": target_id, "status": action}
+    try:
+        result = json.loads(kube.run(
+            "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python",
+            "-c", TARGET_RETIRE_PROGRAM, action, previous_id, target_id,
+        ))
+    except Exception:
+        raise DeploymentError("target replacement request failed; inspect the recorded deployment phase") from None
+    if result != expected:
+        raise DeploymentError("target replacement readback mismatch; inspect the recorded deployment phase")
+
+
 def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]) -> None:
     """Check live Deployment templates and readiness against the fixed candidate."""
     for filename in ("40-services.yaml", "60-execution.yaml"):
@@ -538,6 +635,18 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         phase("preflight")
         state = preflight(kube, manifest, config, files, args.expected_cluster_id)
         evidence["preflight"] = state
+        retire_target = getattr(args, "retire_target", None)
+        current = kube.get("configmap", "loom-platform-config", config["namespace"])
+        validate_target_replacement(current, config, retire_target)
+        # Freeze data, not the mutable Kubernetes object returned by a caller.
+        replacement_source = canonical(current.get("data", {}))
+        if retire_target is not None:
+            if not state["database_exists"]:
+                raise DeploymentError("target retirement requires an existing platform database")
+            evidence["target_replacement"] = {
+                "previous_target_id": retire_target, "target_id": config["target_id"],
+                "previous_target_retired": False, "active_target_verified": False,
+            }
         if not args.apply:
             evidence["status"] = "planned"
             return evidence
@@ -562,6 +671,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # A same-candidate ingress cutover may have finished after preflight
             # but before we acquired the shared rollout guard.
             verify_ingress_mode(kube, config)
+            current = kube.get("configmap", "loom-platform-config", ns)
+            validate_target_replacement(current, config, retire_target)
+            if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
+                raise DeploymentError("target replacement source changed before guard acquisition")
             expected_current = getattr(args, "expected_current_candidate", None)
             if expected_current is not None:
                 current = kube.get("configmap", "loom-platform-config", ns)
@@ -570,6 +683,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                     guard_acquired = False
                     evidence["status"] = "skipped_superseded"
                     return evidence
+            if retire_target is not None:
+                phase("validate-fresh-target")
+                execution_target_action(kube, ns, "validate", retire_target, config["target_id"])
 
         def apply_file(filename: str) -> None:
             nonlocal mutation_started
@@ -605,6 +721,13 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             evidence["backup_job"] = backup_name
             kube.run("create", "job", backup_name, "--from=cronjob/loom-platform-backup", "-n", ns)
             wait_job(backup_name, 1860)
+        if retire_target is not None:
+            # A lost response can follow a committed state change. From this
+            # point every failure must retain the durable operator-owned pause.
+            mutation_started = True
+            phase("retire-previous-target")
+            execution_target_action(kube, ns, "retire", retire_target, config["target_id"])
+            evidence["target_replacement"]["previous_target_retired"] = True
         if config.get("task_identity_policy") is not None:
             mutation_started = True
             phase("install-and-verify-task-identity-policy")
@@ -658,6 +781,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         public_smoke(manifest["public_origin"], config["environment"])
         phase("candidate-readback")
         verify_deployed_images(kube, files)
+        if retire_target is not None:
+            phase("target-replacement-readback")
+            execution_target_action(kube, ns, "verify", retire_target, config["target_id"])
+            evidence["target_replacement"]["active_target_verified"] = True
         if guard_acquired:
             rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
             guard_acquired = False
@@ -722,6 +849,7 @@ def main() -> int:
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed-jobs", action="store_true")
+    parser.add_argument("--retire-target", help="exact installed primary ID replaced by the reviewed render")
     args = parser.parse_args()
     try:
         result = deploy(args)

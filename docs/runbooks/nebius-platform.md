@@ -1244,8 +1244,9 @@ integration is needed. A pinned SSH host key is required; do not use live
 
 One database advisory lock coordinates new execution/build claims with the idle
 check. On success a single durable guard row pauses **new dispatch only** while
-submissions continue queuing. Existing target health/desire flags and operator
-submission pauses are not modified. The guard covers all activity in this
+submissions continue queuing. Ordinary rollouts preserve target health/desire
+flags and operator submission pauses. Explicit primary-target replacement uses
+the guarded procedure below. The guard covers all activity in this
 independent platform database. The deployment reuses the existing backup,
 migration, configuration and rollout stages, verifies public HTTPS and live
 workload images/readiness, then deletes its own guard. It preserves live task
@@ -1318,3 +1319,41 @@ kubectl --kubeconfig /protected/kubeconfig -n loom-nebius-platform \
 
 Then manually dispatch the workflow if another rollout is needed. Never delete
 another owner's pause or rerun the former unguarded operator for routine updates.
+
+### Replacing an immutable primary target
+
+Changing an execution class, such as enabling declared task web egress, requires
+a fresh target ID. Render the replacement with the matching catalog, runtime
+profile and constrained-root policy. Review forward and rollback renders against
+the exact installed candidate, configuration and published image digests. Keep
+the cluster, namespaces and environment unchanged; this operation does not
+support regional targets.
+
+Use `scripts/ops/deploy_nebius_platform.py` with its normal reviewed render,
+cluster, kubeconfig and evidence arguments, adding
+`--retire-target <currently-installed-primary-id>`. Run without `--apply` first.
+The deployer rejects a changed primary ID without the exact retirement option,
+and rejects retirement of the destination or a fresh installation. It checks
+the installed source again after acquiring the ordinary idle guard, and queries
+the authenticated target inventory to reject reuse of a registered destination
+ID before mutation. Busy or locked platforms are skipped without retirement.
+
+After a successful backup and before applying manifests, the deployer retires
+the old target through the authenticated admin health API inside the existing
+control-plane Pod. Credentials stay in that Pod. Normal configuration bootstrap
+registers and activates the fresh target, and the deployment keeps its guard
+through workload and HTTPS readback. Actuator health reports preserve the old
+target's retired desired state. The evidence records both target IDs and whether
+retirement was confirmed. Before releasing its pause, the deployer independently
+checks the admin API reports the previous target retired and the replacement
+active; healthy Deployments alone do not establish target activation.
+
+An ambiguous retirement response or later failure retains the deployment's
+owned pause, even before the first manifest was applied. Inspect the target
+state, phase evidence and installed configuration before owner-bound recovery;
+do not release the pause while an active target lacks its matching actuator and
+policy. A rollback must also use a fresh target ID with the previous compatible
+images/profile/settings, retiring the failed replacement. Normal bootstrap does
+not reactivate a retired target. Retain both reviewed renders and do not
+automatically downgrade the database. Task egress still requires separate
+installed network qualification before claiming it is supported.
