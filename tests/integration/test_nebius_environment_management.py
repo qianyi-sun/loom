@@ -152,6 +152,41 @@ async def test_owner_conflict_and_cross_owner_status_do_not_change_registration(
     assert len(await registry.list_environments(principal=alice)) == 1
 
 
+@pytest.mark.parametrize("scope", [None, "project-provisioning-a"])
+async def test_provisioning_scope_is_frozen_for_replay_and_retained_cleanup(environment_registry, scope):
+    from loom.db.nebius_environment_schema import NebiusEnvironmentOperation
+    from loom_service.environment_management.cloud_provider import NebiusEnvironmentCloudProvider
+    from loom_service.environment_management.steps import ProvisioningStep
+    from tests.unit.test_nebius_environment_cloud_provider import CloudApi
+
+    registry, factory, (alice, _), prepare = environment_registry
+    prepared = replace(prepare(), provisioning_project_id=scope)
+    created = await registry.create(principal=alice, idempotency_key="scoped", prepared=prepared)
+    if scope is None:
+        # Model a historical persisted plan, before the optional field existed.
+        async with factory.begin() as session:
+            operation = await session.get(NebiusEnvironmentOperation, created.operation_id)
+            historical = dict(operation.plan_json)
+            historical.pop("provisioning_project_id", None)
+            operation.plan_json = historical
+    assert await registry.create(principal=alice, idempotency_key="scoped", prepared=replace(
+        prepared, provisioning_project_id="project-provisioning-b",
+    )) == created
+    lease = await registry.claim(created.operation_id)
+    context = await registry.provisioning_context(lease)
+    assert context.provisioning_project_id == scope
+    destroyed = await registry.destroy_retained(created.environment_id, principal=alice,
+                                                expected_generation=1, idempotency_key="cleanup-scoped")
+    cleanup = await registry.provisioning_context(await registry.claim(destroyed.operation_id))
+    assert cleanup.provisioning_project_id == cleanup.source.provisioning_project_id == scope
+    provider = NebiusEnvironmentCloudProvider(CloudApi())
+    for kind in ("group", "service_account", "access_key"):
+        step = ProvisioningStep("iam:source:" + kind, "credentials", {"purpose": "source", "action": kind})
+        cleanup.source.identities["iam:source:service_account"] = "retained-account"
+        expected = scope or prepared.config["quota_parent_id" if kind == "group" else "project_id"]
+        assert provider.intent(cleanup.source, step)[1]["metadata"]["parent_id"] == expected
+
+
 async def test_supplied_owner_or_generic_team_credentials_cannot_create(environment_registry):
     from loom_service.environment_management.registry import ManagementError
 
