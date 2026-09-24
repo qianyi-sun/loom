@@ -172,9 +172,35 @@ and version. A private journal precedes the single copy; replay only rechecks th
 destination. The protected caller supplies short-lived registry-only auth. This
 publication primitive does not perform vulnerability scanning or install ingress.
 
-These primitives do not expose a protected installation operation. Connected
-transport, fresh foundation/capacity binding, guarded public selector/configuration
-cutover, DNS publication and renewal scheduling remain installation requirements.
+The protected caller reserves copy intent durably on the gateway before the
+registry mutation. Subsequent workflow runs can only inspect the pinned
+destination, even when their local journals or Actions artifacts are gone.
+This reservation grants no registry credentials or Kubernetes operation to the
+gateway's fixed image-intent command.
+
+The protected `nebius-rollout` ingress operation connects these primitives through
+an exact-source, hash-bound forced SSH command separate from certificate and
+Kubernetes-only credentials. It uses isolated hash-locked tooling, including both
+first-party wheels, and the unchanged private parent-death supervisor. The
+protected runner scans the fixed image under the no-exceptions release policy
+before digest-only publication. Fresh live configuration and full Node/Pod
+accounting authorize staging; they never imply paid expansion or spare capacity
+on a foreign legacy node.
+
+Cutover proves current-Pod TLS and the retained legacy route before acquiring the
+candidate's database idle guard. Read-only guard observation identifies the exact
+owner/candidate without stealing or releasing it. The public Service selector
+and persisted shared-mode flag use separate UID/resourceVersion-conditioned
+writes, each journaled and annotated with operation ownership. Unknown outcomes
+are reconciled by exact readback, not retry. Allocation/ports and unrelated
+configuration remain unchanged. Public HTTPS proof precedes pause release.
+
+Explicit paused recovery can restore only still-owned incomplete transitions
+using the journaled original backend. It does not depend on healthy new ingress
+or certificate issuance. Drift and unresolved release intents fail closed;
+completed deployments are not reversed by this operation. Protected live
+installation, DNS publication and renewal scheduling still require operational
+qualification; these source contracts do not establish installed readiness.
 
 ## Independent management service runtime
 

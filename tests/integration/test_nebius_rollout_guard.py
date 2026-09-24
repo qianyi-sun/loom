@@ -81,3 +81,48 @@ def test_operator_cli_acquires_and_releases(isolated_migration_postgres_url, mon
     result = subprocess.run([*command, "release", "--owner", "cli-test"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "released"
+
+
+@pytest.mark.asyncio
+async def test_recovery_observation_matches_both_owner_and_candidate_without_writing(isolated_migration_postgres_url):
+    from loom import nebius_rollout_guard as guard
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            assert await guard.observe(session, owner="recovery", candidate="a" * 40) == {"status": "open"}
+            await acquire(session, owner="recovery", candidate="a" * 40)
+            assert await guard.observe(session, owner="recovery", candidate="a" * 40) == {"status": "held"}
+            assert await guard.observe(session, owner="foreign", candidate="a" * 40) == {"status": "skipped_locked"}
+            assert await guard.observe(session, owner="recovery", candidate="b" * 40) == {"status": "skipped_locked"}
+            assert not await admission_open(session)
+            await release(session, owner="recovery")
+            assert await guard.observe(session, owner="recovery", candidate="a" * 40) == {"status": "open"}
+    finally:
+        await engine.dispose()
+
+
+def test_operator_cli_observes_pause_without_releasing(isolated_migration_postgres_url, monkeypatch):
+    import json
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("LOOM_CP_DB_URL", isolated_migration_postgres_url)
+    monkeypatch.setenv("LOOM_CP_MINIO_ACCESS_KEY", "test-access")
+    monkeypatch.setenv("LOOM_CP_MINIO_SECRET_KEY", "test-secret")
+    command = [sys.executable, "-m", "loom.nebius_rollout_guard"]
+    try:
+        result = subprocess.run([*command, "acquire", "--owner", "observe-cli", "--candidate", "a" * 40],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        for owner, candidate, expected in (("observe-cli", "a" * 40, "held"),
+                                           ("observe-cli", "b" * 40, "skipped_locked"),
+                                           ("foreign", "a" * 40, "skipped_locked")):
+            result = subprocess.run([*command, "observe", "--owner", owner, "--candidate", candidate],
+                                    capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            assert json.loads(result.stdout) == {"status": expected}
+    finally:
+        result = subprocess.run([*command, "release", "--owner", "observe-cli"],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr

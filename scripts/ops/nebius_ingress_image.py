@@ -47,7 +47,7 @@ def _inspect(image: str, auth_file: Path) -> None:
 
 
 def mirror_ingress_image(*, registry_prefix: str, region: str, auth_file: Path,
-                         state_dir: Path) -> dict[str, str]:
+                         state_dir: Path, allow_copy: bool = True) -> dict[str, str]:
     """One digest-preserving copy; subsequent calls reconcile by readback only.
 
     Destination uses a digest, never a mutable tag. No credential refresh, paid
@@ -55,7 +55,7 @@ def mirror_ingress_image(*, registry_prefix: str, region: str, auth_file: Path,
     supplies freshly minted registry-only auth and retains the private journal.
     """
     try:
-        if (not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", region)
+        if (type(allow_copy) is not bool or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", region)
                 or not re.fullmatch(r"cr\." + re.escape(region) + r"\.nebius\.cloud/[a-z0-9]+", registry_prefix)):
             raise ImageError("ingress registry differs from protected region")
         for path in (auth_file, state_dir):
@@ -80,14 +80,16 @@ def mirror_ingress_image(*, registry_prefix: str, region: str, auth_file: Path,
                         or record["status"] not in {"copy_intent", "mirrored"}):
                     raise ImageError("ingress image journal differs from protected input")
             else:
-                _inspect(source, auth_file)
+                if allow_copy:
+                    _inspect(source, auth_file)
                 record = {**identity, "status": "copy_intent"}
                 private_state._atomic_json(path, record)
-                try:
-                    _run(["copy", "--authfile", str(auth_file), "--preserve-digests",
-                          "docker://" + source, "docker://" + destination], timeout=900)
-                except ImageError:
-                    pass  # Only exact destination readback resolves an uncertain copy.
+                if allow_copy:
+                    try:
+                        _run(["copy", "--authfile", str(auth_file), "--preserve-digests",
+                              "docker://" + source, "docker://" + destination], timeout=900)
+                    except ImageError:
+                        pass  # Only exact destination readback resolves an uncertain copy.
             _inspect(destination, auth_file)
             if record["status"] != "mirrored":
                 private_state._atomic_json(path, {**identity, "status": "mirrored"})

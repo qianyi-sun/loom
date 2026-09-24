@@ -67,6 +67,16 @@ async def release(session: AsyncSession, *, owner: str) -> dict[str, Any]:
     return {"status": "released"}
 
 
+async def observe(session: AsyncSession, *, owner: str, candidate: str) -> dict[str, Any]:
+    """Read recovery ownership without acquiring, stealing or clearing a pause."""
+    existing = (await session.execute(text(
+        "SELECT owner, candidate_sha FROM nebius_rollout_guard WHERE id = 1"
+    ))).first()
+    if existing is None:
+        return {"status": "open"}
+    return {"status": "held" if existing.owner == owner and existing.candidate_sha == candidate else "skipped_locked"}
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     from loom_control_plane.config import ControlPlaneSettings
 
@@ -76,6 +86,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         async with AsyncSession(engine) as session, session.begin():
             if args.action == "acquire":
                 return await acquire(session, owner=args.owner, candidate=args.candidate)
+            if args.action == "observe":
+                return await observe(session, owner=args.owner, candidate=args.candidate)
             return await release(session, owner=args.owner)
     finally:
         await engine.dispose()
@@ -83,12 +95,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("acquire", "release"))
+    parser.add_argument("action", choices=("acquire", "release", "observe"))
     parser.add_argument("--owner", required=True)
     parser.add_argument("--candidate")
     args = parser.parse_args()
-    if args.action == "acquire" and not args.candidate:
-        parser.error("acquire requires --candidate")
+    if args.action in {"acquire", "observe"} and not args.candidate:
+        parser.error("acquire and observe require --candidate")
     try:
         print(json.dumps(asyncio.run(_run(args))))
     except Exception:

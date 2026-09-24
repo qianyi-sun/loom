@@ -108,8 +108,9 @@ Preserve the original selector and protected configuration as rollback evidence.
 The selector change and persisted flag must share the rollout concurrency boundary;
 ordinary rollout rechecks the selected mode after acquiring its guard, before any
 backup or resource mutation. Never remove `loom-web-tls`
-or replace the LoadBalancer to perform this migration. No protected shared-ingress
-install operation is supplied yet; do not use an ad-hoc `kubectl` cutover.
+or replace the LoadBalancer to perform this migration. Use the protected
+`operation=ingress` installation described below, never an ad-hoc `kubectl`
+cutover.
 
 The renderer uses Traefik 3.7.13 features and receives trusted read-only Secret
 discovery across the cluster. Budget 200m CPU, 256 MiB memory and 128 MiB ephemeral
@@ -289,9 +290,10 @@ renewal to verified reload before enabling a schedule.
 ### Ingress TLS delivery and rotation status
 
 `scripts/ops/nebius_ingress_gateway.py` supplies private delivery, journaled
-controller switching and per-Pod TLS qualification primitives. There is no live
-ingress-install command or workflow operation yet; do not invoke them manually
-against a shared cluster to bypass protected rollout authority.
+controller switching and per-Pod TLS qualification primitives. The protected
+`nebius-rollout` workflow connects initial installation as `operation=ingress`
+and owned, paused recovery as `operation=ingress-rollback`. Do not invoke these
+private modules directly against a shared cluster to bypass that authority.
 
 Their receipts distinguish `tls_delivered`, `controller_switch_observed` and
 `controller_qualified`. These mean, respectively, exact immutable Secret readback,
@@ -315,7 +317,133 @@ destination, and verifies raw manifest/configuration hashes plus architecture an
 version. Preserve `image-mirror.json` on any failure; an unresolved recorded copy
 is read back, not automatically repeated. `mirrored` is image-identity evidence,
 not a vulnerability scan, controller readiness or public cutover. The protected
-orchestrator still needs to connect these primitives to installation authority.
+installation scans the exact upstream digest first, using the pinned Trivy
+release policy with no exceptions, before registry publication or cluster writes.
+
+### Install the restricted ingress authority
+
+This is an operator bootstrap, not evidence that shared ingress is installed.
+Use a clean checkout of the exact integrated `dev` commit and the existing
+approved gateway operator route. Preserve the certificate entrypoint and all
+other SSH grants. Never give Actions the operator key.
+
+Prepare `NEBIUS_INGRESS_INSTALLATION_JSON` as non-secret protected configuration:
+
+```json
+{
+  "schema": "loom.nebius-ingress-installation.v1",
+  "source_sha": "<exact integrated tooling commit>",
+  "candidate": "<exact installed application candidate>",
+  "state_dir": "/home/operator/.loom/nebius-ingress/state",
+  "certificate_config": "/home/operator/.loom/nebius-certificates/state/installation.json",
+  "kubeconfig": "/home/operator/.kube/approved-nebius-config",
+  "kubectl": "/usr/local/bin/kubectl",
+  "cluster_id": "<approved mk8s identifier>",
+  "api_server": "https://<approved API endpoint>",
+  "ingress_class": "loom-shared",
+  "image": "cr.<region>.nebius.cloud/<registry>/loom-shared-ingress@sha256:3429c14149401de2ac82fc72ddc6a92642332b90deb3012301ff211b9d2d0f18",
+  "binding": {
+    "installation_id": "<new ingress UUID>",
+    "certificate_installation_id": "<existing certificate UUID>",
+    "namespace": "<existing application namespace>",
+    "namespace_uid": "<freshly observed namespace UUID>",
+    "kube_system_uid": "<freshly observed kube-system UUID>",
+    "child_domain": "<approved personal environment zone>",
+    "management_host": "<approved management hostname>"
+  }
+}
+```
+
+Resolve placeholders from protected readback, not historical examples. The
+application candidate must already contain `loom.nebius_rollout_guard observe`;
+an older candidate fails before acquiring a pause. The live ConfigMap remains
+the configuration authority: the installer reads it freshly and checks candidate,
+cluster/API origin and namespace identity rather than rendering from this metadata.
+
+With pinned uv 0.11.26, export dependencies outside the checkout and prepare an
+exact tooling bundle. `--prepare-bundle` does not scan, publish, use SSH or mutate
+Kubernetes; the destination must not exist:
+
+```bash
+uv export --locked --no-default-groups --extra cluster --group nebius-certificates \
+  --no-emit-workspace --format requirements-txt --no-header --quiet \
+  --output-file /private/ingress-requirements.txt
+uv run --no-sync python -m scripts.ops.nebius_ingress_rollout \
+  --operation install --requirements /private/ingress-requirements.txt \
+  --prepare-bundle /private/ingress-approved.zip --evidence-dir /private/ingress-evidence
+```
+
+The bundle contains the exact scripts, uv, hash-locked dependencies, both Loom
+and `loom-bundle-checksum` wheels, and installation metadata—no credentials.
+Wheel construction uses a clean committed-source archive, the locked,
+hash-verified setuptools backend, stable timestamps and canonical ZIP metadata.
+Checkout modes, umask and ignored build artifacts cannot change the wheels.
+Record the reported bundle SHA256. Through the operator route, place
+that bundle, the reviewed standalone installer and a new plain Ed25519 public
+key in private files; preview, then apply the same reviewed inputs:
+
+```bash
+python3 -I /private/install_nebius_ingress_entrypoint.py \
+  --bundle /private/ingress-approved.zip --bundle-sha256 <approved-sha256> \
+  --public-key /private/ingress.pub
+# Repeat the exact command with --apply after inspecting the prepared receipt.
+```
+
+The installer appends one `restrict` forced-command grant, bound to the bundle
+and bootstrap/supervisor source hashes. It accepts only
+`loom-nebius-ingress-v1`, `loom-nebius-ingress-rollback-v1` and
+`loom-nebius-ingress-image-intent-v1`. Existing conflicting
+authority for that key is rejected. Keep the private key only in protected
+Environment secret `NEBIUS_INGRESS_SSH_KEY`; set the matching metadata variable
+`NEBIUS_INGRESS_INSTALLATION_JSON`. Use the existing verified deployment target,
+known-hosts setting and registry-only publication identity. No broad gateway
+shell or operator credentials belong in Actions.
+
+Dispatch `nebius-rollout` from `dev` with `operation=ingress`. It uses the same
+workflow concurrency as application rollout and certificate operations. The
+gateway installs a separate private, content-addressed tool environment, verifies
+isolated imports, and supervises operation children for timeout and parent death.
+Partial tooling releases are retained for reconciliation, not overwritten.
+Before any registry copy, the fixed image-intent command durably reserves the
+exact destination on the gateway. Only its first successful reply permits one
+copy. Later workflow invocations verify the destination by readback only, even
+if the previous runner disappeared or its evidence artifact expired. A lost
+intent reply also consumes that permission. Missing or corrupt destination data
+then requires explicit operator reconciliation; do not erase the gateway's
+`state/image-publication.json` to trigger another copy. Registry credentials and
+publication remain on Actions, not the gateway.
+
+### Public cutover and paused recovery
+
+Before writes, fresh full Node/Pod inventory must fit two additional ingress
+Pods on the eligible system node. Foreign, pending, init/sidecar and resizing
+workloads count; legacy-node capacity is not borrowed. No node or storage growth
+is performed. Delivery and initial staging precede exact-Pod TLS and legacy-route
+proof. Only then does cutover acquire this candidate's idle rollout guard.
+Legacy HTTPS proof requires the health response, frontend environment and
+responding API's `/api/v1/version` build revision to match the protected candidate.
+This does not claim that every API replica has been inspected.
+
+The Service selector and configuration flag are separate UID/resourceVersion-
+conditioned writes. Durable intent and an operation UUID precede each write;
+exact readback resolves a lost reply without repeating it. Public allocation,
+ports, unrelated configuration and legacy TLS remain intact. `complete` means
+the public legacy HTTPS route and new certificate qualified and the owned pause
+was released. It does not mean DNS, renewal or management is ready.
+
+On failure, preserve the private `state/stage`, `state/cutover` and certificate
+journals, plus the workflow's bounded image/operation evidence. A paused,
+incomplete cutover can use `operation=ingress-rollback`: it proves the retained
+original backend, restores only still-owned journaled values, verifies the
+original public route and releases only its own pause. It does not require image
+publication, a new certificate or healthy new ingress. Foreign drift, missing
+ownership or an unresolved guard-release intent blocks recovery; do not clear
+the guard, delete a journal, or blindly dispatch again. Completed cutovers cannot
+be reversed through this paused-recovery operation. A new attempt after completed
+rollback requires operator reconciliation preserving the old journal.
+
+The workflow has no DNS-publication or scheduled-renewal operation. Qualify those
+separately before accepting unattended management or personal environments.
 
 ### Render management manifests
 

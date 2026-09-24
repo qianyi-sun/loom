@@ -117,7 +117,7 @@ def _pod_request(pod: Any) -> ResourceTotals:
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
 
 
-def _pool_resize_unqualified(raw: dict[str, Any]) -> bool:
+def _pool_resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -> bool:
     """Do not admit against freed spec resources while kubelet still holds them.
 
     Only used by pool capture. Immutable gateway Jobs do not resize; legitimate
@@ -131,23 +131,28 @@ def _pool_resize_unqualified(raw: dict[str, Any]) -> bool:
     ):
         return True
 
-    def exceeds(allocated: Any, desired: Any) -> bool:
-        if not isinstance(allocated, dict) or not isinstance(desired, dict):
+    def exceeds(allocated: Any, requested: ResourceTotals) -> bool:
+        if not isinstance(allocated, dict):
             raise ValueError("invalid resize resources")
-        actual, requested = _resources(allocated), _resources(desired)
+        actual = _resources(allocated)
         return any(getattr(actual, key) > getattr(requested, key)
                    for key in ("cpu_millis", "memory_mib", "storage_mib"))
 
     spec = raw["spec"]
-    pod_requests = (spec.get("resources") or {}).get("requests") or {}
-    if (exceeds((status.get("resources") or {}).get("requests") or {}, pod_requests)
-            or exceeds(status.get("allocatedResources") or {}, pod_requests)):
+    # Newer kubelets report aggregate Pod allocations even without explicit
+    # spec.resources. Compare with the complete request already charged, not
+    # an absent PodLevelResources field (zero). Excess still fails closed.
+    if (exceeds((status.get("resources") or {}).get("requests") or {}, pod_request)
+            or exceeds(status.get("allocatedResources") or {}, pod_request)):
         return True
     for containers_key, statuses_key in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
         desired = {row["name"]: (row.get("resources") or {}).get("requests") or {}
                    for row in spec.get(containers_key) or []}
         for container in status.get(statuses_key) or []:
-            requested = desired.get(container.get("name"), {})
+            requested_raw = desired.get(container.get("name"), {})
+            if not isinstance(requested_raw, dict):
+                raise ValueError("invalid resize resources")
+            requested = _resources(requested_raw)
             if (exceeds(container.get("allocatedResources") or {}, requested)
                     or exceeds((container.get("resources") or {}).get("requests") or {}, requested)):
                 return True
@@ -169,12 +174,12 @@ def _decode_pool_pods(response: Any) -> Any:
         with client.ApiClient() as api:
             result = api.deserialize(response, "V1PodList")
         for raw, pod in zip(document["items"], result.items, strict=True):
-            pod.spec._loom_pool_resize_unqualified = _pool_resize_unqualified(raw)
             resources = raw["spec"].get("resources")
             if resources is not None:
                 if not isinstance(resources, dict) or not isinstance(resources.get("requests", {}), dict):
                     raise ValueError("invalid Pod resource requests")
                 pod.spec.resources = resources
+            pod.spec._loom_pool_resize_unqualified = _pool_resize_unqualified(raw, _pod_request(pod))
         return result
     except Exception:
         # Neither the HTTP body nor deserializer diagnostics are evidence: Pod

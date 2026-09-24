@@ -25,9 +25,41 @@ def loading_client(monkeypatch):
     monkeypatch.setattr(client, "BatchV1Api", lambda: batch)
     container = SimpleNamespace(
         exec=lambda command: SimpleNamespace(exit_code=0, output=b"{}"),
+        get_logs=lambda: (b"", b'Starting k3s v1.36.1+k3s1'),
         get_exposed_port=lambda port: "16443",
     )
     return container, core, batch, clock
+
+
+def test_client_does_not_exec_during_cgroup_initialization(loading_client):
+    container, core, batch, clock = loading_client
+    core.read_namespace = lambda *args, **kwargs: object()
+    initialized = False
+
+    def logs():
+        nonlocal initialized
+        initialized = clock[0] > 0
+        return b"", b"Starting k3s v1.36.1+k3s1" if initialized else b""
+
+    def execute(command):
+        # An exec process in the root cgroup prevents K3s from enabling the
+        # subtree controllers. Reading Docker logs has no such side effect.
+        assert initialized, "exec would race root cgroup initialization"
+        return SimpleNamespace(exit_code=0, output=b"{}")
+
+    container.get_logs, container.exec = logs, execute
+    assert fixture._load_client(container)[1:] == (core, batch)
+
+
+def test_client_bootstrap_wait_has_a_deadline_without_exec(loading_client):
+    container, core, _, clock = loading_client
+    core.read_namespace = lambda *args, **kwargs: object()
+    container.get_logs = lambda: (b"", b"not initialized")
+    executions = []
+    container.exec = lambda command: executions.append(command) or SimpleNamespace(exit_code=0, output=b"{}")
+    with pytest.raises(AssertionError, match="bootstrap"):
+        fixture._load_client(container)
+    assert not executions and clock[0] == 90
 
 
 def test_client_discovery_waits_for_system_namespace(loading_client):
