@@ -1,0 +1,212 @@
+"""Create-only phases from the trusted management renderer, not arbitrary apply.
+
+The installer owns prerequisite qualification and phase ordering. It must retain
+independent phase-start evidence so loss of this directory cannot reopen writes.
+Receipts freeze resource identities, not database/application/backup readiness.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import re
+import ssl
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Protocol
+from uuid import UUID, uuid4
+
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_material import HTTPSMaterialAPI, ManagementBinding
+
+from loom_service.environment_management.deployment import RenderedManagement
+from loom_service.environment_management.kubernetes_provider import _contains
+
+_MARKER = "loom.nebius/management-stage-operation"
+_LABEL = "loom.nebius/management-installation"
+_RESOURCES = {
+    "ConfigMap": ("v1", "configmaps"), "ServiceAccount": ("v1", "serviceaccounts"),
+    "Service": ("v1", "services"), "NetworkPolicy": ("networking.k8s.io/v1", "networkpolicies"),
+    "StatefulSet": ("apps/v1", "statefulsets"), "Deployment": ("apps/v1", "deployments"),
+    "Job": ("batch/v1", "jobs"), "CronJob": ("batch/v1", "cronjobs"),
+    "Ingress": ("networking.k8s.io/v1", "ingresses"),
+}
+_PHASES = {
+    "10-config-network.yaml": {
+        ("ConfigMap", "loom-platform-config"), ("ServiceAccount", "loom-platform"),
+        ("NetworkPolicy", "default-deny-ingress"), ("NetworkPolicy", "management-api"),
+        ("NetworkPolicy", "postgres-private"),
+    },
+    "20-database.yaml": {("Service", "loom-postgres"), ("StatefulSet", "loom-postgres")},
+    "40-services.yaml": {("Service", "loom-service"), ("Deployment", "loom-service")},
+    "70-public.yaml": {("Ingress", "loom-management")},
+    "80-backup.yaml": {("CronJob", "loom-platform-backup")},
+}
+
+
+class ManagementStageError(RuntimeError):
+    """Payload-free failure; preserve data and private recovery state."""
+
+
+class ManagementStageAPI(Protocol):
+    def verify_identity(self, binding: ManagementBinding) -> None: ...
+    def get_resource(self, document: dict[str, Any]) -> dict[str, Any] | None: ...
+    def default_resource(self, document: dict[str, Any]) -> dict[str, Any]: ...
+    def create_resource(self, document: dict[str, Any]) -> None: ...
+
+
+def _documents(rendered: RenderedManagement, phase: str, binding: ManagementBinding) -> dict[str, dict[str, Any]]:
+    try:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", rendered.revision) is None:
+            raise ValueError()
+        required = ({("Job", "loom-management-migrate-" + rendered.revision[7:19])}
+                    if phase == "30-migrate.yaml" else _PHASES[phase])
+        documents = rendered.files[phase]
+        found = {(doc["kind"], doc["metadata"]["name"]) for doc in documents}
+        optional = {("ServiceAccount", "loom-management-provisioner")} if phase == "10-config-network.yaml" else set()
+        if not required <= found or found - required - optional or len(found) != len(documents):
+            raise ValueError()
+        for doc in documents:
+            if (doc["metadata"].get("namespace") != binding.namespace
+                    or doc["metadata"].get("labels", {}).get(_LABEL) != binding.installation_id
+                    or doc["apiVersion"] != _RESOURCES[doc["kind"]][0]
+                    or _MARKER in doc["metadata"].get("annotations", {})):
+                raise ValueError()
+        return {_key(doc): copy.deepcopy(doc) for doc in documents}
+    except Exception:
+        raise ManagementStageError("resource outside fixed management phase") from None
+
+
+class HTTPSManagementStageAPI(HTTPSMaterialAPI):
+    """Explicit TLS/auth, no retry; only the fixed phase's rendered objects."""
+
+    error_type = ManagementStageError
+
+    def __init__(self, *, binding: ManagementBinding, rendered: RenderedManagement, phase: str,
+                 api_server: str, ssl_context: ssl.SSLContext, token: str | None = None):
+        self.documents = _documents(rendered, phase, binding)
+        super().__init__(binding=binding, api_server=api_server, ssl_context=ssl_context, token=token)
+
+    def verify_identity(self, binding: ManagementBinding) -> None:
+        super().verify_identity(binding)
+        namespace = self._request("GET", "/api/v1/namespaces/" + binding.namespace)
+        if (namespace is None or _uid(namespace) != binding.namespace_uid
+                or namespace["metadata"].get("labels", {}).get("pod-security.kubernetes.io/enforce") != "restricted"):
+            raise ManagementStageError("management namespace policy differs")
+
+    def _approved(self, document: dict[str, Any], *, writing: bool = False) -> str:
+        try:
+            desired = copy.deepcopy(document)
+            expected = self.documents[_key(desired)]
+            annotations = desired["metadata"].get("annotations", {})
+            operation = annotations.pop(_MARKER, None)
+            if writing or operation is not None:
+                if str(UUID(operation)) != operation or UUID(operation).int == 0:
+                    raise ValueError()
+            if not annotations and "annotations" not in expected["metadata"]:
+                desired["metadata"].pop("annotations", None)
+            if desired != expected:
+                raise ValueError()
+            version, resource = _RESOURCES[desired["kind"]]
+            return ("/api/v1" if version == "v1" else "/apis/" + version) + "/namespaces/" + self.binding.namespace + "/" + resource
+        except Exception:
+            raise ManagementStageError("resource outside fixed management phase") from None
+
+    def get_resource(self, document: dict[str, Any]) -> dict[str, Any] | None:
+        return self._request("GET", self._approved(document) + "/" + document["metadata"]["name"])
+
+    def default_resource(self, document: dict[str, Any]) -> dict[str, Any]:
+        path = self._approved(document, writing=True)
+        self.verify_identity(self.binding)
+        result = self._request("POST", path + "?dryRun=All", document=document)
+        assert result is not None
+        return result
+
+    def create_resource(self, document: dict[str, Any]) -> None:
+        path = self._approved(document, writing=True)
+        self.verify_identity(self.binding)
+        self._request("POST", path, document=document)
+
+
+def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, Any]:
+    observed = api.default_resource(desired)
+    if not _contains(observed, desired):
+        raise ManagementStageError("management defaulting changed requested configuration")
+    return _snapshot(observed, allocation=False)
+
+
+def stage_management_resources(*, rendered: RenderedManagement, phase: str, binding: ManagementBinding,
+                               api: ManagementStageAPI, state_dir: Path) -> dict[str, Any]:
+    """Freeze all defaults before creating one phase; unknown writes only read back."""
+    try:
+        documents = _documents(rendered, phase, binding)
+        identity = {"schema": "loom.nebius-management-stage.v1", "binding": asdict(binding),
+                    "revision": rendered.revision, "phase": phase}
+        with private_state._locked_state(state_dir):
+            api.verify_identity(binding)
+            path = state_dir / "stage.json"
+            if path.exists() or path.is_symlink():
+                record = json.loads(private_state._private_read(path, limit=4 * 1024 * 1024))
+            else:
+                if any(api.get_resource(doc) is not None for doc in documents.values()):
+                    raise ManagementStageError("untracked management resource; refusing adoption")
+                operation = str(uuid4())
+                resources = {}
+                for key, doc in documents.items():
+                    desired = copy.deepcopy(doc)
+                    desired["metadata"].setdefault("annotations", {})[_MARKER] = operation
+                    resources[key] = {"desired": desired, "expected": _defaulted(api, desired),
+                                      "status": "prepared", "uid": None, "observed": None}
+                record = {**identity, "operation_id": operation, "resources": resources}
+                private_state._atomic_json(path, record)
+            if (not isinstance(record, dict) or set(record) != {*identity, "operation_id", "resources"}
+                    or any(record[key] != value for key, value in identity.items())
+                    or str(UUID(record["operation_id"])) != record["operation_id"] or UUID(record["operation_id"]).int == 0
+                    or set(record["resources"]) != set(documents)):
+                raise ManagementStageError("management phase journal differs")
+            # Validate every item before the first write, including late entries.
+            for key, doc in documents.items():
+                desired = copy.deepcopy(doc)
+                desired["metadata"].setdefault("annotations", {})[_MARKER] = record["operation_id"]
+                item = record["resources"][key]
+                if (set(item) != {"desired", "expected", "status", "uid", "observed"}
+                        or item["desired"] != desired or item["status"] not in {"prepared", "create_intent", "created"}
+                        or not _contains(item["expected"], desired)
+                        or (item["status"] == "created") != (item["uid"] is not None and item["observed"] is not None)
+                        or (item["status"] != "created" and (item["uid"] is not None or item["observed"] is not None))):
+                    raise ManagementStageError("management resource journal differs")
+            for item in record["resources"].values():
+                api.verify_identity(binding)
+                actual = api.get_resource(item["desired"])
+                if item["status"] == "prepared":
+                    if actual is not None:
+                        raise ManagementStageError("untracked management resource; refusing adoption")
+                    item["status"] = "create_intent"
+                    private_state._atomic_json(path, record)
+                    try:
+                        api.create_resource(item["desired"])
+                    except Exception:
+                        pass
+                    actual = api.get_resource(item["desired"])
+                if actual is None:
+                    raise ManagementStageError("management create unresolved; preserve intent")
+                uid, snapshot = _uid(actual), _snapshot(actual)
+                if (_snapshot(actual, allocation=False) != item["expected"]
+                        or (item["uid"] is not None and (item["uid"] != uid or item["observed"] != snapshot))):
+                    raise ManagementStageError("management resource differs from recorded intent")
+                api.verify_identity(binding)
+                if item["status"] != "created":
+                    item.update(status="created", uid=uid, observed=snapshot)
+                    private_state._atomic_json(path, record)
+            for item in record["resources"].values():
+                actual = api.get_resource(item["desired"])
+                if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                    raise ManagementStageError("management phase changed before final readback")
+            api.verify_identity(binding)
+            return {"status": "management_phase_staged", "installation_id": binding.installation_id,
+                    "phase": phase, "revision": rendered.revision,
+                    "resource_uids": {key: item["uid"] for key, item in record["resources"].items()}}
+    except ManagementStageError:
+        raise
+    except Exception:
+        raise ManagementStageError("management staging unavailable; preserve recovery evidence") from None
