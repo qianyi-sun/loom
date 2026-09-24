@@ -11,7 +11,7 @@ from typing import Any
 from scripts.ops.deploy_nebius_platform import Kubectl
 from scripts.ops.nebius_ingress_bootstrap import validate_config
 from scripts.ops.nebius_ingress_gateway import MAX_KUBECTL_OUTPUT, IngressError, TLSBinding
-from scripts.ops.nebius_ingress_operation import LiveIngressAPI
+from scripts.ops.nebius_ingress_operation import LIVE_POD_FIELD_SELECTOR, LiveIngressAPI
 
 
 class ReadOnlyIngressAPI(LiveIngressAPI):
@@ -35,8 +35,8 @@ class ReadOnlyIngressAPI(LiveIngressAPI):
             ("get", "namespace", "kube-system", *suffix): "kube_system",
             ("get", "namespace", self.binding.namespace, *suffix): "namespace",
             ("get", "configmap", "loom-platform-config", "-n", self.binding.namespace, *suffix): "platform_configuration",
-            ("get", "nodes", *suffix): "nodes",
-            ("get", "pods", "--all-namespaces", *suffix): "pods",
+            ("get", "nodes", "-o", "json"): "nodes",
+            ("get", "pods", "--all-namespaces", "--field-selector", LIVE_POD_FIELD_SELECTOR, "-o", "json"): "pods",
         }
 
     def _run(self, arguments: list[str], *, payload: bytes | None = None) -> bytes:

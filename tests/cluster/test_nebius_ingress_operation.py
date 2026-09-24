@@ -75,6 +75,13 @@ def test_capacity_reads_live_pods_without_fetching_large_terminal_history(tmp_pa
             metadata=client.V1ObjectMeta(name="history-fixture"), automount_service_account_token=False))
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
         _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
+        # Ready is set before the node lifecycle controller removes its startup
+        # scheduling taint. Wait for that controller; never delete the taint.
+        deadline = time.monotonic() + 60
+        while any(taint.key == "node.kubernetes.io/not-ready"
+                  for taint in core.read_node(node_name).spec.taints or []):
+            assert time.monotonic() < deadline, "fixture startup taint did not clear"
+            time.sleep(0.25)
         core.patch_node(node_name, {"metadata": {"labels": {
             "loom.nebius/node-role": "system", "loom.nebius/platform": "integration"}},
             "spec": {"providerID": "nebius://" + node_name}})
@@ -103,7 +110,24 @@ def test_capacity_reads_live_pods_without_fetching_large_terminal_history(tmp_pa
                 "phase": "Succeeded" if index % 2 == 0 else "Failed"}})
         raw = _run(container, "kubectl", "get", "pods", "--all-namespaces", "-o", "json")
         assert len(raw.encode()) > 4 * 1024 * 1024
-        assert api.capacity()["reserved_pods"] == 2
+        try:
+            assert api.capacity()["reserved_pods"] == 2
+        except OperationError as exc:
+            for arguments in (["get", "nodes"], ["get", "pods", "--all-namespaces", "--field-selector",
+                                                  "status.phase!=Succeeded,status.phase!=Failed"]):
+                ignored = api._get(arguments)
+                listing = json.loads(api._run([*arguments, "-o", "json"]))
+                exc.add_note(json.dumps({"resource": arguments[1], "ignore_not_found_was_empty": ignored is None,
+                    "kind": listing.get("kind"), "apiVersion": listing.get("apiVersion"),
+                    "item_types": [{"kind": row.get("kind"), "apiVersion": row.get("apiVersion")}
+                                   for row in listing.get("items", [])]}))
+                if arguments[1] == "nodes":
+                    exc.add_note(json.dumps([{"taints": row.get("spec", {}).get("taints", []),
+                        "conditions": [{"type": c["type"], "status": c["status"]}
+                                       for c in row.get("status", {}).get("conditions", [])],
+                        "allocatable": row.get("status", {}).get("allocatable", {})}
+                        for row in listing.get("items", [])]))
+            raise
         # A pending foreign workload must still consume the same capacity.
         allocatable = core.read_node(node_name).status.allocatable
         core.create_namespaced_pod(namespace, {"apiVersion": "v1", "kind": "Pod",

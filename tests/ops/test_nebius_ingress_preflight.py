@@ -57,8 +57,11 @@ def wire(tmp_path, platform_inputs, inventory):
             self.calls.append(args)
             if self.error:
                 raise self.error
-            if args[-3:] == ("--ignore-not-found", "-o", "json"):
+            ignored = args[-3:] == ("--ignore-not-found", "-o", "json")
+            if ignored:
                 args = args[:-3]
+            elif args[0] == "get" and args[-2:] == ("-o", "json"):
+                args = args[:-2]
             live_only = args[-2:] == ("--field-selector", "status.phase!=Succeeded,status.phase!=Failed")
             if live_only:
                 args = args[:-2]
@@ -67,6 +70,8 @@ def wire(tmp_path, platform_inputs, inventory):
             if live_only and isinstance(value, dict):
                 value = {**value, "items": [row for row in value["items"]
                     if row.get("status", {}).get("phase") not in {"Succeeded", "Failed"}]}
+            if ignored and args[1] in {"nodes", "pods"} and isinstance(value, dict) and not value["items"]:
+                return ""
             return value if isinstance(value, str) else json.dumps(value)
 
     return Wire(), config, documents, inventory
@@ -170,7 +175,8 @@ def test_diagnostic_preserves_wire_size_at_gateway_limit(wire, monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, raw, ""))
     adapter = module().ReadOnlyIngressAPI(Kubectl(Path(config["kubeconfig"])), config)
     with pytest.raises(RuntimeError):
-        adapter._get(["get", "pods", "--all-namespaces"])
+        adapter._run(["get", "pods", "--all-namespaces", "--field-selector",
+                      "status.phase!=Succeeded,status.phase!=Failed", "-o", "json"])
     assert adapter.failure == "response_too_large"
     assert adapter.reads[-1]["bytes"] == 4194305
 
@@ -224,3 +230,13 @@ def test_live_pod_filter_retains_nonterminal_terminating_and_foreign_demand(wire
     wire[3]["pods"].append(pod)
     result = inspect(wire)
     assert result["failures"] == {"capacity": "insufficient_capacity"}
+
+
+def test_empty_complete_live_pod_list_is_not_missing_inventory(wire):
+    wire[3]["pods"].clear()
+    assert inspect(wire)["checks"] == {"foundation": "passed", "capacity": "passed"}
+
+
+def test_missing_live_pod_response_remains_blocked(wire):
+    wire[2][("get", "pods", "--all-namespaces")] = ""
+    assert inspect(wire)["checks"]["capacity"] == "blocked"
