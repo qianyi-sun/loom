@@ -325,6 +325,8 @@ def publish_ingress_dns(*, api: InstallationAPI, certificate_config: dict[str, A
                 raise OperationError("DNS credential changed during publication")
             current = installed()
             qualify_authority(current)
+            if load_token(credential) != token:
+                raise OperationError("DNS credential changed during publication")
             return current
 
         def wait(current: dict[str, Any]) -> None:

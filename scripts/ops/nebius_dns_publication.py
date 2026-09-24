@@ -174,7 +174,10 @@ def _observe_addresses(target: dict[str, Any], names: tuple[str, str], servers: 
     for server in servers:
         for host in names:
             wanted = dns.name.from_text(host)
-            for kind in (dns.rdatatype.A, dns.rdatatype.AAAA):
+            kinds = (dns.rdatatype.A, dns.rdatatype.AAAA) if require_address else (
+                dns.rdatatype.SOA, dns.rdatatype.A, dns.rdatatype.AAAA,
+            )
+            for kind in kinds:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise PublicationError("DNS observation deadline")
@@ -196,6 +199,15 @@ def _observe_addresses(target: dict[str, Any], names: tuple[str, str], servers: 
                         or any(row.rdtype in {dns.rdatatype.CNAME, dns.rdatatype.DNAME} for row in response.answer)):
                     raise PublicationError("DNS alias or delegation requires separate qualification")
                 code = response.rcode()
+                if kind == dns.rdatatype.SOA:
+                    # One server may host both a parent and a delegated child;
+                    # AA alone cannot identify which zone owns this DNS name.
+                    soa = [row for row in (*response.answer, *response.authority) if row.rdtype == dns.rdatatype.SOA]
+                    if (code not in {dns.rcode.NOERROR, dns.rcode.NXDOMAIN}
+                            or len(soa) != 1 or len(soa[0]) != 1
+                            or soa[0].name != dns.name.from_text(target["zone"])):
+                        raise PublicationError("publication name is not owned by the configured DNS zone")
+                    continue
                 values = [str(item) for row in response.answer if row.name == wanted and row.rdtype == kind for item in row]
                 if kind == dns.rdatatype.AAAA and values:
                     raise PublicationError("IPv6 DNS route is outside the qualified IPv4 ingress")
@@ -320,6 +332,10 @@ def publish_dns(provider: DNSProvider, *, target: dict[str, Any], state_dir: Pat
                     if row is not None:
                         entry.update(phase="qualified", record=row, origin="external")
                     else:
+                        # Inventory can block on multiple provider reads. Do not
+                        # let its latency turn earlier qualification into a stale
+                        # write grant, or consume intent when requalification fails.
+                        verify()
                         entry["phase"] = "intent"
                         private_state._atomic_json(path, journal)
                         try:
