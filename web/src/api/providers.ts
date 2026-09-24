@@ -62,12 +62,70 @@ export interface ProviderConnectionModelEntry {
   last_preflight_failure_kind?: "rejected" | "inconclusive" | null;
 }
 
-export interface ProviderConnectionEntry {
+export interface ModelPrice {
+  input_usd_per_1m: number;
+  output_usd_per_1m: number;
+  cache_read_usd_per_1m?: number | null;
+  cache_write_usd_per_1m?: number | null;
+}
+export interface ProviderPricing {
+  pricing_mode?: "usage_only" | "catalog" | "custom";
+  supplier_id?: string | null;
+  catalog_id?: string | null;
+  custom_pricing?: Record<string, ModelPrice> | null;
+  legacy_pricing?: {
+    default_model_price?: ModelPrice | null;
+    message?: string;
+  } | null;
+}
+export interface PriceCatalog {
+  id: string;
+  name: string;
+  team_id: string | null;
+  supplier_id: string | null;
+  source_url: string | null;
+  prices: Record<string, ModelPrice>;
+  aliases: Record<string, string>;
+  revision: number;
+  updated_at: string | null;
+  stale: boolean;
+  sync_error: string | null;
+}
+
+export const priceCatalogApi = {
+  list: () => apiFetch<{ items: PriceCatalog[] }>("/api/v1/price-catalogs"),
+  create: (name: string, prices: Record<string, ModelPrice>) =>
+    apiFetch<PriceCatalog>("/api/v1/price-catalogs", {
+      method: "POST",
+      body: JSON.stringify({ name, prices }),
+    }),
+  preview: (content: string, format: "csv" | "json") =>
+    apiFetch<{ prices: Record<string, ModelPrice>; count: number }>(
+      "/api/v1/price-imports/preview",
+      { method: "POST", body: JSON.stringify({ content, format }) },
+    ),
+  import: (
+    id: string,
+    content: string,
+    format: "csv" | "json",
+    expected_revision: number,
+    apply: boolean,
+  ) =>
+    apiFetch<{
+      catalog: PriceCatalog;
+      applied: boolean;
+      summary: { added: string[]; changed: string[]; removed: string[] };
+    }>(`/api/v1/price-catalogs/${encodeURIComponent(id)}/import`, {
+      method: "POST",
+      body: JSON.stringify({ content, format, expected_revision, apply }),
+    }),
+};
+
+export interface ProviderConnectionEntry extends ProviderPricing {
   id: string;
   name: string;
   type: string;
   status: string;
-  rate_card_provider?: string | null;
 }
 
 export interface ProviderConnectionDetail extends ProviderConnectionEntry {
@@ -77,21 +135,19 @@ export interface ProviderConnectionDetail extends ProviderConnectionEntry {
   updated_at?: string;
 }
 
-export interface ProviderConnectionCreateBody {
+export interface ProviderConnectionCreateBody extends ProviderPricing {
   name: string;
   type: string;
   base_url: string;
   api_key: string;
   allowed_models?: string[] | null;
-  rate_card_provider?: string | null;
 }
 
-export interface ProviderConnectionPatchBody {
+export interface ProviderConnectionPatchBody extends ProviderPricing {
   name?: string;
   base_url?: string;
   api_key?: string;
   allowed_models?: string[] | null;
-  rate_card_provider?: string | null;
 }
 
 export interface ProviderConnectionTestResult {
@@ -154,7 +210,9 @@ export const providersApi = {
   listModels: (view?: "default" | "raw") =>
     apiFetch<{ items: ModelEntry[] }>(`/api/v1/models${qs({ view })}`),
   listProviderConnections: (teamId?: string) =>
-    apiFetch<{ items: ProviderConnectionEntry[] }>(`/api/v1/provider-connections${qs({ team_id: teamId })}`),
+    apiFetch<{ items: ProviderConnectionEntry[] }>(
+      `/api/v1/provider-connections${qs({ team_id: teamId })}`,
+    ),
   getProviderConnection: (id: string) =>
     apiFetch<ProviderConnectionDetail>(`/api/v1/provider-connections/${id}`),
   createProviderConnection: (payload: ProviderConnectionCreateBody) =>
@@ -170,30 +228,50 @@ export const providersApi = {
   deleteProviderConnection: (id: string) =>
     apiFetch<void>(`/api/v1/provider-connections/${id}`, { method: "DELETE" }),
   testProviderConnection: (id: string) =>
-    apiFetch<ProviderConnectionTestResult>(`/api/v1/provider-connections/${id}/test`, { method: "POST" }),
+    apiFetch<ProviderConnectionTestResult>(
+      `/api/v1/provider-connections/${id}/test`,
+      { method: "POST" },
+    ),
   listProviderConnectionModels: (id: string) =>
-    apiFetch<{ items: ProviderConnectionModelEntry[] }>(`/api/v1/provider-connections/${id}/models`),
-  addProviderConnectionModel: (connectionId: string, body: { model_id: string }) =>
-    apiFetch<ProviderConnectionModelEntry>(`/api/v1/provider-connections/${connectionId}/models`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    apiFetch<{ items: ProviderConnectionModelEntry[] }>(
+      `/api/v1/provider-connections/${id}/models`,
+    ),
+  addProviderConnectionModel: (
+    connectionId: string,
+    body: { model_id: string },
+  ) =>
+    apiFetch<ProviderConnectionModelEntry>(
+      `/api/v1/provider-connections/${connectionId}/models`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+    ),
   refreshProviderConnectionModels: (id: string) =>
-    apiFetch<ProviderConnectionModelsRefreshResult>(`/api/v1/provider-connections/${id}/models/refresh`, {
-      method: "POST",
-    }),
+    apiFetch<ProviderConnectionModelsRefreshResult>(
+      `/api/v1/provider-connections/${id}/models/refresh`,
+      {
+        method: "POST",
+      },
+    ),
   preflightProviderConnectionModel: (id: string, modelId: string) =>
     apiFetch<ProviderConnectionModelEntry>(
       `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/preflight`,
       { method: "POST" },
     ),
   hideProviderConnectionModel: (id: string, modelId: string) =>
-    apiFetch<void>(`/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/hide`, {
-      method: "POST",
-    }),
+    apiFetch<void>(
+      `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/hide`,
+      {
+        method: "POST",
+      },
+    ),
   unhideProviderConnectionModel: (id: string, modelId: string) =>
-    apiFetch<void>(`/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/unhide`, {
-      method: "POST",
-    }),
+    apiFetch<void>(
+      `/api/v1/provider-connections/${id}/models/${encodeURIComponent(modelId)}/unhide`,
+      {
+        method: "POST",
+      },
+    ),
   listBackends: () => apiFetch<{ items: Backend[] }>("/api/v1/backends"),
 };

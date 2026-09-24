@@ -328,6 +328,14 @@ async def compute_facade_cost_estimate(
     where possible. Missing provider/model rows degrade to cost=0 with
     an explainable marker for downstream billing audits.
     """
+    if getattr(row, "pricing_config", None) is not None:
+        from loom_llm_gateway.provider_pricing import configured_cost
+
+        if rate_card_cache is not None:
+            async with rate_card_cache.session_factory() as session:
+                return await configured_cost(session, row, model_name, usage)
+        return await configured_cost(None, row, model_name, usage)
+
     if row.pricing_source == "operator-supplied":
         data = row.pricing_data or {}
         try:
@@ -406,7 +414,13 @@ async def compute_facade_cost_estimate(
         entry,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
-        cached_input_tokens=usage.cached_input_tokens,
+        # Keep legacy catalog behavior until an explicit pricing-mode migration.
+        # OpenAI cache counters were not extracted in the legacy path; Gemini's
+        # existing counters remain unchanged. New configurations normalize their
+        # inclusive input totals in configured_cost instead.
+        cached_input_tokens=(0 if usage.provider_extras.get("_loom_input_includes_cache")
+                             and "cachedContentTokenCount" not in usage.provider_extras
+                             else usage.cached_input_tokens),
         cache_write_tokens=usage.cache_write_tokens,
     )
     return CostEstimate(

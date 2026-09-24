@@ -9,8 +9,6 @@ business logic:
   `allow_private_endpoints` flag relaxes RFC1918 + ULA; loopback +
   link-local stay rejected unconditionally because no legitimate
   provider hosts on those.
-- Pricing-source validation (the `operator-supplied` source requires
-  `pricing_data` with numeric `{input_usd_per_1m, output_usd_per_1m}`).
 
 Separated from the routes so each piece is testable without a
 FastAPI request fixture; the routes file is a thin orchestrator.
@@ -69,9 +67,6 @@ class SsrfRejectedError(Exception):
         super().__init__(message)
         self.ips = ips
 
-
-class InvalidPricingError(Exception):
-    """pricing_source / pricing_data combination is invalid."""
 
 
 @dataclass(frozen=True)
@@ -187,78 +182,6 @@ def resolve_and_validate(
         upstream_host=upstream_host,
         resolved_ips=[str(ip) for ip in ips],
     )
-
-
-def validate_pricing(
-    pricing_source: str, pricing_data: dict[str, float] | None,
-) -> None:
-    """Enforce the cost-source × pricing_data contract.
-
-    - `rate-card` / `tokens-only`: pricing_data MUST be NULL (any value
-      is ignored at cost-compute time, so accepting it would be a UX
-      footgun — operators expect what they set to be used).
-    - `operator-supplied`: pricing_data MUST contain non-negative
-      numeric `input_usd_per_1m` AND `output_usd_per_1m`.
-    """
-    if pricing_source not in {"rate-card", "tokens-only", "operator-supplied"}:
-        raise InvalidPricingError(
-            f"pricing_source must be one of "
-            f"{{'rate-card', 'tokens-only', 'operator-supplied'}}; "
-            f"got {pricing_source!r}",
-        )
-    if pricing_source == "operator-supplied":
-        if not isinstance(pricing_data, dict):
-            raise InvalidPricingError(
-                "pricing_source='operator-supplied' requires pricing_data "
-                "with input_usd_per_1m + output_usd_per_1m",
-            )
-        for key in ("input_usd_per_1m", "output_usd_per_1m"):
-            value = pricing_data.get(key)
-            if value is None:
-                raise InvalidPricingError(
-                    f"pricing_data.{key} is required for "
-                    f"pricing_source='operator-supplied'",
-                )
-            if not isinstance(value, int | float) or isinstance(value, bool):
-                raise InvalidPricingError(
-                    f"pricing_data.{key} must be a number; got {type(value).__name__}",
-                )
-            if value < 0:
-                raise InvalidPricingError(
-                    f"pricing_data.{key} must be >= 0; got {value}",
-                )
-    elif pricing_data is not None:
-        raise InvalidPricingError(
-            f"pricing_data must be NULL for pricing_source={pricing_source!r}; "
-            f"got {pricing_data!r}",
-        )
-
-
-def default_pricing_source_for(provider_type: str) -> str:
-    """Per cluster-deploy.md §Cost computation:
-    - anthropic, google → rate-card
-    - openai-compatible, custom → tokens-only
-    """
-    if provider_type in ("anthropic", "google"):
-        return "rate-card"
-    return "tokens-only"
-
-
-def default_rate_card_provider_for(provider_type: str) -> str | None:
-    """Default rate-card provider namespace for new connections.
-
-    OpenAI-compatible endpoints are protocol-compatible with many hosted
-    providers. The default preserves the common OpenAI-hosted path, and
-    operators can override it per connection for Together, Fireworks, or
-    other OpenAI-compatible upstreams.
-    """
-    if provider_type == "anthropic":
-        return "anthropic"
-    if provider_type == "google":
-        return "google"
-    if provider_type == "openai-compatible":
-        return "openai"
-    return None
 
 
 # ──────────────────────────────────────────────────────────────────────

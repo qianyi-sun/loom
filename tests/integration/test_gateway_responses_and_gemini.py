@@ -354,7 +354,12 @@ async def test_responses_native_passthrough(gateway, postgres_url):  # type: ign
     assert row["dialect"] == "openai_responses"
     assert row["input_tokens"] == 200
     assert row["output_tokens"] == 80
-    assert row["provider_extras"] == {"reasoning_tokens": 20}
+    assert row["provider_extras"] == {
+        "reasoning_tokens": 20,
+        "_loom_cache_usage_known": False,
+        "_loom_input_includes_cache": True,
+        "_loom_unsupported_billing": False,
+    }
     assert row["trial_id"] == trial_id
     assert row["team_id"] == team_id
 

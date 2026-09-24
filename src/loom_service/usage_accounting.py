@@ -344,6 +344,30 @@ async def estimate_pre_run_batch_budget(
             unpriced_reason="provider_model_not_configured",
         )
 
+    if getattr(provider_connection, "pricing_config", None) is not None:
+        from loom_llm_gateway.dialect import TokenUsage
+        from loom_llm_gateway.provider_pricing import configured_cost
+
+        usage = TokenUsage(estimated_input_tokens, estimated_output_tokens)
+        estimate = await configured_cost(session, provider_connection, provider_model_id, usage)
+        if secondary_model_id and estimate.confidence == "configured":
+            teacher = await configured_cost(session, provider_connection, secondary_model_id, usage)
+            if teacher.confidence != "configured":
+                estimate = teacher
+            else:
+                from dataclasses import replace
+                share = min(max(int(teacher_episodes or 2), 1) / max(int(episode_ceiling or 50), 2), 0.95)
+                estimate = replace(estimate, cost_usd=(1 - share) * estimate.cost_usd + share * teacher.cost_usd)
+        return PreRunBudgetEstimate(
+            budget_usd=budget_value, budget_policy=policy,
+            pre_run_estimated_cost_usd=estimate.cost_usd if estimate.confidence == "configured" else None,
+            cost_estimate_source=estimate.source, cost_estimate_confidence=estimate.confidence,
+            pre_run_estimated_llm_calls_count=estimated_calls,
+            pre_run_estimated_prompt_tokens=estimated_input_tokens,
+            pre_run_estimated_completion_tokens=estimated_output_tokens,
+            unpriced_reason=estimate.unpriced_reason,
+        )
+
     pricing_source = str(provider_connection.pricing_source or "tokens-only")
     if pricing_source == "operator-supplied":
         cost = _operator_cost_usd(
@@ -919,8 +943,23 @@ async def price_snapshots_for_hashes(
         if table_hash in wanted:
             tables_by_hash[table_hash] = table
 
+    frozen: dict[str, dict[str, Any]] = {}
+    calls = (await session.execute(select(LlmCall.rate_card_hash, LlmCall.provider_extras)
+        .where(LlmCall.rate_card_hash.in_(wanted), LlmCall.provider_extras.has_key("_loom_price_basis"))
+        .distinct())).all()
+    for digest, extras in calls:
+        basis = extras.get("_loom_price_basis")
+        if isinstance(basis, dict):
+            frozen[digest] = {
+                **_rate_card_snapshot(rate_card_hash=digest, table=None), **basis,
+                "rate_card_id": basis.get("catalog_id"), "resolved": True,
+                "provider": basis.get("supplier_id"),
+                "pricing_version": str(basis["revision"]) if "revision" in basis else None,
+                "last_checked_at": basis.get("updated_at"),
+            }
+
     return [
-        _rate_card_snapshot(
+        frozen.get(rate_card_hash) or _rate_card_snapshot(
             rate_card_hash=rate_card_hash,
             table=tables_by_hash.get(rate_card_hash),
         )

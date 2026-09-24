@@ -1901,19 +1901,29 @@ run from `src/loom_cli/data/default-rate-cards.toml`. Edit the file
 to add or override entries (e.g. for a self-hosted model or a
 provider Loom doesn't ship a default for). Cost is computed locally
 from these rates plus the token counts returned by the provider SDK.
-For service-mode hosted YibuAPI pricing, an admin can sync the official
-catalog with:
+For hosted Provider connections, choose **Track usage only**, **Use a price
+catalog**, or **Enter custom model prices**. YibuAPI and AZ GPTPlus5 supplier
+selection automatically uses the supplier's maintained default-group catalog.
+The supplier and API protocol are separate settings. Choose a team catalog for
+negotiated prices or enter each model's input/output USD per million tokens.
+Optional cache prices remain unknown when blank; zero means explicitly free.
 
 ```bash
-loom admin rate-cards sync-yibuapi
+loom providers catalogs list
+loom providers update NAME --pricing-mode catalog --catalog-id supplier:az-gptplus5
+loom providers update NAME --pricing-mode custom --price-file prices.csv
+loom providers update NAME --pricing-mode usage_only
 ```
 
-Self-deployed provider connections should usually remain `tokens-only`,
-which records tokens but leaves dollar cost as not applicable. Hosted YibuAPI
-connections that use the synced rate card and `pricing_source=rate-card` with
-`rate_card_provider=yibuapi` return per-trial, per-batch, and admin usage
-costs; self-deployed/private APIs return token totals and usage confidence
-without inventing a dollar amount.
+In the Web Provider settings, edit model rows or preview a CSV/JSON import.
+Team administrators can save reusable team catalogs and preview catalog updates.
+Modes apply to the entire connection; there is no catalog fallback for missing
+custom model prices. Unconfigured models can normally run with unknown cost;
+hard monetary budgets still require usable prices. Mixed results display a known
+subtotal, not a complete cost. All monetary amounts are estimates.
+
+See [Provider pricing and import format](architecture/cost-and-rate-cards.md#provider-connection-pricing)
+for suppliers, permissions, cache semantics, migration and rollback.
 
 ## Official Recipe Pipelines
 

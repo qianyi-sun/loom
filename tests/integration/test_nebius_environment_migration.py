@@ -13,6 +13,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from loom.db.schema_startup import service_schema_head
+
 
 @pytest.fixture
 def environment_database(isolated_migration_postgres_url):
@@ -76,7 +78,7 @@ def test_provisioning_downgrade_refuses_to_discard_platform_budget(environment_d
     with pytest.raises(DBAPIError, match="cannot remove managed provisioning or platform budget history"):
         command.downgrade(cfg, "0154")
     with environment_database.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0158"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == service_schema_head()
         assert connection.execute(select(NebiusPlatformBudget.cpu_millis)).scalar_one() == 1000
 
 

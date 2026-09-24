@@ -73,13 +73,15 @@ loom providers create \
   --type openai-compatible \
   --base-url https://api.together.xyz/v1 \
   --api-key env:PROVIDER_API_KEY \
-  --rate-card-provider together
+  --pricing-mode usage_only
 
 loom providers test together-prod
 loom providers models together-prod --refresh
 loom providers models together-prod --preflight gpt-4o-mini
 loom providers models together-prod
 ```
+
+For catalog or per-model custom estimates, see [Provider pricing](../architecture/cost-and-rate-cards.md#provider-connection-pricing). Protocol compatibility does not identify a supplier.
 
 The Providers list, New provider form, provider detail Overview, Models tab,
 and New Batch page show the same hosted-API quickstart and smoke-batch snippets

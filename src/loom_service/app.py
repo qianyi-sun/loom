@@ -348,10 +348,17 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             name="loom-svc-provider-secret-gc",
         )
         app.state.provider_secret_gc_task = secret_gc_task
+        from loom_service.price_catalogs import run_loop as catalog_sync_loop
+        catalog_task = asyncio.create_task(catalog_sync_loop(session_factory=session_factory),
+                                           name="loom-svc-price-catalogs")
+
 
         try:
             yield
         finally:
+            catalog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await catalog_task
             runner_task.cancel()
             secret_gc_task.cancel()
             materializer_task.cancel()

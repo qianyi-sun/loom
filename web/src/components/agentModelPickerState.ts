@@ -85,7 +85,6 @@ export function preflightOptionSuffix(m: ModelEntry): string {
 
 export function providerNamespace(conn: ProviderConnectionEntry | undefined): string {
   if (!conn) return "";
-  if (conn.rate_card_provider) return conn.rate_card_provider;
   if (conn.type === "openai-compatible") return "openai";
   return conn.type;
 }

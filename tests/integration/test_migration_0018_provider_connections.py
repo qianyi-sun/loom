@@ -343,10 +343,20 @@ def test_orm_models_match_migration_schema(postgres_url: str) -> None:
         "last_validation_error", "pricing_source", "pricing_data",
         "rate_card_provider", "created_by", "deleted_at", "created_at",
         "updated_at", "responses_api_supported", "responses_api_probed_at",
-        "responses_api_probe_error",
+        "responses_api_probe_error", "pricing_config",
     }
     actual_pc_cols = {c.name for c in ProviderConnection.__table__.columns}
     assert actual_pc_cols == expected_pc_cols, (
         f"ORM-schema drift: missing={expected_pc_cols - actual_pc_cols}, "
         f"extra={actual_pc_cols - expected_pc_cols}"
     )
+    # The fixture migrates through head, so compare the real schema as well
+    # as the explicit public/internal column contract above.
+    engine = create_engine(postgres_url)
+    with engine.connect() as conn:
+        database_cols = {row[0] for row in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'provider_connections'",
+        ))}
+    engine.dispose()
+    assert database_cols == actual_pc_cols

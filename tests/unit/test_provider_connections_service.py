@@ -1,7 +1,7 @@
 """Unit tests for the provider-connection service layer.
 
 These cover the pure-function pieces (URL parsing, IP classification,
-pricing validation). The DNS resolution + route integration tests live
+model probing). The DNS resolution + route integration tests live
 in tests/integration/test_provider_connections_routes.py and need a
 real Postgres.
 """
@@ -17,15 +17,12 @@ import pytest
 
 from loom_service.provider_connections_service import (
     InvalidBaseUrlError,
-    InvalidPricingError,
     ResolvedUpstream,
     SsrfRejectedError,
     _preflight_base_path_headers_body,
     classify_ip,
-    default_pricing_source_for,
     derive_upstream_host,
     resolve_and_validate,
-    validate_pricing,
 )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -298,96 +295,6 @@ def test_resolve_and_validate_empty_resolution_raises(
             _resolver=_empty,
         )
 
-
-# ──────────────────────────────────────────────────────────────────────
-# validate_pricing
-# ──────────────────────────────────────────────────────────────────────
-
-
-def test_validate_pricing_rate_card_no_data() -> None:
-    validate_pricing("rate-card", None)  # ok
-
-
-def test_validate_pricing_tokens_only_no_data() -> None:
-    validate_pricing("tokens-only", None)  # ok
-
-
-def test_validate_pricing_rate_card_with_data_rejected() -> None:
-    with pytest.raises(InvalidPricingError, match="must be NULL"):
-        validate_pricing("rate-card", {"input_usd_per_1m": 1.0})
-
-
-def test_validate_pricing_operator_supplied_happy() -> None:
-    validate_pricing("operator-supplied", {
-        "input_usd_per_1m": 2.5,
-        "output_usd_per_1m": 10.0,
-    })
-
-
-def test_validate_pricing_operator_supplied_zero_allowed() -> None:
-    """Free-tier endpoints (sometimes self-hosted on free GPUs)."""
-    validate_pricing("operator-supplied", {
-        "input_usd_per_1m": 0.0,
-        "output_usd_per_1m": 0.0,
-    })
-
-
-def test_validate_pricing_operator_supplied_missing_data() -> None:
-    with pytest.raises(InvalidPricingError, match="requires pricing_data"):
-        validate_pricing("operator-supplied", None)
-
-
-def test_validate_pricing_operator_supplied_missing_field() -> None:
-    with pytest.raises(InvalidPricingError, match="output_usd_per_1m is required"):
-        validate_pricing("operator-supplied", {"input_usd_per_1m": 1.0})
-
-
-def test_validate_pricing_operator_supplied_negative_rejected() -> None:
-    with pytest.raises(InvalidPricingError, match="must be >= 0"):
-        validate_pricing("operator-supplied", {
-            "input_usd_per_1m": -1.0, "output_usd_per_1m": 2.0,
-        })
-
-
-def test_validate_pricing_operator_supplied_bool_rejected() -> None:
-    """bools are technically int subclasses in Python; the validator
-    must reject them or operators could store True/False as price."""
-    with pytest.raises(InvalidPricingError, match="must be a number"):
-        validate_pricing("operator-supplied", {
-            "input_usd_per_1m": True, "output_usd_per_1m": 1.0,
-        })
-
-
-def test_validate_pricing_operator_supplied_str_rejected() -> None:
-    with pytest.raises(InvalidPricingError, match="must be a number"):
-        validate_pricing("operator-supplied", {
-            "input_usd_per_1m": "5.0", "output_usd_per_1m": 1.0,
-        })
-
-
-def test_validate_pricing_rejects_unknown_source() -> None:
-    with pytest.raises(InvalidPricingError, match="must be one of"):
-        validate_pricing("bogus", None)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# default_pricing_source_for
-# ──────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("provider_type,expected", [
-    ("anthropic", "rate-card"),
-    ("google", "rate-card"),
-    ("openai-compatible", "tokens-only"),
-    ("custom", "tokens-only"),
-])
-def test_default_pricing_source(provider_type: str, expected: str) -> None:
-    assert default_pricing_source_for(provider_type) == expected
-
-
-# ──────────────────────────────────────────────────────────────────────
-# probe_connection (uses httpx.MockTransport — no real network)
-# ──────────────────────────────────────────────────────────────────────
 
 import httpx  # noqa: E402
 

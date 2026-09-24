@@ -40,51 +40,44 @@ class _NameNotFoundError(Exception):
     testable via `rc = main()`."""
 
 
-def _pricing_dict_or_none(
-    in_per_1m: float | None, out_per_1m: float | None,
-) -> dict[str, float] | None:
-    """`--input-usd-per-1m` and `--output-usd-per-1m` are interdependent
-    (both-or-neither). Return the dict when both are set, None when
-    both unset; argparse-level validator rejects half-set combinations
-    earlier so this only sees valid pairs."""
-    if in_per_1m is None and out_per_1m is None:
-        return None
-    assert in_per_1m is not None and out_per_1m is not None
-    return {
-        "input_usd_per_1m": in_per_1m,
-        "output_usd_per_1m": out_per_1m,
-    }
+def _pricing_payload(args: argparse.Namespace) -> dict[str, Any]:
+    from pathlib import Path
+
+    from loom.provider_pricing import ModelPrice, parse_price_import
+
+    result: dict[str, Any] = {}
+    for key in ("pricing_mode", "supplier_id", "catalog_id"):
+        value = getattr(args, key, None)
+        if value is not None:
+            result[key] = value
+    prices = None
+    if args.price_file:
+        path = Path(args.price_file)
+        prices = parse_price_import(path.read_text(), "csv" if path.suffix.lower() == ".csv" else "json")
+    if args.input_usd_per_1m is not None or args.output_usd_per_1m is not None:
+        if not args.price_model:
+            raise ValueError("numeric prices require at least one explicit --price-model")
+        price = ModelPrice(input_usd_per_1m=args.input_usd_per_1m,
+                           output_usd_per_1m=args.output_usd_per_1m,
+                           cache_read_usd_per_1m=args.cache_read_usd_per_1m,
+                           cache_write_usd_per_1m=args.cache_write_usd_per_1m)
+        prices = prices or {}
+        for model in args.price_model:
+            prices[model] = price
+    elif args.price_model or args.cache_read_usd_per_1m is not None or args.cache_write_usd_per_1m is not None:
+        raise ValueError("provide both input and output prices for selected models")
+    if prices is not None:
+        if result.get("pricing_mode", "custom") != "custom":
+            raise ValueError("custom model prices cannot be combined with another pricing mode")
+        result.update(pricing_mode="custom", custom_pricing={k: v.model_dump() for k, v in prices.items()})
+    return result
 
 
-def _validate_pricing_both_or_neither(
-    args: argparse.Namespace,
-) -> int | None:
-    """argparse can't natively express "if A then B is required"; this
-    validator runs in the handler before any HTTP call. Returns None
-    if OK, exit code on error so the handler can return it directly
-    (preserves `main()`'s return-the-int contract — sys.exit() here
-    would propagate SystemExit out of main(), breaking tests + any
-    embedding harness that expects an int)."""
-    has_in = args.input_usd_per_1m is not None
-    has_out = args.output_usd_per_1m is not None
-    if has_in != has_out:
-        sys.stderr.write(
-            "error: --input-usd-per-1m and --output-usd-per-1m are "
-            "interdependent (both or neither).\n",
-        )
-        return 2
-    pricing_source = getattr(args, "pricing_source", None)
-    if pricing_source in {"rate-card", "tokens-only"} and (has_in or has_out):
-        sys.stderr.write(
-            "error: --input-usd-per-1m/--output-usd-per-1m can only be "
-            "used with pricing_source='operator-supplied'.\n",
-        )
-        return 2
-    if pricing_source == "operator-supplied" and not (has_in and has_out):
-        sys.stderr.write(
-            "error: --pricing-source operator-supplied requires "
-            "--input-usd-per-1m and --output-usd-per-1m.\n",
-        )
+def _validate_pricing_both_or_neither(args: argparse.Namespace) -> int | None:
+    try:
+        _pricing_payload(args)
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
         return 2
     return None
 
@@ -99,17 +92,13 @@ def _print_connection_summary(item: dict[str, Any]) -> None:
     print(f"upstream_host: {item['upstream_host']}")
     print(f"resolved_ips:  {', '.join(item['resolved_egress_ips']) or '(none yet)'}")
     print(f"status:        {item['status']}")
-    print(f"pricing:       {item['pricing_source']}", end="")
-    if item.get("pricing_data"):
-        pd = item["pricing_data"]
-        print(
-            f" (input={pd.get('input_usd_per_1m')}, "
-            f"output={pd.get('output_usd_per_1m')} USD/1M tokens)",
-        )
-    else:
-        print()
-    if item.get("rate_card_provider"):
-        print(f"rate_card:     {item['rate_card_provider']}")
+    print(f"pricing:       {item.get('pricing_mode', 'usage_only')}")
+    if item.get("catalog_id"):
+        print(f"catalog:       {item['catalog_id']}")
+    if item.get("custom_pricing") is not None:
+        print(json.dumps(item["custom_pricing"], indent=2))
+    if item.get("legacy_pricing"):
+        print(f"legacy:        {json.dumps(item['legacy_pricing'])}")
     if item.get("allowed_models"):
         print(f"allowed:       {', '.join(item['allowed_models'])}")
     if item.get("last_validation_error"):
@@ -172,7 +161,7 @@ def _run_with_error_handling(fn: Callable[[], int]) -> int:
     except (HttpStatusError, _NameNotFoundError) as e:
         sys.stderr.write(f"error: {e}\n")
         return 1
-    except (NotLoggedInError, SecretSourceError) as e:
+    except (NotLoggedInError, SecretSourceError, ValueError, OSError) as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
 
@@ -210,16 +199,7 @@ def _create(args: argparse.Namespace) -> int:
         }
         if args.allowed_models:
             payload["allowed_models"] = args.allowed_models
-        if args.rate_card_provider is not None:
-            payload["rate_card_provider"] = args.rate_card_provider
-        if args.pricing_source is not None:
-            payload["pricing_source"] = args.pricing_source
-        pricing_data = _pricing_dict_or_none(
-            args.input_usd_per_1m, args.output_usd_per_1m,
-        )
-        if pricing_data is not None:
-            payload["pricing_source"] = args.pricing_source or "operator-supplied"
-            payload["pricing_data"] = pricing_data
+        payload.update(_pricing_payload(args))
 
         with authed_client(cfg) as c:
             resp = c.post("/api/v1/provider-connections", json=payload)
@@ -249,13 +229,7 @@ def _list(args: argparse.Namespace) -> int:
             print("(no provider connections — run `loom providers create`)")
             return 0
         for it in items:
-            pricing = it["pricing_source"]
-            if it.get("pricing_data"):
-                pd = it["pricing_data"]
-                pricing += (
-                    f" ({pd.get('input_usd_per_1m')}/"
-                    f"{pd.get('output_usd_per_1m')})"
-                )
+            pricing = it.get("pricing_mode", "usage_only")
             print(
                 f"{it['name']:<24}  {it['type']:<20}  "
                 f"{it['status']:<10}  {pricing}",
@@ -294,22 +268,13 @@ def _update(args: argparse.Namespace) -> int:
             )
         if args.allowed_models is not None:
             patch["allowed_models"] = args.allowed_models
-        if args.rate_card_provider is not None:
-            patch["rate_card_provider"] = args.rate_card_provider
-        if args.pricing_source is not None:
-            patch["pricing_source"] = args.pricing_source
-        pricing_data = _pricing_dict_or_none(
-            args.input_usd_per_1m, args.output_usd_per_1m,
-        )
-        if pricing_data is not None:
-            patch["pricing_source"] = args.pricing_source or "operator-supplied"
-            patch["pricing_data"] = pricing_data
+        patch.update(_pricing_payload(args))
 
         if not patch:
             sys.stderr.write(
                 "error: `update` requires at least one of --base-url / "
-                "--api-key / --allowed-models / --rate-card-provider / "
-                "--pricing-source / --input-usd-per-1m + --output-usd-per-1m.\n",
+                "--api-key / --allowed-models / --catalog-id / "
+                "--pricing-mode / --input-usd-per-1m + --output-usd-per-1m.\n",
             )
             return 2
 
@@ -318,6 +283,11 @@ def _update(args: argparse.Namespace) -> int:
             return rc
         with authed_client(cfg) as c:
             row = _resolve_by_name(c, args.name)
+            if args.price_model and not args.price_file:
+                patch["custom_pricing"] = {
+                    **(row.get("custom_pricing") or {}),
+                    **patch["custom_pricing"],
+                }
             resp = c.patch(
                 f"/api/v1/provider-connections/{row['id']}",
                 json=patch,
@@ -672,34 +642,42 @@ def _test(args: argparse.Namespace) -> int:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _catalog_command(args: argparse.Namespace) -> int:
+    def run() -> int:
+        from pathlib import Path
+
+        from loom.provider_pricing import parse_price_import
+
+        with authed_client(require_logged_in()) as client:
+            path = "/api/v1/price-catalogs"
+            if args.catalog_action == "list":
+                result = assert_2xx(client.get(path), action="list price catalogs")
+            elif args.catalog_action == "create":
+                file = Path(args.price_file)
+                prices = parse_price_import(file.read_text(), "csv" if file.suffix == ".csv" else "json")
+                result = assert_2xx(client.post(path, json={"name": args.name,
+                    "prices": {k: v.model_dump() for k, v in prices.items()}}), action="create team price catalog")
+            elif args.catalog_action == "sync":
+                result = assert_2xx(client.post(f"{path}/{quote(args.catalog_id, safe='')}/sync"), action="synchronize supplier prices")
+            else:
+                file = Path(args.price_file)
+                result = assert_2xx(client.post(f"{path}/{quote(args.catalog_id, safe='')}/import", json={
+                    "content": file.read_text(), "format": "csv" if file.suffix == ".csv" else "json",
+                    "expected_revision": args.revision, "apply": args.apply,
+                }), action="import team price catalog")
+            print(json.dumps(result, indent=2))
+        return 0
+    return _run_with_error_handling(run)
+
+
 def _add_pricing_args(parser: argparse.ArgumentParser) -> None:
-    """Shared by `create` and `update`. Both-or-neither validated in
-    the handler (argparse can't natively express the constraint)."""
-    parser.add_argument(
-        "--pricing-source",
-        choices=["rate-card", "tokens-only", "operator-supplied"],
-        default=None,
-        help=(
-            "Cost attribution mode. Use rate-card only when the service "
-            "rate-card table has matching provider/model rows; "
-            "operator-supplied requires --input-usd-per-1m and "
-            "--output-usd-per-1m."
-        ),
-    )
-    parser.add_argument(
-        "--input-usd-per-1m", dest="input_usd_per_1m",
-        type=float, default=None,
-        help=(
-            "Per-1M-input-tokens cost in USD. Pairs with "
-            "--output-usd-per-1m; both required together. Triggers "
-            "pricing_source='operator-supplied'."
-        ),
-    )
-    parser.add_argument(
-        "--output-usd-per-1m", dest="output_usd_per_1m",
-        type=float, default=None,
-        help="Per-1M-output-tokens cost in USD. Pairs with --input-usd-per-1m.",
-    )
+    parser.add_argument("--pricing-mode", choices=["usage_only", "catalog", "custom"])
+    parser.add_argument("--supplier-id", help="Supplier identity, e.g. yibuapi or az-gptplus5 (default group).")
+    parser.add_argument("--catalog-id", help="Exactly one accessible price catalog.")
+    parser.add_argument("--price-file", help="CSV or JSON array of model prices; replaces the complete custom table.")
+    parser.add_argument("--price-model", action="append", help="Model receiving the numeric price set; repeat to select more models.")
+    for name in ("input", "output", "cache-read", "cache-write"):
+        parser.add_argument(f"--{name}-usd-per-1m", type=float)
 
 
 def dispatch(argv: list[str]) -> int:
@@ -722,7 +700,7 @@ def dispatch(argv: list[str]) -> int:
     p_create.add_argument(
         "--type", required=True,
         choices=["openai-compatible", "anthropic", "google", "custom"],
-        help="Provider type. Determines default pricing_source.",
+        help="Provider type. Does not determine supplier pricing.",
     )
     p_create.add_argument("--base-url", required=True,
                           help="Provider HTTPS endpoint (e.g. https://api.openai.com/v1)")
@@ -740,13 +718,6 @@ def dispatch(argv: list[str]) -> int:
         help="Restrict the connection to specific upstream model ids.",
     )
     _add_pricing_args(p_create)
-    p_create.add_argument(
-        "--rate-card-provider", default=None,
-        help=(
-            "Rate-card provider namespace for facade cost lookup "
-            "(e.g. openai, together, fireworks)."
-        ),
-    )
     p_create.set_defaults(handler=_create)
 
     # --- list ---
@@ -756,6 +727,21 @@ def dispatch(argv: list[str]) -> int:
         help="Output format. JSON for scripting.",
     )
     p_list.set_defaults(handler=_list)
+
+    catalogs = sub.add_parser("catalogs", help="List, create, import or sync price catalogs.")
+    catalog_actions = catalogs.add_subparsers(dest="catalog_action", required=True)
+    for action in ("list", "create", "import", "sync"):
+        command = catalog_actions.add_parser(action)
+        command.set_defaults(handler=_catalog_command)
+        if action in ("import", "sync"):
+            command.add_argument("catalog_id")
+        if action in ("create", "import"):
+            command.add_argument("--price-file", required=True)
+        if action == "create":
+            command.add_argument("--name", required=True)
+        if action == "import":
+            command.add_argument("--revision", type=int, required=True, help="Revision read before preview; rejects concurrent edits.")
+            command.add_argument("--apply", action="store_true", help="Apply the reviewed import; default only previews changes.")
 
     # --- show ---
     p_show = sub.add_parser("show", help="Show details for one connection.")
@@ -789,13 +775,6 @@ def dispatch(argv: list[str]) -> int:
             "Sets X-Loom-Admin-Actor for admin-token provider mutations. "
             "Required by the service when an admin credential updates a "
             "provider on behalf of a team or rollout."
-        ),
-    )
-    p_update.add_argument(
-        "--rate-card-provider", default=None,
-        help=(
-            "Set the rate-card provider namespace used when "
-            "pricing_source='rate-card'."
         ),
     )
     p_update.set_defaults(handler=_update)

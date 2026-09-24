@@ -235,19 +235,19 @@ def test_create_returns_201_with_public_response(app_setup) -> None:
     assert body["resolved_egress_ips"] == ["104.18.0.1"]
     assert body["status"] == "pending"
     # openai-compatible defaults to tokens-only.
-    assert body["pricing_source"] == "tokens-only"
-    assert body["pricing_data"] is None
+    assert body["pricing_mode"] == "usage_only"
+    assert body["custom_pricing"] is None
     # openai-compatible is ambiguous at the protocol layer, but the
     # default rate-card provider preserves the common OpenAI-hosted path
     # and can be corrected per connection for Together/Fireworks/etc.
-    assert body["rate_card_provider"] == "openai"
+    assert body["catalog_id"] is None
     # api_key MUST NOT round-trip; the response only carries opaque
     # public fields.
     assert "api_key" not in body
     assert "encrypted_api_key_ref" not in body
 
 
-def test_create_anthropic_defaults_to_rate_card(app_setup) -> None:
+def test_create_protocol_does_not_imply_supplier(app_setup) -> None:
     app, tokens, _ = app_setup
     c = _client(app)
     r = c.post(
@@ -261,8 +261,8 @@ def test_create_anthropic_defaults_to_rate_card(app_setup) -> None:
         },
     )
     assert r.status_code == 201
-    assert r.json()["pricing_source"] == "rate-card"
-    assert r.json()["rate_card_provider"] == "anthropic"
+    assert r.json()["pricing_mode"] == "usage_only"
+    assert r.json()["supplier_id"] is None
 
 
 def test_create_custom_defaults_to_no_rate_card_provider(app_setup) -> None:
@@ -280,8 +280,8 @@ def test_create_custom_defaults_to_no_rate_card_provider(app_setup) -> None:
     )
     assert r.status_code == 201
     body = r.json()
-    assert body["pricing_source"] == "tokens-only"
-    assert body["rate_card_provider"] is None
+    assert body["pricing_mode"] == "usage_only"
+    assert body["catalog_id"] is None
 
 
 def test_create_accepts_explicit_rate_card_provider(app_setup) -> None:
@@ -295,11 +295,11 @@ def test_create_accepts_explicit_rate_card_provider(app_setup) -> None:
             "type": "openai-compatible",
             "base_url": "https://api.openai.com/",
             "api_key": "sk-together-XXXX",
-            "rate_card_provider": "together",
+            "pricing_mode": "catalog", "catalog_id": "supplier:az-gptplus5",
         },
     )
     assert r.status_code == 201
-    assert r.json()["rate_card_provider"] == "together"
+    assert r.json()["catalog_id"] == "supplier:az-gptplus5"
 
 
 def test_create_operator_supplied_requires_pricing_data(app_setup) -> None:
@@ -313,11 +313,11 @@ def test_create_operator_supplied_requires_pricing_data(app_setup) -> None:
             "type": "openai-compatible",
             "base_url": "https://api.openai.com/",
             "api_key": "k",
-            "pricing_source": "operator-supplied",
+            "pricing_mode": "custom",
         },
     )
     assert r.status_code == 400
-    assert "requires pricing_data" in r.json()["detail"]
+    assert "requires a model price table" in r.json()["detail"]
 
 
 def test_create_operator_supplied_negative_price_rejected(app_setup) -> None:
@@ -331,15 +331,15 @@ def test_create_operator_supplied_negative_price_rejected(app_setup) -> None:
             "type": "custom",
             "base_url": "https://api.openai.com/",
             "api_key": "k",
-            "pricing_source": "operator-supplied",
-            "pricing_data": {
+            "pricing_mode": "custom",
+            "custom_pricing": {"model-a": {
                 "input_usd_per_1m": -1.0,
                 "output_usd_per_1m": 1.0,
-            },
+            }},
         },
     )
-    assert r.status_code == 400
-    assert ">= 0" in r.json()["detail"]
+    assert r.status_code == 422
+    assert "greater_than_equal" in r.text
 
 
 def test_create_rejects_private_ip_by_default(app_setup) -> None:
@@ -964,15 +964,15 @@ def test_update_rate_card_provider(app_setup) -> None:
         },
     )
     conn_id = create.json()["id"]
-    assert create.json()["rate_card_provider"] == "openai"
+    assert create.json()["catalog_id"] is None
 
     r = c.patch(
         f"/api/v1/provider-connections/{conn_id}",
         headers=_auth(tokens["team_a"]),
-        json={"rate_card_provider": "together"},
+        json={"pricing_mode": "catalog", "catalog_id": "supplier:az-gptplus5"},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["rate_card_provider"] == "together"
+    assert r.json()["catalog_id"] == "supplier:az-gptplus5"
 
 
 def test_update_cross_team_returns_404(app_setup) -> None:
@@ -1016,7 +1016,7 @@ def test_update_to_invalid_pricing_returns_400(app_setup) -> None:
     r = c.patch(
         f"/api/v1/provider-connections/{conn_id}",
         headers=_auth(tokens["team_a"]),
-        json={"pricing_source": "operator-supplied"},  # no pricing_data
+        json={"pricing_mode": "custom"},  # no pricing_data
     )
     assert r.status_code == 400
 
@@ -2228,3 +2228,140 @@ async def test_concurrent_rotation_retires_each_superseded_ref(app_setup) -> Non
         assert len(secrets) == 3
         assert sum(secret.provider_retired_at is not None for secret in secrets) == 2
         assert (await session.get(Secret, connection.encrypted_api_key_ref)).provider_retired_at is None
+
+
+def test_pricing_roundtrip_mode_transitions_and_explicit_null(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    headers = _auth(tokens["team_a"])
+    prices = {"gpt-4o-mini": {"input_usd_per_1m": 0, "output_usd_per_1m": 2}}
+    created = c.post("/api/v1/provider-connections", headers=headers, json={
+        "name": "pricing-roundtrip", "type": "openai-compatible",
+        "base_url": "https://api.openai.com/v1", "api_key": "test-only",
+        "pricing_mode": "custom", "custom_pricing": prices,
+    })
+    assert created.status_code == 201, created.text
+    path = f"/api/v1/provider-connections/{created.json()['id']}"
+    assert created.json()["custom_pricing"]["gpt-4o-mini"]["input_usd_per_1m"] == 0
+    assert "pricing_source" not in created.json() and "pricing_data" not in created.json()
+    # Unrelated PATCH omission must retain prices.
+    patched = c.patch(path, headers=headers, json={"allowed_models": ["gpt-4o-mini", "new-model"]})
+    assert set(patched.json()["custom_pricing"]) == {"gpt-4o-mini"}
+    # Explicit null is a clear, not an omission; invalid in active custom mode.
+    assert c.patch(path, headers=headers, json={"custom_pricing": None}).status_code == 400
+    for mode, extra in [("catalog", {"catalog_id": "supplier:az-gptplus5"}),
+                        ("usage_only", {}), ("custom", {"custom_pricing": prices})]:
+        result = c.patch(path, headers=headers, json={"pricing_mode": mode, **extra})
+        assert result.status_code == 200, result.text
+        readback = c.get(path, headers=headers).json()
+        assert readback["pricing_mode"] == mode
+        if mode != "custom":
+            assert readback["custom_pricing"] is None
+        if mode != "catalog":
+            assert readback["catalog_id"] is None
+
+
+def test_supplier_defaults_and_explicit_usage_choice(app_setup) -> None:
+    app, tokens, _ = app_setup
+    c = _client(app)
+    for index, override in enumerate([{}, {"pricing_mode": "usage_only"}]):
+        result = c.post("/api/v1/provider-connections", headers=_auth(tokens["team_a"]), json={
+            "name": f"supplier-{index}", "type": "openai-compatible",
+            "base_url": "https://api.openai.com/v1", "api_key": "test-only",
+            "supplier_id": "az-gptplus5", **override,
+        })
+        assert result.status_code == 201, result.text
+        assert result.json()["pricing_mode"] == ("catalog" if index == 0 else "usage_only")
+        assert result.json()["catalog_id"] == ("supplier:az-gptplus5" if index == 0 else None)
+
+
+def test_team_catalog_import_is_atomic_and_private(app_setup, postgres_url) -> None:
+    from sqlalchemy import update
+    app, tokens, _ = app_setup
+    c = _client(app)
+    headers = _auth(tokens["team_a"])
+    payload = {"name": "Negotiated", "prices": {"a": {"input_usd_per_1m": 1, "output_usd_per_1m": 2}}}
+    assert c.post("/api/v1/price-catalogs", headers=headers, json=payload).status_code == 403
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(update(Token).where(Token.token_hash == hashlib.sha256(tokens["team_a"].encode()).digest()).values(scopes=["read:own", "providers:manage", "team:manage"]))
+    engine.dispose()
+    created = c.post("/api/v1/price-catalogs", headers=headers, json=payload)
+    assert created.status_code == 201, created.text
+    catalog = created.json()
+    path = f"/api/v1/price-catalogs/{catalog['id']}"
+    assert c.get(path, headers=_auth(tokens["team_b"])).status_code == 404
+    assert catalog['id'] not in [x['id'] for x in c.get('/api/v1/price-catalogs', headers=_auth(tokens['team_b'])).json()['items']]
+    body = {"content": "model,input_usd_per_1m,output_usd_per_1m\na,3,4\na,5,6", "format": "csv", "expected_revision": 1, "apply": True}
+    assert c.post(path + "/import", headers=headers, json=body).status_code == 400
+    assert c.get(path, headers=headers).json()["prices"] == catalog["prices"]
+    body["content"] = "model,input_usd_per_1m,output_usd_per_1m\nb,0,4"
+    body["apply"] = False
+    preview = c.post(path + "/import", headers=headers, json=body)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["summary"] == {"added": ["b"], "removed": ["a"], "changed": []}
+    assert c.get(path, headers=headers).json()["revision"] == 1
+    body["apply"] = True
+    assert c.post(path + "/import", headers=headers, json=body).json()["catalog"]["revision"] == 2
+    assert c.post(path + "/import", headers=headers, json=body).status_code == 409
+    bad_connection = c.post('/api/v1/provider-connections', headers=_auth(tokens['team_b']), json={
+        'name': 'private-price-theft', 'type': 'custom', 'base_url': 'https://api.openai.com/v1', 'api_key': 'test-only',
+        'pricing_mode': 'catalog', 'catalog_id': catalog['id'],
+    })
+    assert bad_connection.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_supplier_failure_retains_last_prices(app_setup, monkeypatch) -> None:
+    from loom.db.schema import PriceCatalog
+    from loom.provider_pricing import ModelPrice
+    from loom_service.price_catalogs import SupplierPriceSnapshot, sync_catalog
+    app, _, _ = app_setup
+    async def success(_supplier):
+        return SupplierPriceSnapshot(prices={"a": ModelPrice(input_usd_per_1m=1, output_usd_per_1m=2)})
+    async def failure(_supplier):
+        raise ValueError("invalid upstream prices")
+    async with app.state.session_factory() as session:
+        row = await session.get(PriceCatalog, "supplier:az-gptplus5")
+        monkeypatch.setattr("loom_service.price_catalogs.fetch_supplier_prices", success)
+        await sync_catalog(session, row)
+        prices, revision, updated = row.prices, row.revision, row.updated_at
+        monkeypatch.setattr("loom_service.price_catalogs.fetch_supplier_prices", failure)
+        await sync_catalog(session, row)
+        assert row.prices == prices and row.revision == revision and row.updated_at == updated
+        assert row.sync_error and row.checked_at >= updated
+        await session.rollback()
+
+
+@pytest.mark.parametrize("share_first", [False, True])
+def test_private_catalog_cannot_leak_through_shared_connection(app_setup, postgres_url, share_first):
+    from sqlalchemy import update
+    app, tokens, team_ids = app_setup
+    c = _client(app)
+    headers = _auth(tokens["team_a"])
+    engine = create_engine(postgres_url)
+    with engine.begin() as conn:
+        conn.execute(update(Token).where(Token.token_hash == hashlib.sha256(tokens["team_a"].encode()).digest()).values(scopes=["read:own", "providers:manage", "team:manage"]))
+    engine.dispose()
+    catalog = c.post("/api/v1/price-catalogs", headers=headers, json={
+        "name": "Private", "prices": {"model": {"input_usd_per_1m": 1, "output_usd_per_1m": 2}},
+    })
+    assert catalog.status_code == 201, catalog.text
+    created = c.post("/api/v1/provider-connections", headers=headers, json={
+        "name": "privacy-check", "type": "openai-compatible",
+        "base_url": "https://api.openai.com/v1", "api_key": "test-only",
+    })
+    assert created.status_code == 201, created.text
+    path = f"/api/v1/provider-connections/{created.json()['id']}"
+    def share():
+        return c.post(path + "/shares", headers=headers, json={"target_team_id": str(team_ids["b"])})
+    def configure():
+        return c.patch(path, headers=headers, json={"pricing_mode": "catalog", "catalog_id": catalog.json()["id"]})
+    if share_first:
+        assert share().status_code == 201
+        assert configure().status_code == 400
+        assert c.get(path, headers=headers).json()["pricing_mode"] == "usage_only"
+    else:
+        assert configure().status_code == 200
+        assert share().status_code == 400
+        assert c.get(path, headers=_auth(tokens["team_b"])).status_code == 404

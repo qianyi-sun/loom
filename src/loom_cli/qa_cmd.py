@@ -678,7 +678,7 @@ def _resolve_provider_connection(
 def _agent_provider_family(conn: dict[str, Any]) -> str:
     """Read the relay's rate-card provider family from a resolved
     connection record. Used to evaluate each agent's supported_providers."""
-    return str(conn.get("rate_card_provider") or conn.get("type"))
+    return "openai" if conn.get("type") == "openai-compatible" else str(conn.get("type"))
 
 
 def _build_cells_and_combinations(

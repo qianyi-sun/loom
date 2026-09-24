@@ -17,8 +17,11 @@ const CONN = {
   updated_at: "2026-01-01T00:00:00Z",
   last_validated_at: null,
   last_validation_error: null,
-  pricing_source: null,
-  rate_card_provider: null,
+  pricing_mode: "usage_only",
+  custom_pricing: null,
+  catalog_id: null,
+  supplier_id: null,
+  legacy_pricing: null,
 };
 
 function renderPage(conn: unknown, initialPath = "/providers/abc") {
@@ -267,4 +270,40 @@ describe("ProviderDetail", () => {
       expect(screen.getByText(/no error details reported/i)).toBeInTheDocument();
     });
   });
+});
+
+
+it("edits initialized model prices through PATCH without resetting connection readiness", async () => {
+  window.localStorage.setItem("loom_token", "t");
+  let row = { ...CONN, pricing_mode: "custom", custom_pricing: {
+    "claude-3-opus": { input_usd_per_1m: 1, output_usd_per_1m: 2 },
+    "another-model": { input_usd_per_1m: 3, output_usd_per_1m: 4 },
+  } };
+  const patches: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      row = { ...row, ...patch };
+    }
+    return new Response(JSON.stringify(url.includes("/models") ? { items: [] } : row), { status: 200 });
+  }));
+  const user = userEvent.setup();
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={qc}><MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }} initialEntries={["/providers/abc?tab=settings"]}>
+    <Routes><Route path="/providers/:id" element={<ProviderDetail />} /></Routes>
+  </MemoryRouter></QueryClientProvider>);
+  const input = await screen.findByLabelText("claude-3-opus input_usd_per_1m");
+  expect(input).toHaveValue(1);
+  await user.clear(input);
+  await user.type(input, "0");
+  await user.click(screen.getByRole("button", { name: /save changes/i }));
+  await screen.findByText("Provider settings saved.");
+  expect(patches).toHaveLength(1);
+  expect(patches[0]).not.toHaveProperty("base_url");
+  expect(patches[0].custom_pricing).toMatchObject({
+    "claude-3-opus": { input_usd_per_1m: 0, output_usd_per_1m: 2 },
+    "another-model": { input_usd_per_1m: 3, output_usd_per_1m: 4 },
+  });
+  vi.restoreAllMocks();
 });

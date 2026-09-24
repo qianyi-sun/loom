@@ -118,6 +118,7 @@ async def persist_model_switch_plan(
     capability_snapshot: dict[str, Any] = {}
     if provider_connection is not None:
         pricing_snapshot = {
+            "pricing_config": getattr(provider_connection, "pricing_config", None),
             "pricing_source": provider_connection.pricing_source,
             "pricing_data": provider_connection.pricing_data,
             "rate_card_provider": provider_connection.rate_card_provider,

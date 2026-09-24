@@ -1125,3 +1125,33 @@ async def test_facade_accepts_matching_jwt_scope_and_header(
     )
     assert r.status_code == 200
     assert len(captures["requests"]) == 1  # type: ignore[arg-type]
+
+
+async def test_model_custom_pricing_is_recorded_and_not_repriced(facade_setup) -> None:
+    from sqlalchemy import select
+
+    from loom_service.usage_accounting import price_snapshots_for_trials
+    app, jwt, _, trial_id, conn_id, captures = facade_setup
+    async with app.state.session_factory() as session:
+        row = await session.get(ProviderConnection, conn_id)
+        row.pricing_config = {"pricing_mode": "custom", "custom_pricing": {
+            "gpt-4o": {"input_usd_per_1m": 5, "output_usd_per_1m": 15, "cache_read_usd_per_1m": 1},
+        }}
+        await session.commit()
+    response = captures["response"].json()
+    response["usage"]["prompt_tokens_details"] = {"cached_tokens": 30}
+    captures["response"] = httpx.Response(200, json=response)
+    result = await _post(app, jwt, **{"x-loom-provider-connection-id": str(conn_id)})
+    assert result.status_code == 200, result.text
+    async with app.state.session_factory() as session:
+        call = await session.scalar(select(LlmCall).where(LlmCall.trial_id == trial_id))
+        assert float(call.cost_usd) == pytest.approx(0.00113)
+        assert call.provider_extras["_loom_price_basis"]["prices"]["input_usd_per_1m"] == 5
+        old_hash = call.rate_card_hash
+        row = await session.get(ProviderConnection, conn_id)
+        row.pricing_config = {"pricing_mode": "usage_only"}
+        await session.commit()
+        snapshots = await price_snapshots_for_trials(session, [trial_id])
+        assert snapshots[0]["rate_card_hash"] == old_hash
+        assert snapshots[0]["resolved"] is True
+        assert snapshots[0]["prices"]["input_usd_per_1m"] == 5

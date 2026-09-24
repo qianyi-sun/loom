@@ -503,6 +503,9 @@ async def chat_completions(
                 "cache_creation_input_tokens": parsed.cache_write_tokens,
             },
         )
+        if getattr(byo_row, "pricing_config", None) is not None:
+            from loom_llm_gateway.dialect import DIALECTS
+            usage_for_pricing = DIALECTS["openai_chat"].extract_tokens(parsed.raw_response)
         cost_estimate = await compute_facade_cost_estimate(
             byo_row,
             model_name,
