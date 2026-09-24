@@ -47,12 +47,13 @@ def cloud():
     rows["bucket-management"] = (storage.Bucket, {
         "metadata": {"id": "bucket-management", "name": "loom-management-backup", "parent_id": "project-backups"},
         "spec": {"versioning_policy": "ENABLED", "bucket_policy": {"rules": [{
-            "id": "management-backup", "principals": ["group-backup"], "paths": ["*"], "roles": ["storage.object-editor"]}]}},
+            "group_id": "group-backup", "paths": ["*"], "roles": ["storage.object-editor"]}]}},
         "status": {"state": "ACTIVE", "suspension_state": "NOT_SUSPENDED", "region": "eu-north1"}})
     groups = {"serviceaccount-manager": ["group-manager"], "serviceaccount-backup": ["group-backup"],
               "group-manager": [], "group-backup": []}
     permits = {"group-manager": [{"metadata": {"id": "permit-manager", "parent_id": "group-manager"},
                 "spec": {"resource_id": "project-children", "role": "admin"}}], "group-backup": []}
+    bucket_ids = ["bucket-management"]
     calls = []
 
     async def get(request, **kwargs):
@@ -75,14 +76,24 @@ def cloud():
         assert not request.page_token
         return v1.ListAccessPermitResponse.from_json(json.dumps({"items": permits[request.parent_id]}))
 
+    async def list_buckets(request, **kwargs):
+        assert kwargs == {"timeout": 30, "retries": 0}
+        assert request.parent_id == "project-backups" and not request.page_token
+        return storage.ListBucketsResponse.from_json(json.dumps({"items": [rows[identity][1] for identity in bucket_ids]}))
+
     clients = {name: SimpleNamespace(get=get) for name in ("projects", "accounts", "public_keys", "buckets")}
     clients.update(memberships=SimpleNamespace(list_member_of=member_of), permits=SimpleNamespace(list=list_permits),
                    access_keys=SimpleNamespace(get_by_aws_id=get))
-    return SimpleNamespace(scope=scope, material=material, rows=rows, groups=groups, permits=permits, clients=clients, calls=calls)
+    clients["buckets"].list = list_buckets
+    return SimpleNamespace(scope=scope, material=material, rows=rows, groups=groups, permits=permits, clients=clients,
+                           calls=calls, bucket_ids=bucket_ids)
 
 
 async def qualify(cloud):
-    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScope, qualify_cloud_material
+    from scripts.ops.nebius_management_cloud_scope import (
+        ManagementCloudScope,
+        qualify_cloud_material,
+    )
 
     return await qualify_cloud_material(sdk=None, scope=ManagementCloudScope.model_validate(cloud.scope),
         material=cloud.material, bucket_name="loom-management-backup", clients=cloud.clients,
@@ -143,7 +154,7 @@ async def test_broad_mismatched_or_unusable_cloud_authority_is_rejected(cloud, m
     elif mutation == "bucket_public":
         bucket["status"]["anonymous_access_enabled"] = True
     elif mutation == "bucket_wrong_group":
-        bucket["spec"]["bucket_policy"]["rules"][0]["principals"] = ["group-manager"]
+        bucket["spec"]["bucket_policy"]["rules"][0]["group_id"] = "group-manager"
     elif mutation == "bucket_broad_role":
         bucket["spec"]["bucket_policy"]["rules"][0]["roles"] = ["admin"]
     elif mutation == "bucket_wrong_project":
@@ -151,7 +162,7 @@ async def test_broad_mismatched_or_unusable_cloud_authority_is_rejected(cloud, m
     elif mutation == "bucket_no_versioning":
         bucket["spec"]["versioning_policy"] = "DISABLED"
     elif mutation == "bucket_extra_rule":
-        bucket["spec"]["bucket_policy"]["rules"].append({"id": "foreign", "principals": ["group-manager"], "paths": ["*"], "roles": ["storage.object-editor"]})
+        bucket["spec"]["bucket_policy"]["rules"].append({"group_id": "group-manager", "paths": ["*"], "roles": ["storage.object-editor"]})
     with pytest.raises(ManagementCloudScopeError) as error:
         await qualify(cloud)
     assert "never-print" not in str(error.value) and "PRIVATE KEY" not in str(error.value)
@@ -180,3 +191,40 @@ async def test_rpc_errors_do_not_expose_secret_bearing_provider_diagnostics(clou
     with pytest.raises(ManagementCloudScopeError, match="unqualified") as error:
         await qualify(cloud)
     assert "never-print" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_backup_group_cannot_also_access_another_bucket(cloud):
+    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
+
+    other = copy.deepcopy(cloud.rows["bucket-management"][1])
+    other["metadata"].update(id="bucket-other", name="foreign-data")
+    cloud.rows["bucket-other"] = (storage.Bucket, other)
+    cloud.bucket_ids.append("bucket-other")
+    with pytest.raises(ManagementCloudScopeError):
+        await qualify(cloud)
+
+
+@pytest.mark.asyncio
+async def test_bucket_inventory_must_include_the_selected_backup_identity(cloud):
+    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
+
+    cloud.bucket_ids.clear()
+    with pytest.raises(ManagementCloudScopeError):
+        await qualify(cloud)
+
+
+@pytest.mark.asyncio
+async def test_broad_permit_on_later_page_is_not_ignored(cloud):
+    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
+
+    async def pages(request, **kwargs):
+        if not request.page_token:
+            return v1.ListAccessPermitResponse.from_json(json.dumps({"items": cloud.permits[request.parent_id], "next_page_token": "second"}))
+        return v1.ListAccessPermitResponse.from_json(json.dumps({"items": [{
+            "metadata": {"id": "permit-foreign", "parent_id": request.parent_id},
+            "spec": {"role": "admin", "resource_id": "tenant-test"}}]}))
+
+    cloud.clients["permits"].list = pages
+    with pytest.raises(ManagementCloudScopeError):
+        await qualify(cloud)
