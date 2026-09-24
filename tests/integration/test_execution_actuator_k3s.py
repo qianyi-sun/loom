@@ -296,6 +296,17 @@ def _load_client(container: object) -> tuple[object, object, object]:
     from kubernetes import client, config
 
     deadline = time.monotonic() + 90
+    # K3s PID 1 evacuates the root cgroup and enables subtree controllers before
+    # its startup banner. Docker exec during that window inserts another root
+    # process and can make initialization fail with EBUSY. Observe Docker logs
+    # (outside the container) before the first kubeconfig exec, with one deadline.
+    while time.monotonic() < deadline:
+        stdout, stderr = container.get_logs()
+        if b"Starting k3s v" in stdout + stderr:
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("disposable k3s bootstrap did not reach cgroup initialization")
     last_error = "kubeconfig unavailable"
     while time.monotonic() < deadline:
         result = container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"])

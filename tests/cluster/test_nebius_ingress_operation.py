@@ -130,7 +130,9 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
             # Pod images. Pull the original manifest directly from the official
             # public mirror, then alias only its repository name (no credentials).
             mirror = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
-            _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", mirror, timeout=180)
+            # Even with --platform, ctr fetches unused-platform manifests unless
+            # metadata is skipped. These disposable images are never re-pushed.
+            _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", mirror, timeout=180)
             rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
             assert any(row[0] == mirror and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
             if mirror != image:
