@@ -92,7 +92,8 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
             patched.start()
             self.addCleanup(patched.stop)
 
-    async def execute(self, enabled, *, deadline=None, max_turns=50, directory="trial"):
+    async def execute(self, enabled, *, deadline=None, max_turns=50, directory="trial",
+                      max_trajectory_bytes=16 * 1024 * 1024):
         task = TaskConfig.model_validate({
             "schema_version": "1", "task": {"id": "fixture", "name": "fixture"},
             "environment": {"os": "linux", "workdir": "/app"},
@@ -109,7 +110,7 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
             }),
             trial_id=uuid4(), team_id=uuid4(), gateway_url="http://127.0.0.1:9000",
             instruction="Inspect the fixture.", deadline=deadline or AttemptDeadline.after(5),
-            max_turns=max_turns,
+            max_turns=max_turns, max_trajectory_bytes=max_trajectory_bytes,
         )
 
     async def test_default_still_completes_after_confirmation(self):
@@ -119,7 +120,7 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._n_episodes, 2)
 
     async def test_continuation_keeps_one_session_and_real_completion_actions_until_deadline(self):
-        deadline = AttemptDeadline.after(0.3)
+        deadline = AttemptDeadline.after(1)
         with self.assertRaises(TimeoutError):
             await self.execute(True, deadline=deadline, max_turns=2)
         agent, = self.instances
@@ -165,6 +166,34 @@ class RealHarborCompletionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             continuing.cancel()
             await asyncio.gather(continuing, return_exceptions=True)
+
+    async def test_runtime_error_remains_terminal_without_a_new_session(self):
+        from loom.errors import AgentError
+
+        original = ScriptedLLM.call
+
+        async def fail_after_completion(llm, **kwargs):
+            if len(llm.prompts) == 3:
+                raise RuntimeError("fixture terminal model error")
+            return await original(llm, **kwargs)
+
+        with patch.object(ScriptedLLM, "call", fail_after_completion):
+            with self.assertRaisesRegex(AgentError, "fixture terminal model error"):
+                await self.execute(True)
+        agent, = self.instances
+        self.assertEqual(len(agent._llm.prompts), 3)
+
+    async def test_trajectory_cap_cancels_active_model_before_deadline(self):
+        from loom.errors import AgentError
+
+        deadline = AttemptDeadline.after(4)
+        with self.assertRaisesRegex(AgentError, "trajectory exceeds output limit"):
+            await self.execute(True, deadline=deadline, max_trajectory_bytes=2500)
+        agent, = self.instances
+        self.assertGreater(deadline.remaining(), 2, "resource cap was deferred until timeout")
+        self.assertTrue(agent._llm.cancelled)
+        self.assertEqual(len(agent._llm.prompts), 4)
+        self.assertLessEqual((Path(self.directory.name) / "trial/trajectory.jsonl").stat().st_size, 2500)
 
 
 if __name__ == "__main__":
