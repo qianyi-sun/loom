@@ -74,6 +74,16 @@ def test_inventory_projects_capacity_and_routes_without_claiming_installation_re
     assert "provider_iam" in result["unverified"] and "wildcard_dns_tls" in result["unverified"]
     assert "private-" not in json.dumps(result)
     assert all(command[0] in {"get", "config"} for command in cluster.calls)
+    assert result["ingress_preflight"] == {"status": "not_configured"}
+
+
+def test_inspection_connects_optional_binding_without_exporting_it(monkeypatch):
+    monkeypatch.setenv("NEBIUS_INGRESS_INSTALLATION_JSON", '{"private":"invalid-binding"}')
+    result = preflight.inspect(Cluster(), namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert result["status"] == "observed"
+    assert result["ingress_preflight"] == {"status": "blocked", "phase": "binding", "checks": {},
+                                           "reason": "validation_failed"}
+    assert "private" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("mutation", ["wrong_cluster", "wrong_namespace", "wrong_server", "insecure", "non_nebius", "no_system"])
@@ -139,3 +149,5 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
     assert "nebius_management_preflight.py" in commands
     assert "nebius_idle_rollout.py" not in commands
     assert "--apply" not in commands
+    inspection = next(step for step in job["steps"] if "nebius_management_preflight.py" in step.get("run", ""))
+    assert inspection["env"]["NEBIUS_INGRESS_INSTALLATION_JSON"] == "${{ vars.NEBIUS_INGRESS_INSTALLATION_JSON }}"

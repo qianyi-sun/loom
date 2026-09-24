@@ -79,6 +79,23 @@ are exported. Missing/unsupported logs are explicitly `unavailable`; they do not
 turn a failed Job into success. This diagnosis grants no Job retry, dispatch-unpause
 or rollback authority.
 
+When `NEBIUS_INGRESS_INSTALLATION_JSON` is configured, `ingress_preflight`
+reuses the installer's foundation and full Node/Pod capacity checks with a fixed
+read-only transport. It reports the bound source/candidate, passed checks, blocked
+phase, allowlisted reason codes and response byte counts against the gateway's
+response-size limit. It never reads Secrets, issues writes, retries installation,
+or exports raw API/configuration/error payloads. Missing authority is explicitly
+`not_configured`; a blocked diagnostic does not discard the general inventory.
+Foundation and capacity checks report independently, so candidate drift does not
+hide current capacity failures. Each revalidates the exact namespace UIDs.
+These checks run through protected inspection, not the installed gateway process:
+the reported `bound_source_sha` identifies gateway authority, not the diagnostic
+code. Gateway-source correspondence, gateway-local execution, certificate
+files/delivery, staging and cutover remain
+unverified even when these checks pass. Reconcile retained journals before any
+mutating retry; this diagnostic does not authorize one or establish historical
+failure-time state.
+
 `observed` means inventory succeeded, not that personal environments are ready.
 The configured candidate is read from the platform ConfigMap, which rollout can
 update before migrations and workload replacement complete. It is not proof of

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from scripts.ops.deploy_nebius_platform import (  # noqa: E402
     job_failed,
     verify_cluster_identity,
 )
+from scripts.ops.nebius_ingress_preflight import inspect_ingress  # noqa: E402
 
 RESOURCE_KEYS = ("cpu", "memory", "ephemeral-storage", "pods")
 _BOOTSTRAP_ERRORS = {"ConfigurationRequestError", "MigrationError", "ValueError", "KeyError",
@@ -157,6 +159,8 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
+        "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
+                                             namespace=namespace, expected_cluster_id=expected_cluster_id),
         "public_host": config["public_host"],
         "configured_execution_node_group_id": config["execution_node_group_id"],
         "nodes": [{**_identity(item), "role": item["metadata"].get("labels", {}).get("loom.nebius/node-role"),
