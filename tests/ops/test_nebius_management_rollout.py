@@ -36,11 +36,12 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-@pytest.mark.parametrize("action,status", [("preflight", "preflight_qualified"), ("install", "pending"), ("install", "management_installed")])
+@pytest.mark.parametrize("action,status", [("preflight", "preflight_qualified"), ("install", "pending"),
+    ("install", "management_installed"), ("preflight", "blocked"), ("install", "blocked")])
 def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_path, monkeypatch, action, status):
     content, metadata = archive(bundle(tmp_path)), operation(tmp_path)
     report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
-    report.update(status=status, private="never-transfer", phase="database", revision="sha256:" + "d" * 64,
+    report.update(status=status, stage="cluster_identity", private="never-transfer", phase="database", revision="sha256:" + "d" * 64,
                   namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391")
     if status == "management_installed":
         report["backup"] = {"job_uid": "52f5b18c-7dd3-4095-bd7e-49f6a6330391", "sha256": "f" * 64, "bytes": 1234,
@@ -57,6 +58,31 @@ def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_p
     result = module().transfer(content, action=action, target="codex@192.0.2.1", key=Path("/private/key"),
                                known_hosts=Path("/private/hosts"))
     assert result["status"] == status and "never-transfer" not in json.dumps(result) and len(calls) == 1
+
+
+def test_rollout_records_bound_blocked_report_and_exits_failure(tmp_path, monkeypatch, capsys):
+    import sys
+    target = module()
+    metadata = operation(tmp_path)
+    report = {"status": "blocked", "stage": "storage_class",
+              **{key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
+    monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/hosts")
+    monkeypatch.setattr(target, "verify_source", lambda config: None)
+    monkeypatch.setattr(target.shutil, "which", lambda name: "/usr/bin/uv")
+    monkeypatch.setattr(target.subprocess, "run", lambda *args, **kwargs:
+        subprocess.CompletedProcess(args, 0, b"uv 0.11.26 (x86_64-unknown-linux-gnu)\n", b""))
+    monkeypatch.setattr(target, "build_wheels", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(target, "build_bundle", lambda *args, **kwargs: b"qualified bundle")
+    monkeypatch.setattr(target, "transfer", lambda *args, **kwargs: report)
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["rollout", "--operation", "preflight", "--requirements", str(tmp_path / "requirements"),
+                                    "--evidence-dir", str(evidence)])
+    assert target.main() == 1
+    assert json.loads(capsys.readouterr().out) == report
+    assert json.loads((evidence / "management-result.json").read_bytes()) == report
 
 
 @pytest.mark.parametrize("case", ["failure", "timeout", "wrong_action", "other_candidate"])

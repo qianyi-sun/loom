@@ -106,16 +106,18 @@ def test_forced_command_requires_exact_bundle_digest(tmp_path, monkeypatch):
     assert not (tmp_path / "nebius-management").exists()
 
 
-@pytest.mark.parametrize("status", ["preflight_qualified", "pending", "management_installed"])
+@pytest.mark.parametrize("status", ["preflight_qualified", "pending", "management_installed", "blocked"])
 def test_public_report_strips_all_private_material_and_binds_operation(tmp_path, status):
     metadata = operation(tmp_path)
     report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
-    report.update(status=status, phase="database", namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391",
+    report.update(status=status, stage="storage_class", phase="database", namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391",
                   revision="sha256:" + "d" * 64, material="must-never-transfer")
     report["backup"] = {"job_uid": "52f5b18c-7dd3-4095-bd7e-49f6a6330391", "sha256": "f" * 64,
         "bytes": 1234, "key": "loom-nebius-management/2026/09/24/120000-" + "f" * 12 + ".dump", "private": "must-never-transfer"}
     safe = module().safe_report(json.dumps(report).encode(), metadata)
     assert safe["status"] == status and "must-never-transfer" not in json.dumps(safe)
+    if status == "blocked":
+        assert safe["stage"] == "storage_class" and "backup" not in safe and "namespace_uid" not in safe
     if status == "management_installed":
         assert safe["backup"] == {key: value for key, value in report["backup"].items() if key != "private"}
     report["candidate"] = "e" * 40
@@ -136,12 +138,13 @@ def test_backup_receipt_rejects_malformed_or_private_fields(tmp_path, field, val
         module().safe_report(json.dumps(report).encode(), metadata)
 
 
-def test_forced_command_runs_only_selected_action_and_exports_sanitized_report(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("status", ["preflight_qualified", "blocked"])
+def test_forced_command_runs_only_selected_action_and_exports_sanitized_report(tmp_path, monkeypatch, capsys, status):
     import sys
     gateway = module()
     content = archive(bundle(tmp_path))
     report = {key: operation(tmp_path)[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
-    report.update(status="preflight_qualified", private="must-never-transfer")
+    report.update(status=status, stage="foundation", private="must-never-transfer")
     calls = []
     monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "loom-nebius-management-preflight-v1")
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
@@ -150,3 +153,12 @@ def test_forced_command_runs_only_selected_action_and_exports_sanitized_report(t
     assert gateway.authorized_main(hashlib.sha256(content).hexdigest()) == 0
     assert calls[0][-1] == "preflight"
     assert "must-never-transfer" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stage", ["private-token", "", None, ["foundation"], {"secret": "value"}])
+def test_blocked_report_rejects_unqualified_diagnostic(tmp_path, stage):
+    metadata = operation(tmp_path)
+    report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
+    report.update(status="blocked", stage=stage)
+    with pytest.raises(module().GatewayError):
+        module().safe_report(json.dumps(report).encode(), metadata)

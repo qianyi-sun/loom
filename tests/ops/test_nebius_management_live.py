@@ -81,6 +81,7 @@ def test_live_preflight_checks_actual_cluster_before_other_prerequisites(install
     with pytest.raises(ManagementInstallError):
         api.preflight(request, render_installation(request))
     assert checks.calls == []
+    assert api.diagnostic_stage == "cluster_identity"
 
 
 def test_missing_authority_journal_cannot_issue_token_or_restage_policy(installation, tmp_path):

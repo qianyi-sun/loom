@@ -270,6 +270,7 @@ def test_connected_preflight_qualifies_publication_iam_capacity_storage_and_rout
     client.preflight(request, render_installation(request))
     assert events.count("cloud-opened") == events.count("cloud-closed") == 1
     assert "public-route" in events and "backup-read" in events and "backup-closed" in events
+    assert client.diagnostic_stage is None
 
 
 @pytest.mark.parametrize("allowed", [True, False])
@@ -300,6 +301,7 @@ def test_backup_probe_uses_bounded_object_access_without_bucket_metadata_permiss
                 client.preflight(request, render_installation(request))
             assert "private-provider-detail" not in str(error.value)
             assert "public-route" not in events
+            assert client.diagnostic_stage == "backup_access"
         stub.assert_no_pending_responses()
 
 
@@ -320,6 +322,7 @@ def test_live_capacity_shortfall_prevents_installation_qualification(connected_c
                      "resources": {"requests": {"storage": "99Gi"}}}, "status": {"phase": "Pending"}}]
     with pytest.raises(ManagementPrerequisiteError):
         client.preflight(request, render_installation(request))
+    assert client.diagnostic_stage == ("platform_capacity" if shortfall == "platform" else "provider_quota")
 
 
 @pytest.mark.parametrize("demand", ["expansion", "future_claims", "hpa_claims"])
