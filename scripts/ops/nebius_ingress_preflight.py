@@ -65,7 +65,6 @@ def inspect_ingress(kube: Kubectl, raw_config: str, *, namespace: str,
     if not raw_config:
         return {"status": "not_configured"}
     result: dict[str, Any] = {"status": "blocked", "phase": "binding", "checks": {}}
-    api = None
     try:
         if len(raw_config.encode()) > 16_384:
             raise ValueError()
@@ -75,24 +74,33 @@ def inspect_ingress(kube: Kubectl, raw_config: str, *, namespace: str,
                 or config["kubeconfig"] != str(kube.kubeconfig)):
             raise ValueError()
         api = ReadOnlyIngressAPI(kube, config)
-        result.update(source_sha=config["source_sha"], candidate=config["candidate"], reads=api.reads,
-                      unverified=["gateway_local_execution", "certificate_delivery", "staging", "cutover"])
-        for phase in ("foundation", "capacity"):
-            result["phase"] = phase
+    except Exception:
+        return {**result, "reason": "validation_failed"}
+    result.update(bound_source_sha=config["source_sha"], candidate=config["candidate"], reads=api.reads,
+                  scope="current_cluster_not_historical_gateway", failures={},
+                  unverified=["gateway_source_correspondence", "gateway_local_execution",
+                              "certificate_delivery", "staging", "cutover"])
+    result.pop("phase")
+    for phase in ("foundation", "capacity"):
+        api.failure = None
+        try:
             getattr(api, phase)()
             result["checks"][phase] = "passed"
+        except Exception as exc:
+            # Both checks revalidate namespace UIDs and issue only fixed reads.
+            # A stale candidate must not hide independent current capacity data.
+            reason = api.failure or {
+                "eligible system capacity cannot fit the ingress envelope": "insufficient_capacity",
+                "complete live capacity inventory required": "inventory_unqualified",
+                "duplicate Kubernetes inventory": "inventory_unqualified",
+                "Kubernetes inventory identity unavailable": "inventory_unqualified",
+                "full live ingress capacity inventory is unqualified": "accounting_unqualified",
+                "eligible system node provider identity differs": "node_identity_mismatch",
+            }.get(str(exc), "validation_failed")
+            result["checks"][phase] = "blocked"
+            result["failures"][phase] = reason
+            result.setdefault("phase", phase)
+            result.setdefault("reason", reason)
+    if not result["failures"]:
         result["status"] = "passed"
-        result.pop("phase")
-    except Exception as exc:
-        # Compare only fixed internal messages; never publish exception text,
-        # classes, raw API payloads, filenames or provider diagnostics.
-        reason = {
-            "eligible system capacity cannot fit the ingress envelope": "insufficient_capacity",
-            "complete live capacity inventory required": "inventory_unqualified",
-            "duplicate Kubernetes inventory": "inventory_unqualified",
-            "Kubernetes inventory identity unavailable": "inventory_unqualified",
-            "full live ingress capacity inventory is unqualified": "accounting_unqualified",
-            "eligible system node provider identity differs": "node_identity_mismatch",
-        }.get(str(exc), "validation_failed")
-        result["reason"] = (api.failure if api is not None else None) or reason
     return result

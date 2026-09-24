@@ -75,14 +75,15 @@ def test_real_foundation_and_capacity_checks_are_read_only_and_payload_free(wire
     result = inspect(wire)
     assert result["status"] == "passed"
     assert result["checks"] == {"foundation": "passed", "capacity": "passed"}
-    assert result["unverified"] == ["gateway_local_execution", "certificate_delivery", "staging", "cutover"]
-    assert result["source_sha"] == "a" * 40 and result["candidate"] == "b" * 40
+    assert result["unverified"] == ["gateway_source_correspondence", "gateway_local_execution",
+                                     "certificate_delivery", "staging", "cutover"]
+    assert result["bound_source_sha"] == "a" * 40 and result["candidate"] == "b" * 40
     assert "private-" not in json.dumps(result)
     assert all(call[0] in {"get", "config"} for call in wire[0].calls)
 
 
 @pytest.mark.parametrize("change", ["candidate", "namespace_uid", "server", "foundation"])
-def test_foundation_drift_is_localized_before_capacity_reads(wire, change):
+def test_foundation_drift_does_not_pass_but_preserves_independent_reads(wire, change):
     _, config, documents, _ = wire
     if change == "candidate":
         config["candidate"] = "c" * 40
@@ -97,8 +98,9 @@ def test_foundation_drift_is_localized_before_capacity_reads(wire, change):
         row["data"]["environment.json"] = json.dumps(platform)
     result = inspect(wire)
     assert result["status"] == "blocked" and result["phase"] == "foundation"
-    assert result["checks"] == {}
-    assert not any(call[:2] == ("get", "pods") for call in wire[0].calls)
+    assert result["checks"] == {"foundation": "blocked", "capacity": "blocked" if change == "namespace_uid" else "passed"}
+    if change == "namespace_uid":
+        assert not any(call[:2] == ("get", "pods") for call in wire[0].calls)
     assert "private-" not in json.dumps(result)
 
 
@@ -107,7 +109,7 @@ def test_size_limit_failure_is_distinct_from_api_failure_or_insufficient_capacit
     result = inspect(wire)
     assert result["status"] == "blocked" and result["phase"] == "capacity"
     assert result["reason"] == "response_too_large"
-    assert result["checks"] == {"foundation": "passed"}
+    assert result["checks"] == {"foundation": "passed", "capacity": "blocked"}
     assert result["reads"][-1] == {"resource": "pods", "bytes": 4194305, "status": "response_too_large"}
 
 

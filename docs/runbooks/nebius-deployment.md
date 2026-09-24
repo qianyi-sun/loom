@@ -86,10 +86,15 @@ phase, allowlisted reason codes and response byte counts against the gateway's
 response-size limit. It never reads Secrets, issues writes, retries installation,
 or exports raw API/configuration/error payloads. Missing authority is explicitly
 `not_configured`; a blocked diagnostic does not discard the general inventory.
+Foundation and capacity checks report independently, so candidate drift does not
+hide current capacity failures. Each revalidates the exact namespace UIDs.
 These checks run through protected inspection, not the installed gateway process:
-gateway-local execution, certificate files/delivery, staging and cutover remain
+the reported `bound_source_sha` identifies gateway authority, not the diagnostic
+code. Gateway-source correspondence, gateway-local execution, certificate
+files/delivery, staging and cutover remain
 unverified even when these checks pass. Reconcile retained journals before any
-mutating retry; this diagnostic does not authorize one.
+mutating retry; this diagnostic does not authorize one or establish historical
+failure-time state.
 
 `observed` means inventory succeeded, not that personal environments are ready.
 The configured candidate is read from the platform ConfigMap, which rollout can
