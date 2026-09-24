@@ -301,4 +301,3 @@ async def admit_execution_backend(
         detail=(f"no active worker advertises backend {backend!r}. "
                 f"Currently available: {available_str}. Start a local worker."),
     )
-
