@@ -22,3 +22,7 @@ func readSymlink(string) (string, error) {
 func writeFile(string, io.Reader, uint32) error {
 	return errors.New("secure file transfers require Linux")
 }
+
+func replaceDirectory(string, string) error {
+	return errors.New("secure directory restoration requires Linux")
+}
