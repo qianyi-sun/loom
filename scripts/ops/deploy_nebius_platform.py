@@ -173,7 +173,7 @@ class Kubectl:
     def __init__(self, kubeconfig: Path):
         self.kubeconfig = kubeconfig
 
-    def run(self, *args: str, timeout: int = 90) -> str:
+    def run(self, *args: str, timeout: int = 90, preserve_output: bool = False) -> str:
         command = [
                 "kubectl",
                 "--kubeconfig",
@@ -223,7 +223,7 @@ class Kubectl:
             raise DeploymentError(
                 f"kubectl {args[0]} failed with exit code {result.returncode}: {reason}"
             )
-        return result.stdout.strip()
+        return result.stdout if preserve_output else result.stdout.strip()
 
     def get(self, kind: str, name: str, namespace: str) -> dict[str, Any]:
         result = self.run("get", kind, name, "-n", namespace, "--ignore-not-found", "-o", "json")
