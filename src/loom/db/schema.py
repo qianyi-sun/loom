@@ -6325,6 +6325,7 @@ class ServiceExecutionLease(Base):
     materialization_claim_expires_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True)
     )
+    materialization_recovery_requested_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     materialization_started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     materialization_committed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     materialization_error_code: Mapped[str | None] = mapped_column(Text)
