@@ -149,7 +149,10 @@ The owner confirmed AZ GPTPlus5's `default` group for `loom-testing` and
 `model_ratio * 2 * group_ratio`; output and cache ratios multiply this base.
 Only models enabled for the selected group and representable token billing are
 included. Missing cache prices remain unknown. Tiered/per-request pricing is
-not approximated. No foreign-currency conversion is performed.
+not approximated. No foreign-currency conversion is performed. Calls reporting
+audio billing, one-hour Anthropic cache writes, or Gemini thinking/non-text
+categories outside this price contract remain unpriced rather than silently
+omitting those charges. Legacy configurations keep their original calculation.
 
 The Service's background loop checks shared supplier catalogs every five minutes
 and refreshes when the last attempt is at least six hours old. Database row

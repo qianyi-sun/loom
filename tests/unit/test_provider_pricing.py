@@ -211,3 +211,26 @@ async def test_pre_run_budget_uses_same_model_price_and_preserves_unknown(mode, 
     assert estimate.pre_run_estimated_cost_usd == cost
     if cost is None:
         assert estimate.cost_estimate_confidence != "configured"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dialect,response", [
+    ("anthropic", {"usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 5, "cache_creation": {"ephemeral_1h_input_tokens": 5}}}),
+    ("gemini", {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2,
+        "cachedContentTokenCount": 0, "thoughtsTokenCount": 20}}),
+    ("gemini", {"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2,
+        "cachedContentTokenCount": 0, "promptTokensDetails": [{"modality": "AUDIO", "tokenCount": 5}]}}),
+])
+async def test_unsupported_token_dimensions_are_not_silently_omitted(dialect, response):
+    from types import SimpleNamespace
+
+    from loom_llm_gateway.dialect import DIALECTS
+    from loom_llm_gateway.provider_pricing import configured_cost
+
+    row = SimpleNamespace(pricing_config={"pricing_mode": "custom", "custom_pricing": {
+        "a": {"input_usd_per_1m": 1, "output_usd_per_1m": 2, "cache_write_usd_per_1m": 3},
+    }})
+    cost = await configured_cost(None, row, "a", DIALECTS[dialect].extract_tokens(response))
+    assert cost.source == "unpriced"
+    assert cost.unpriced_reason == "unsupported_billing_dimensions"

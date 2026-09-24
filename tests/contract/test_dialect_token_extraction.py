@@ -75,6 +75,8 @@ def test_extract_tokens(
         expected_extras["_loom_unsupported_billing"] = False
     if dialect == "anthropic":
         expected_extras["_loom_cache_usage_known"] = True
+    if dialect == "gemini":
+        expected_extras["_loom_unsupported_billing"] = True
     assert usage.provider_extras == expected_extras
 
 
