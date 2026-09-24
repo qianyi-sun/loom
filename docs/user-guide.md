@@ -1072,8 +1072,9 @@ controls over the complete timestamp/id-ordered history. Loading marks page
 controls unavailable without removing keyboard focus; an error keeps Previous
 and Retry available; the terminal page is announced explicitly.
 
-Getting started is available from Home and the main navigation, including before
-sign-in. Choose Web, CLI, or API for a short path through account access, provider
+Getting started is available from Home and sits directly below Home in the main
+navigation, ahead of New batch. The guide is also available before sign-in.
+Choose Web, CLI, or API for a short path through account access, provider
 setup, task selection, and results. Home keeps its readiness summary and recent
 activity; collapse the onboarding card when it is no longer useful.
 
