@@ -229,3 +229,65 @@ def test_workload_defaulting_cannot_expand_runtime_privileges(inputs, tmp_path, 
         stage_management_resources(rendered=rendered, phase="40-services.yaml", binding=binding, api=api,
                                    state_dir=tmp_path / "stage")
     assert not api.creates
+
+
+def test_phase_readiness_is_read_only_and_requires_current_rollout_generation(inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import management_phase_ready, stage_management_resources
+
+    rendered, binding, api = inputs
+    args = dict(rendered=rendered, phase="40-services.yaml", binding=binding, api=api, state_dir=tmp_path / "services")
+    stage_management_resources(**args)
+    before = (tmp_path / "services/stage.json").read_bytes()
+    writes = len(api.creates)
+    assert management_phase_ready(**args) is False
+    deployment = api.resources["Deployment:loom-service"]
+    deployment["metadata"]["generation"] = 2
+    deployment["status"] = {"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+                            "updatedReplicas": 1, "availableReplicas": 1}
+    assert management_phase_ready(**args) is False
+    deployment["status"]["observedGeneration"] = 2
+    assert management_phase_ready(**args) is True
+    deployment["status"]["updatedReplicas"] = 0
+    assert management_phase_ready(**args) is False
+    assert len(api.creates) == writes
+    assert (tmp_path / "services/stage.json").read_bytes() == before
+
+
+def test_ready_counts_cannot_hide_replaced_or_mutated_workload(inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import ManagementStageError, management_phase_ready, stage_management_resources
+
+    rendered, binding, api = inputs
+    args = dict(rendered=rendered, phase="40-services.yaml", binding=binding, api=api, state_dir=tmp_path / "services")
+    stage_management_resources(**args)
+    deployment = api.resources["Deployment:loom-service"]
+    deployment["metadata"]["uid"] = str(uuid4())
+    deployment["status"] = {"observedGeneration": 10, "replicas": 1, "readyReplicas": 1,
+                            "updatedReplicas": 1, "availableReplicas": 1}
+    with pytest.raises(ManagementStageError):
+        management_phase_ready(**args)
+    assert len(api.creates) == 2
+
+
+def test_database_readiness_requires_matching_controller_revisions(inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import management_phase_ready, stage_management_resources
+
+    rendered, binding, api = inputs
+    args = dict(rendered=rendered, phase="20-database.yaml", binding=binding, api=api, state_dir=tmp_path / "database")
+    stage_management_resources(**args)
+    database = api.resources["StatefulSet:loom-postgres"]
+    database["metadata"]["generation"] = 1
+    database["status"] = {"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
+                          "updatedReplicas": 1, "currentRevision": "old", "updateRevision": "new"}
+    assert management_phase_ready(**args) is False
+    database["status"]["currentRevision"] = "new"
+    assert management_phase_ready(**args) is True
+
+
+@pytest.mark.parametrize("phase", ["40-services.yaml", "80-backup.yaml", "70-public.yaml"])
+def test_readiness_never_stages_missing_state_or_claims_backup_and_public_proof(inputs, tmp_path, phase):
+    from scripts.ops.nebius_management_stage import ManagementStageError, management_phase_ready
+
+    rendered, binding, api = inputs
+    with pytest.raises(ManagementStageError):
+        management_phase_ready(rendered=rendered, phase=phase, binding=binding, api=api, state_dir=tmp_path / "missing")
+    assert not api.creates
