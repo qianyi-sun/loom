@@ -6,7 +6,6 @@ import copy
 import json
 
 import pytest
-
 from tests.ops.test_nebius_management_authority_stage import inputs as inputs
 
 
@@ -61,6 +60,15 @@ def test_changed_supplied_input_cannot_rotate_retained_credentials(inputs, mater
     with pytest.raises(ManagementStageError, match="journal"):
         run(inputs, material, tmp_path / "state")
     assert len(inputs[2].creates) == 3
+
+
+def test_supplied_defaulting_cannot_add_unqualified_credentials(inputs, material, tmp_path):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    inputs[2].default_change = lambda doc: doc["data"].update({"unqualified": "dW5xdWFsaWZpZWQ="})
+    with pytest.raises(ManagementStageError, match="defaulting"):
+        run(inputs, material, tmp_path / "state")
+    assert not inputs[2].creates
 
 
 @pytest.mark.parametrize("change", ["bootstrap", "missing", "extra", "empty", "cloud_json"])
