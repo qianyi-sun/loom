@@ -177,10 +177,13 @@ async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_error", [False, True])
+@pytest.mark.parametrize("separate_private_inputs", [False, True])
 async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_error: bool, separate_private_inputs: bool,
 ):
     task, trial, _ = _inputs()
+    if separate_private_inputs:
+        task.verifier.args["private_input_root"] = "/loom/verifier/task"
     (tmp_path / "instruction.md").write_text("Produce answer.txt")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/check.py").write_text("trusted assertions")
@@ -225,7 +228,14 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
 
     def check(cmd, user, cwd, env):
         assert cwd == PurePosixPath("/app") and user is None
-        assert verifier.filesystem[PurePosixPath("/app/tests/check.py")] == b"trusted assertions"
+        private_root = PurePosixPath("/loom/verifier/task" if separate_private_inputs else "/app")
+        assert verifier.filesystem[private_root / "tests/check.py"] == b"trusted assertions"
+        assert env["LOOM_TASK_DIR"] == str(private_root)
+        if separate_private_inputs:
+            assert cmd == "/bin/sh /loom/verifier/task/verifier/check.sh"
+            assert env["LOOM_VERIFIER_OUTPUT"] == "/loom/verifier/output.json"
+            assert not any(path.is_relative_to("/app/tests") or path.is_relative_to("/app/verifier")
+                           or path.is_relative_to("/app/solution") for path in verifier.filesystem)
         assert verifier.filesystem[PurePosixPath("/app/answer.txt")] == b"42"
         assert verifier.filesystem[PurePosixPath("/app/fixture.txt")] == b"baked fixture"
         assert not any(str(path).startswith("/app/.loom/") for path in verifier.filesystem)

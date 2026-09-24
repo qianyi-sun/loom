@@ -100,6 +100,7 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert adapted["verifier"]["user"] == "root"
     assert adapted["verifier"]["env_mode"] == "shared"
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
+    assert adapted["verifier"]["args"]["private_input_root"] == "/loom/verifier/task"
     assert stats.resources_filled
     assert stats.network_forced_gateway_only
     assert not stats.verifier_identity_stripped
