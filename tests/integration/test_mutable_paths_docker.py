@@ -31,6 +31,38 @@ async def _reference_fixture(drivers):
     assert result.return_code == 0, result.stderr
 
 
+async def test_native_handoff_restores_the_shell_runtime_libraries(sandboxes, tmp_path):  # noqa: F811
+    """Directory replacement cannot need a shell after removing its loader."""
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier, other_trial = sandboxes
+    discovered = await agent.exec(
+        "python -c 'import glob,os; "
+        "p=glob.glob(\"/lib/*-linux-gnu/ld-linux-*.so.*\"); "
+        "assert len(p)==1,p; print(os.path.dirname(os.path.realpath(p[0])))'",
+    )
+    assert discovered.return_code == 0, discovered.stderr
+    root = PurePosixPath(discovered.stdout.decode().strip())
+    assert root.parent == PurePosixPath('/usr/lib')
+    for driver in (agent, verifier):
+        result = await driver.exec(f'mkdir -p /app; echo baseline > {root}/loom-deleted-marker')
+        assert result.return_code == 0, result.stderr
+    changed = await agent.exec(
+        f'rm {root}/loom-deleted-marker; echo transferred > {root}/loom-library-marker',
+    )
+    assert changed.return_code == 0, changed.stderr
+    await export_mutable_paths(agent, (root,), tmp_path / 'libraries', workdir=PurePosixPath('/app'))
+    await import_mutable_paths(verifier, (root,), tmp_path / 'libraries', workdir=PurePosixPath('/app'))
+    checked = await verifier.exec(
+        f'test ! -e {root}/loom-deleted-marker; '
+        f'test "$(cat {root}/loom-library-marker)" = transferred; '
+        "python -c 'import ssl; print(ssl.OPENSSL_VERSION)'",
+    )
+    assert checked.return_code == 0 and b'OpenSSL' in checked.stdout, checked.stderr
+    untouched = await other_trial.exec(f'test ! -e {root}/loom-library-marker; /bin/sh -c true')
+    assert untouched.return_code == 0, untouched.stderr
+
+
 async def test_declared_external_interpreter_is_checked_and_preserved(reference_drivers, tmp_path):
     from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 
