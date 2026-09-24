@@ -316,6 +316,61 @@ describe("AuthLogin", () => {
     expect(screen.getByRole("button", { name: "Request account" })).toBeDisabled();
   });
 
+  it("distinguishes discovery failures from an empty list and retries through registration", async () => {
+    let discoveryCalls = 0;
+    let allowRecovery = false;
+    let resolveTeams!: (response: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/auth/me")) return new Response("", { status: 401 });
+      if (url.endsWith("/api/v1/auth/public-teams")) {
+        discoveryCalls += 1;
+        if (!allowRecovery) return jsonResponse({ detail: "internal upstream failure" }, 503);
+        return new Promise<Response>((resolve) => { resolveTeams = resolve; });
+      }
+      if (url.endsWith("/api/v1/auth/registration-requests") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toMatchObject({ username: "Mark", team_id: "team-research" });
+        return jsonResponse({ status: "pending" }, 202);
+      }
+      return jsonResponse({ detail: "unhandled fixture" }, 404);
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AuthLogin />, { route: "/auth/login" });
+    const failure = "Could not load registration teams. Please try again.";
+    expect(await screen.findByRole("alert")).toHaveTextContent(failure);
+    expect(screen.queryByText("No teams are currently open for public registration.")).not.toBeInTheDocument();
+    expect(screen.queryByText("internal upstream failure")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Registration team")).toBeDisabled();
+    await user.type(screen.getByLabelText("Requested username"), "Mark");
+    expect(screen.getByRole("button", { name: "Request account" })).toBeDisabled();
+
+    const initialCalls = discoveryCalls;
+    await user.click(screen.getByRole("button", { name: "Retry loading teams" }));
+    await waitFor(() => expect(discoveryCalls).toBeGreaterThan(initialCalls));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Retry loading teams" })).toBeEnabled());
+    expect(screen.getByRole("alert")).toHaveTextContent(failure);
+    allowRecovery = true;
+    await user.click(screen.getByRole("button", { name: "Retry loading teams" }));
+    await waitFor(() => expect(resolveTeams).toBeTypeOf("function"));
+    expect(screen.getByRole("status")).toHaveTextContent("Loading registration teams…");
+    const retry = screen.queryByRole("button", { name: "Retry loading teams" });
+    if (retry) expect(retry).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Request account" })).toBeDisabled();
+
+    resolveTeams(jsonResponse({ items: [{ id: "team-research", name: "Research" }] }));
+    expect(await screen.findByRole("option", { name: "Research" })).toBeInTheDocument();
+    expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Registration team")).toHaveValue("");
+    expect(screen.getByLabelText("Requested username")).toHaveValue("Mark");
+    await user.selectOptions(screen.getByLabelText("Registration team"), "team-research");
+    await user.click(screen.getByRole("button", { name: "Request account" }));
+    expect(await screen.findByText("Request submitted. An admin will review it and share a password setup link manually if approved.")).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.filter(([input, init]) => String(input).endsWith("/api/v1/auth/registration-requests") && init?.method === "POST")).toHaveLength(1);
+  });
+
   it("clears a stale registration team selection when the public list drops it", async () => {
     let publicTeamsPayload: { items: Array<{ id: string; name: string }> } = {
       items: [{ id: "team-research", name: "Research" }],
