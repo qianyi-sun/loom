@@ -6,19 +6,24 @@ import copy
 import os
 import ssl
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.ops.test_nebius_management_install import installation as installation
+from tests.ops.test_nebius_management_supplied import material as material
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires explicitly disposable Kubernetes")
 
 
 @pytest.mark.timeout(180)
-def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(tmp_path):
+def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(tmp_path, installation):
     from kubernetes import client
     from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
     from scripts.ops.nebius_management_authority_stage import (
@@ -31,7 +36,11 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
         HTTPSBootstrapAPI,
         bootstrap_management,
     )
+    from scripts.ops.nebius_management_evidence import HTTPSManagementEvidenceAPI
+    from scripts.ops.nebius_management_install import ManagementInstallError, render_installation
+    from scripts.ops.nebius_management_live import HTTPSManagementInstallationAPI
     from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_stage import stage_management_resources
 
     from loom.nebius_management_authority import (
         ManagementNamespaceAuthority,
@@ -66,7 +75,20 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
                                     receipt["namespace_uid"], bootstrap.kube_system_uid)
         core.create_namespace({"metadata": {"name": "loom-dev-foreign"}})
         core.create_namespaced_secret("loom-dev-foreign", {"metadata": {"name": "private"}, "stringData": {"value": "foreign"}})
-        core.create_namespaced_service_account(authority.namespace, {"metadata": {"name": "loom-management-provisioner"}})
+        class ExternalPrerequisites:
+            def preflight(self, request, rendered):
+                raise AssertionError("cloud/route qualification is outside this disposable RBAC test")
+
+            def public_route(self, request):
+                raise AssertionError("no public route in disposable RBAC test")
+
+        request = replace(installation[0], binding=bootstrap)
+        live = HTTPSManagementInstallationAPI(request=request, api_server=endpoint, ssl_context=operator_trust,
+            runtime_ca_pem=base64.b64decode(config["clusters"][0]["cluster"]["certificate-authority-data"]).decode(),
+            checks=ExternalPrerequisites())
+        with live.resources(binding, "config") as api:
+            stage_management_resources(rendered=live.rendered, phase="10-config-network.yaml", binding=binding,
+                                       api=api, state_dir=tmp_path / "config")
         with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
                                         api_server=endpoint, ssl_context=operator_trust) as api:
             arguments = dict(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
@@ -86,14 +108,27 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
         with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
                                         api_server=endpoint, ssl_context=operator_trust) as api:
             assert management_authority_ready(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
-        token = core.create_namespaced_service_account_token("loom-management-provisioner", authority.namespace,
-            client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token
         account_uid = core.read_namespaced_service_account("loom-management-provisioner", authority.namespace).metadata.uid
+        with HTTPSManagementEvidenceAPI(binding=binding, rendered=render_installation(installation[0]),
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            token = api.runtime_token(service_account_uid=account_uid)
         with HTTPSManagementAuthorityProbe(authority=authority, service_account_uid=account_uid,
                                           api_server=endpoint, ssl_context=trust, token=token) as probe:
             deadline = time.monotonic() + 20
             while not probe.qualify():
                 assert time.monotonic() < deadline, "runtime authority did not qualify"
+                time.sleep(0.1)
+        # Exercise the connected caller, including the journal-bound account and
+        # a fresh trust-only context. Reusing operator mTLS would fail its actual
+        # SelfSubjectReview instead of silently qualifying cluster-admin.
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                live.qualify_authority(binding, tmp_path / "authority")
+                break
+            except ManagementInstallError as exc:
+                assert str(exc) == "management authority propagation pending"
+                assert time.monotonic() < deadline
                 time.sleep(0.1)
         with httpx.Client(base_url=endpoint, verify=trust, headers={"Authorization": "Bearer " + token},
                           trust_env=False, follow_redirects=False, timeout=20) as http:
