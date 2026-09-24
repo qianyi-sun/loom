@@ -58,6 +58,8 @@ def test_declared_external_leaf_preserves_interpreter_and_internal_aliases(tmp_p
 
 @pytest.mark.parametrize("member", [
     _member("alias", tarfile.SYMTYPE, link="bin/python/../private"),
+    _member("alias", tarfile.SYMTYPE, link="bin/python/"),
+    _member("alias", tarfile.SYMTYPE, link="bin/python/."),
     _member("alias", tarfile.SYMTYPE, link="/usr/local/bin/python3.9/../private"),
     _member("alias", tarfile.SYMTYPE, link="/usr/local/bin/other"),
     _member("bin/python/child", tarfile.REGTYPE),

@@ -291,3 +291,27 @@ async def test_native_virtualenv_handoff_preserves_external_interpreter_and_alia
         "assert Path(\"/root/.cache/task/marker\").read_text() == \"cache-state\\n\"; print(\"preserved\")'"
     )
     assert executed.return_code == 0 and executed.stdout.strip() == b"preserved"
+
+
+async def test_mutated_reference_cannot_forge_its_fingerprint_with_task_utilities(sandboxes, tmp_path):
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError
+
+    agent, verifier, _ = sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec("mkdir -p /app /cache; echo untouched > /cache/baseline")).return_code == 0
+    forged = await agent.exec(r"""set -eu
+original=$(sha256sum < /usr/local/bin/python3.11)
+printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$original" > /usr/local/bin/sha256sum
+chmod 0755 /usr/local/bin/sha256sum
+printf X | dd of=/usr/local/bin/python3.11 bs=1 seek=100 conv=notrunc status=none
+ln -s /usr/local/bin/python3.11 /cache/python
+""")
+    assert forged.return_code == 0, forged.stderr
+    await agent.stop_processes()
+    paths = (PurePosixPath("/cache"),)
+    options = {"workdir": PurePosixPath("/app"),
+               "reference_files": (PurePosixPath("/usr/local/bin/python3.11"),)}
+    await export_mutable_paths(agent, paths, tmp_path / "snapshot", **options)
+    with pytest.raises(WorkspaceSnapshotError, match="reference"):
+        await import_mutable_paths(verifier, paths, tmp_path / "snapshot", **options)
+    assert (await verifier.exec("cat /cache/baseline")).stdout.strip() == b"untouched"
