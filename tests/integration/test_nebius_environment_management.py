@@ -152,6 +152,39 @@ async def test_owner_conflict_and_cross_owner_status_do_not_change_registration(
     assert len(await registry.list_environments(principal=alice)) == 1
 
 
+async def test_namespace_authority_is_frozen_across_changed_installation_replay(environment_registry, platform_inputs):
+    from loom.nebius_environment_contract import FoundationBinding
+
+    registry, _, (alice, _), prepare = environment_registry
+    config, candidate, profile = platform_inputs
+    installation = "30000000-0000-4000-8000-000000000001"
+    foundation = FoundationBinding.model_validate({
+        **foundation_from(config).model_dump(), "namespace_authority": {
+            "installation_id": installation, "namespace": "loom-nebius-management",
+        },
+    })
+    registration = prepare().registration
+    prepared = render_environment(registration, candidate, foundation, profile=profile, keyring={}, repo_root=ROOT)
+    created = await registry.create(principal=alice, idempotency_key="owned-namespaces", prepared=prepared)
+    changed = FoundationBinding.model_validate({**foundation.model_dump(), "namespace_authority": {
+        "installation_id": "30000000-0000-4000-8000-000000000002", "namespace": "loom-nebius-management-other",
+    }})
+    replay = render_environment(registration, candidate, changed, profile=profile, keyring={}, repo_root=ROOT)
+    assert await registry.create(principal=alice, idempotency_key="owned-namespaces", prepared=replay) == created
+    context = await registry.provisioning_context(await registry.claim(created.operation_id))
+    namespaces = [doc for doc in context.documents.values() if doc.get("kind") == "Namespace"]
+    assert len(namespaces) == 3
+    assert all(doc["metadata"]["labels"]["loom.nebius/namespace-installation"] == installation for doc in namespaces)
+    bindings = [doc for doc in context.documents.values() if doc.get("kind") == "RoleBinding"
+                and doc["roleRef"]["kind"] == "ClusterRole"]
+    assert len(bindings) == 3
+    assert all(doc["subjects"][0]["namespace"] == "loom-nebius-management" for doc in bindings)
+    destroyed = await registry.destroy_retained(created.environment_id, principal=alice,
+                                                expected_generation=1, idempotency_key="retain-authority")
+    retained = await registry.provisioning_context(await registry.claim(destroyed.operation_id))
+    assert retained.source.documents == context.documents
+
+
 @pytest.mark.parametrize("scope", [None, "project-provisioning-a"])
 async def test_provisioning_scope_is_frozen_for_replay_and_retained_cleanup(environment_registry, scope):
     from loom.db.nebius_environment_schema import NebiusEnvironmentOperation

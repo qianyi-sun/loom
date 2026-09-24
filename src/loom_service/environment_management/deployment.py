@@ -58,6 +58,9 @@ class ManagementDeployment(BaseModel):
         config = foundation.platform_config
         if self.installation_id.int == 0:
             raise ValueError("management installation requires a non-nil identity")
+        authority = foundation.namespace_authority
+        if authority is not None and (authority.installation_id != self.installation_id or authority.namespace != self.namespace):
+            raise ValueError("namespace authority differs from management installation")
         if self.namespace in {config["namespace"], config["execution_namespace"],
                               config["execution_namespace"] + "-build", foundation.ingress_namespace}:
             raise ValueError("management requires an independent namespace")

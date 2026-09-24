@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,7 +15,7 @@ describe("Getting started", () => {
     expect(await screen.findByRole("heading", { name: "Getting started" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Web" })).toHaveAttribute("aria-selected", "true");
     expect(fetchSpy.mock.calls.every(([url]) => String(url).endsWith("/api/v1/auth/me"))).toBe(true);
-    expect(document.title).toBe("Getting started · Loom");
+    await waitFor(() => expect(document.title).toBe("Getting started · Loom"));
   });
   it.each(["/dev", "/prod", "/staging/rehearsal/0123456789abcdef01234567"])("retains the deployment prefix %s in CLI and API commands", async (routePath) => {
     setFrontendConfigForTests({ environment: "development", environmentLabel: "Test environment", routePath, apiBase: routePath, apiRouteBase: `${window.location.origin}${routePath}/api` });

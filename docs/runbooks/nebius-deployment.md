@@ -550,6 +550,25 @@ as a substitute or change platform `project_id`/`quota_parent_id` to redirect IA
 Existing operations retain their frozen scope for retries and credential cleanup;
 changing this field neither migrates resources nor repairs historical permissions.
 
+For dynamic native-ServiceAccount namespace provisioning, the protected
+`installation.foundation.namespace_authority` contains `installation_id` and
+`namespace`, bound to the management installation. Its pure
+`render_namespace_authority` helper emits installer-owned fail-closed admission
+and bounded RBAC. It requires Kubernetes v1 ValidatingAdmissionPolicy support
+(Kubernetes 1.30 or newer). Do not install its bootstrap grant on its own or treat
+generated policy text as proof of enforcement. The protected installer must
+qualify policy readiness, denial probes, the exact manager identity and ownership
+before management can receive/use the credentials. No shared-cluster installation
+command is provided by this helper.
+
+New child plans carry three installation-labeled namespaces followed by their
+local provisioner RoleBindings. The manager cannot retag/adopt foreign namespaces
+or read their Secrets; imported namespaces require a different, explicitly
+qualified enrollment operation. Missing or mismatched policy/grant state is an
+activation blocker, never a reason to supply cluster-admin credentials.
+Qualify both RoleBinding restrictions and the observer Role's exact read-only
+rules; a fixed Role name alone does not constrain delegated permissions.
+
 For new managed databases, set
 `installation.foundation.generated_postgres_storage_gi` explicitly when the
 standalone database's size is inappropriate. The value is an integer from 10 to

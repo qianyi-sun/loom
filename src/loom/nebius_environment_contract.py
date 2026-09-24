@@ -14,6 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom.nebius_management_authority import ManagementNamespaceAuthority
+
 EnvironmentKind = Literal["development", "staging", "production"]
 EnvironmentScope = Literal["personal", "shared"]
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -55,6 +57,7 @@ its private key in developer namespaces. This contract does not provision it.
     # Cloud IAM/buckets live outside the cluster project. This protected scope
     # is frozen in operation plans, never substituted for cluster/quota identity.
     provisioning_project_id: str | None = Field(default=None, pattern=_PROVIDER_ID)
+    namespace_authority: ManagementNamespaceAuthority | None = None
 
     _dns_zone = field_validator("public_dns_zone")(_hostname)
 
