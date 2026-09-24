@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -17,7 +19,13 @@ from uuid import UUID, uuid4
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
-from scripts.ops.nebius_management_material import ManagementBinding, MaterialAPI, deliver_material
+from scripts.ops.nebius_management_material import (
+    HTTPSMaterialAPI,
+    ManagementBinding,
+    MaterialAPI,
+    deliver_material,
+)
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 from loom.nebius_platform_render import _namespace
 
@@ -56,6 +64,65 @@ class BootstrapAPI(Protocol):
         ...
 
     def material_api(self, binding: ManagementBinding) -> AbstractContextManager[MaterialAPI]: ...
+
+
+class HTTPSBootstrapAPI(ManagementKubernetesTransport):
+    """Only this installation's fixed Namespace and generated Secret operations."""
+
+    error_type = BootstrapError
+
+    def __init__(self, *, binding: BootstrapBinding, api_server: str, ssl_context: ssl.SSLContext,
+                 token: str | None = None):
+        self.binding, self._ssl_context, self._token = binding, ssl_context, token
+        super().__init__(api_server=api_server, ssl_context=ssl_context, token=token)
+
+    def verify_cluster(self, binding: BootstrapBinding) -> None:
+        if binding != self.binding:
+            raise BootstrapError("management cluster binding differs")
+        actual = self._request("GET", "/api/v1/namespaces/kube-system")
+        try:
+            if (actual is None or actual.get("kind") != "Namespace"
+                    or actual["metadata"]["name"] != "kube-system" or _uid(actual) != binding.kube_system_uid
+                    or actual["metadata"].get("deletionTimestamp") or actual["metadata"].get("ownerReferences")):
+                raise ValueError()
+        except Exception:
+            raise BootstrapError("management cluster identity differs") from None
+
+    def get_namespace(self) -> dict[str, Any] | None:
+        return self._request("GET", "/api/v1/namespaces/" + self.binding.namespace)
+
+    def create_namespace(self, document: dict[str, Any]) -> None:
+        try:
+            operation = document["metadata"]["annotations"][_OPERATION]
+            if document != _document(self.binding, operation):
+                raise ValueError()
+        except Exception:
+            raise BootstrapError("Namespace outside management bootstrap scope") from None
+        self.verify_cluster(self.binding)
+        self._request("POST", "/api/v1/namespaces", document=document)
+
+    def material_api(self, binding: ManagementBinding) -> HTTPSMaterialAPI:
+        if (binding.installation_id, binding.namespace, binding.kube_system_uid) != (
+            self.binding.installation_id, self.binding.namespace, self.binding.kube_system_uid,
+        ):
+            raise BootstrapError("credentials outside management bootstrap scope")
+        return HTTPSMaterialAPI(binding=binding, api_server=self.api_server, ssl_context=self._ssl_context, token=self._token)
+
+
+class _CheckedMaterialAPI:
+    def __init__(self, api: MaterialAPI, check: Callable[[], str]):
+        self.api, self.check = api, check
+
+    def verify_identity(self, binding: ManagementBinding) -> None:
+        self.check()
+        self.api.verify_identity(binding)
+
+    def get_secret(self, namespace: str, name: str) -> dict[str, Any] | None:
+        return self.api.get_secret(namespace, name)
+
+    def create_secret(self, document: dict[str, Any]) -> None:
+        self.check()
+        self.api.create_secret(document)
 
 
 def _document(binding: BootstrapBinding, operation: str) -> dict[str, Any]:
@@ -144,7 +211,8 @@ def bootstrap_management(*, binding: BootstrapBinding, api: BootstrapAPI, state_
                 record["stage"] = "material_intent"
                 private_state._atomic_json(path, record)
             with api.material_api(material_binding) as material_api:
-                receipt = deliver_material(binding=material_binding, api=material_api, state_dir=material)
+                checked = _CheckedMaterialAPI(material_api, lambda: _observe(api, binding, desired, uid))
+                receipt = deliver_material(binding=material_binding, api=checked, state_dir=material)
             _observe(api, binding, desired, uid)
             if record["stage"] != "bootstrapped":
                 record["stage"] = "bootstrapped"

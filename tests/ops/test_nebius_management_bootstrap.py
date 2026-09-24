@@ -9,9 +9,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from uuid import uuid4
 
-import pytest
 import httpx
-
+import pytest
 from tests.ops.test_nebius_management_material import SecretAPI
 
 
@@ -144,7 +143,7 @@ def test_entire_material_directory_loss_cannot_regenerate_keys(tmp_path):
     bootstrap_management(binding=binding, api=api, state_dir=state)
     shutil.rmtree(state / "material")  # Disposable fixture only.
     api.secrets.secrets.clear()  # API absence must not reopen ambiguous creation.
-    with pytest.raises(BootstrapError, match="material.*missing"):
+    with pytest.raises(BootstrapError, match=r"material.*missing"):
         bootstrap_management(binding=binding, api=api, state_dir=state)
     assert len(api.secrets.created) == 4
     assert not (state / "material").exists()
@@ -164,7 +163,7 @@ def test_crash_after_outer_material_intent_cannot_restart_generation(tmp_path, m
     with pytest.raises(SystemExit):
         bootstrap.bootstrap_management(binding=binding, api=api, state_dir=state)
     monkeypatch.setattr(bootstrap, "deliver_material", deliver)
-    with pytest.raises(bootstrap.BootstrapError, match="material.*missing"):
+    with pytest.raises(bootstrap.BootstrapError, match=r"material.*missing"):
         bootstrap.bootstrap_management(binding=binding, api=api, state_dir=state)
     assert api.secrets is not None and not api.secrets.created
 
