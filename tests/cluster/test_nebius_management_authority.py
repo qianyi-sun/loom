@@ -18,8 +18,18 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(180)
-def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api():
+def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(tmp_path):
     from kubernetes import client
+    from scripts.ops.nebius_management_authority_stage import (
+        HTTPSManagementAuthorityAPI,
+        stage_management_authority,
+    )
+    from scripts.ops.nebius_management_bootstrap import (
+        BootstrapBinding,
+        HTTPSBootstrapAPI,
+        bootstrap_management,
+    )
+    from scripts.ops.nebius_management_material import ManagementBinding
 
     from loom.nebius_management_authority import (
         ManagementNamespaceAuthority,
@@ -33,23 +43,36 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api()
     container = _start_k3s(ephemeral_storage_floor="2Gi")
     try:
         _, core, _ = _load_client(container)
-        rbac = client.RbacAuthorizationV1Api(core.api_client)
         admission = client.AdmissionregistrationV1Api(core.api_client)
-        for name in (authority.namespace, "loom-dev-foreign"):
-            core.create_namespace({"metadata": {"name": name}})
+        config = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
+        trust = ssl.create_default_context(cadata=base64.b64decode(
+            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
+        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
+        operator_trust = ssl.create_default_context(cadata=base64.b64decode(
+            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
+        user = config["users"][0]["user"]
+        certificate, key = tmp_path / "client.crt", tmp_path / "client.key"
+        certificate.write_bytes(base64.b64decode(user["client-certificate-data"]))
+        key.write_bytes(base64.b64decode(user["client-key-data"]))
+        key.chmod(0o600)
+        operator_trust.load_cert_chain(certificate, key)
+        bootstrap = BootstrapBinding(str(authority.installation_id), authority.namespace,
+                                     core.read_namespace("kube-system").metadata.uid)
+        with HTTPSBootstrapAPI(binding=bootstrap, api_server=endpoint, ssl_context=operator_trust) as api:
+            receipt = bootstrap_management(binding=bootstrap, api=api, state_dir=tmp_path / "bootstrap")
+        binding = ManagementBinding(bootstrap.installation_id, bootstrap.namespace,
+                                    receipt["namespace_uid"], bootstrap.kube_system_uid)
+        core.create_namespace({"metadata": {"name": "loom-dev-foreign"}})
         core.create_namespaced_secret("loom-dev-foreign", {"metadata": {"name": "private"}, "stringData": {"value": "foreign"}})
         core.create_namespaced_service_account(authority.namespace, {"metadata": {"name": "loom-management-provisioner"}})
-        constructors = {
-            "ValidatingAdmissionPolicy": admission.create_validating_admission_policy,
-            "ValidatingAdmissionPolicyBinding": admission.create_validating_admission_policy_binding,
-            "ClusterRole": rbac.create_cluster_role,
-            "ClusterRoleBinding": rbac.create_cluster_role_binding,
-        }
-        policies = []
-        for document in render_namespace_authority(authority):
-            constructors[document["kind"]](document)
-            if document["kind"] == "ValidatingAdmissionPolicy":
-                policies.append(document["metadata"]["name"])
+        with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            arguments = dict(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
+            first = stage_management_authority(**arguments)
+            assert stage_management_authority(**arguments) == first
+            assert len(first["resource_uids"]) == 9
+        policies = [doc["metadata"]["name"] for doc in render_namespace_authority(authority)
+                    if doc["kind"] == "ValidatingAdmissionPolicy"]
         deadline = time.monotonic() + 20
         while True:
             observed = [admission.read_validating_admission_policy(name) for name in policies]
@@ -60,10 +83,6 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api()
             time.sleep(0.1)
         token = core.create_namespaced_service_account_token("loom-management-provisioner", authority.namespace,
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token
-        config = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
-        trust = ssl.create_default_context(cadata=base64.b64decode(
-            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
-        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
         with httpx.Client(base_url=endpoint, verify=trust, headers={"Authorization": "Bearer " + token},
                           trust_env=False, follow_redirects=False, timeout=20) as http:
             own = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "loom-dev-alice", "labels": {

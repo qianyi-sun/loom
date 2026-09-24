@@ -10,6 +10,7 @@ import copy
 import json
 import re
 import ssl
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,6 +27,7 @@ from loom_service.environment_management.kubernetes_provider import _contains
 _MARKER = "loom.nebius/management-stage-operation"
 _LABEL = "loom.nebius/management-installation"
 _RESOURCES = {
+    "Secret": ("v1", "secrets"),
     "ConfigMap": ("v1", "configmaps"), "ServiceAccount": ("v1", "serviceaccounts"),
     "Service": ("v1", "services"), "NetworkPolicy": ("networking.k8s.io/v1", "networkpolicies"),
     "StatefulSet": ("apps/v1", "statefulsets"), "Deployment": ("apps/v1", "deployments"),
@@ -235,10 +237,19 @@ def _validate_record(record: dict[str, Any], identity: dict[str, Any], documents
 def stage_management_resources(*, rendered: RenderedManagement, phase: str, binding: ManagementBinding,
                                api: ManagementStageAPI, state_dir: Path) -> dict[str, Any]:
     """Freeze all defaults before creating one phase; unknown writes only read back."""
+    documents = _documents(rendered, phase, binding)
+    return _stage_fixed_documents(documents=documents, revision=rendered.revision, phase=phase,
+                                  binding=binding, api=api, state_dir=state_dir)
+
+
+def _stage_fixed_documents(*, documents: dict[str, dict[str, Any]], revision: str, phase: str,
+                           binding: ManagementBinding, api: ManagementStageAPI, state_dir: Path,
+                           default_document: Callable[[ManagementStageAPI, dict[str, Any]], dict[str, Any]] = _defaulted,
+                           ) -> dict[str, Any]:
+    """Internal journal engine; callers must freeze scope with a fixed renderer."""
     try:
-        documents = _documents(rendered, phase, binding)
         identity = {"schema": "loom.nebius-management-stage.v1", "binding": asdict(binding),
-                    "revision": rendered.revision, "phase": phase}
+                    "revision": revision, "phase": phase}
         with private_state._locked_state(state_dir):
             api.verify_identity(binding)
             path = state_dir / "stage.json"
@@ -252,13 +263,28 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
                 for key, doc in documents.items():
                     desired = copy.deepcopy(doc)
                     desired["metadata"].setdefault("annotations", {})[_MARKER] = operation
-                    resources[key] = {"desired": desired, "expected": _defaulted(api, desired),
+                    resources[key] = {"desired": desired, "expected": default_document(api, desired),
                                       "status": "prepared", "uid": None, "observed": None}
                 record = {**identity, "operation_id": operation, "resources": resources}
                 private_state._atomic_json(path, record)
             # Validate every item before the first write, including late entries.
             _validate_record(record, identity, documents)
-            for item in record["resources"].values():
+            for key in documents:
+                item = record["resources"][key]
+                api.verify_identity(binding)
+                actual = api.get_resource(item["desired"])
+                if item["status"] == "prepared":
+                    if actual is not None:
+                        raise ManagementStageError("untracked management resource; refusing adoption")
+                elif actual is None:
+                    raise ManagementStageError("management create unresolved; preserve intent")
+                elif (_comparison_snapshot(actual) != item["expected"]
+                      or (item["uid"] is not None and (_uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]))):
+                    raise ManagementStageError("management resource differs from recorded intent")
+            # JSON persistence sorts map keys. Only the renderer owns dependency
+            # order (in particular admission policies before permission grants).
+            for key in documents:
+                item = record["resources"][key]
                 api.verify_identity(binding)
                 actual = api.get_resource(item["desired"])
                 if item["status"] == "prepared":
@@ -287,7 +313,7 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
                     raise ManagementStageError("management phase changed before final readback")
             api.verify_identity(binding)
             return {"status": "management_phase_staged", "installation_id": binding.installation_id,
-                    "phase": phase, "revision": rendered.revision,
+                    "phase": phase, "revision": revision,
                     "resource_uids": {key: item["uid"] for key, item in record["resources"].items()}}
     except ManagementStageError:
         raise

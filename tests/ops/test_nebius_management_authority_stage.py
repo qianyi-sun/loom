@@ -8,9 +8,9 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from tests.ops.test_nebius_management_stage import PhaseAPI
 
 from loom.nebius_management_authority import ManagementNamespaceAuthority
-from tests.ops.test_nebius_management_stage import PhaseAPI
 
 
 @pytest.fixture
@@ -62,6 +62,29 @@ def test_authority_preflights_late_collision_before_any_grant(inputs, tmp_path):
     inputs[2].resources[name] = {"metadata": {"uid": str(uuid4())}}
     with pytest.raises(ManagementStageError, match="untracked"):
         stage(inputs, tmp_path / "state")
+    assert not inputs[2].creates
+
+
+def test_recovery_preflights_every_resource_before_resuming_writes(inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    state = tmp_path / "state"
+    original = inputs[2].verify_identity
+
+    def fail_after_preparation(binding):
+        original(binding)
+        if (state / "stage.json").exists():
+            raise RuntimeError("interruption before first create")
+
+    inputs[2].verify_identity = fail_after_preparation
+    with pytest.raises(ManagementStageError):
+        stage(inputs, state)
+    assert not inputs[2].creates
+    inputs[2].verify_identity = original
+    key = "ClusterRoleBinding:" + inputs[0].name + "-bootstrap"
+    inputs[2].resources[key] = {"metadata": {"uid": str(uuid4())}}
+    with pytest.raises(ManagementStageError, match="untracked"):
+        stage(inputs, state)
     assert not inputs[2].creates
 
 
