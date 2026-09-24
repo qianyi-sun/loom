@@ -29,6 +29,7 @@ from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
 from loom.nebius_terminus_ingest import (
     NEBIUS_TERMINUS_PROFILE,
+    UnsupportedComposeEnvironmentError,
     adapt_bundle_for_nebius_terminus,
     preflight_nebius_terminus_admission,
 )
@@ -135,6 +136,17 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
                 manifest_key=f"{report.task_id}/service-execution-input.json",
             )
             reasons = preflight_nebius_terminus_admission(adapted, provenance)
+    except UnsupportedComposeEnvironmentError as exc:
+        for relative in exc.relative_paths:
+            report.add(
+                "unsupported_conversion", "compose_environment_unsupported",
+                "Packaged Docker Compose configuration is not converted by this execution profile.",
+                "Preserve the supplied service fixtures and main-container overrides. "
+                "Qualify their isolated images, mounts, network aliases, health checks, dependencies "
+                "and verifier lifecycle through #2050; do not infer a missing external service.",
+                source=str(path.parent / relative),
+            )
+        return
     except (OSError, UnicodeError, ValueError, TypeError, shutil.Error) as exc:
         report.add("unsupported_conversion", "profile_adaptation_failed", str(exc),
                    "Provide a reviewed equivalent bootstrap/image adaptation; do not skip unknown dependencies.",
