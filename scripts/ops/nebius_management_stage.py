@@ -62,8 +62,8 @@ def _documents(rendered: RenderedManagement, phase: str, binding: ManagementBind
     try:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", rendered.revision) is None:
             raise ValueError()
-        required = ({("Job", "loom-management-migrate-" + rendered.revision[7:19])}
-                    if phase == "30-migrate.yaml" else _PHASES[phase])
+        jobs = {"30-migrate.yaml": "loom-management-migrate-", "85-backup-verify.yaml": "loom-management-backup-"}
+        required = ({("Job", jobs[phase] + rendered.revision[7:19])} if phase in jobs else _PHASES[phase])
         documents = rendered.files[phase]
         found = {(doc["kind"], doc["metadata"]["name"]) for doc in documents}
         optional = {("ServiceAccount", "loom-management-provisioner")} if phase == "10-config-network.yaml" else set()
@@ -329,7 +329,7 @@ def management_phase_ready(*, rendered: RenderedManagement, phase: str, binding:
     backup or restore proof; those require the installer's separate checks.
     """
     try:
-        if phase not in {"20-database.yaml", "30-migrate.yaml", "40-services.yaml"}:
+        if phase not in {"20-database.yaml", "30-migrate.yaml", "40-services.yaml", "85-backup-verify.yaml"}:
             raise ManagementStageError("phase has no management workload readiness proof")
         documents = _documents(rendered, phase, binding)
         path = state_dir / "stage.json"
@@ -352,7 +352,8 @@ def management_phase_ready(*, rendered: RenderedManagement, phase: str, binding:
                 if kind == "Job":
                     conditions = {row["type"]: row["status"] for row in status.get("conditions", [])}
                     if conditions.get("Failed") == "True":
-                        raise ManagementStageError("management migration failed; explicit recovery required")
+                        operation = "migration" if phase == "30-migrate.yaml" else "backup"
+                        raise ManagementStageError(f"management {operation} failed; explicit recovery required")
                     ready &= conditions.get("Complete") == "True" and status.get("succeeded", 0) >= actual["spec"].get("completions", 1)
                 elif kind in {"StatefulSet", "Deployment"}:
                     replicas = actual["spec"].get("replicas", 1)

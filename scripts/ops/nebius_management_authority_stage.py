@@ -6,12 +6,15 @@ activation additionally requires actual-subject admission qualification.
 from __future__ import annotations
 
 import copy
+import json
 import ssl
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from scripts.ops.nebius_ingress_stage import _key, _snapshot
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_stage import (
     _MARKER,
@@ -19,6 +22,7 @@ from scripts.ops.nebius_management_stage import (
     ManagementStageAPI,
     ManagementStageError,
     _stage_fixed_documents,
+    _validate_record,
 )
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
@@ -97,3 +101,39 @@ def stage_management_authority(*, authority: ManagementNamespaceAuthority, bindi
     receipt = _stage_fixed_documents(documents=documents, revision=digest(documents), phase="namespace-authority",
                                     binding=binding, api=api, state_dir=state_dir, default_document=_defaulted)
     return {**receipt, "status": "management_authority_staged"}
+
+
+def management_authority_ready(*, authority: ManagementNamespaceAuthority, binding: ManagementBinding,
+                               api: ManagementStageAPI, state_dir: Path) -> bool:
+    """Read-only exact-UID policy/type-check proof, before actual-subject probes."""
+    try:
+        documents = _documents(authority, binding)
+        path = state_dir / "stage.json"
+        if not path.is_file() or path.is_symlink():
+            raise ManagementStageError("management authority recovery evidence missing")
+        identity = {"schema": "loom.nebius-management-stage.v1", "binding": asdict(binding),
+                    "revision": digest(documents), "phase": "namespace-authority"}
+        with private_state._locked_state(state_dir):
+            record = json.loads(private_state._private_read(path, limit=4 * 1024 * 1024))
+            _validate_record(record, identity, documents)
+            ready = True
+            for item in record["resources"].values():
+                api.verify_identity(binding)
+                if item["status"] != "created":
+                    raise ManagementStageError("management authority was not fully staged")
+                actual = api.get_resource(item["desired"])
+                if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                    raise ManagementStageError("management authority identity or policy changed")
+                if actual["kind"] == "ValidatingAdmissionPolicy":
+                    status = actual.get("status", {})
+                    checking = status.get("typeChecking")
+                    if isinstance(checking, dict) and checking.get("expressionWarnings"):
+                        raise ManagementStageError("management admission policy has type-check warnings")
+                    ready &= (isinstance(checking, dict)
+                              and status.get("observedGeneration", 0) >= actual["metadata"].get("generation", 1))
+            api.verify_identity(binding)
+            return ready
+    except ManagementStageError:
+        raise
+    except Exception:
+        raise ManagementStageError("management authority readiness unavailable") from None
