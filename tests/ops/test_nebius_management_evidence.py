@@ -126,6 +126,22 @@ def test_backup_pod_accepts_kubernetes_equivalent_resource_quantities(evidence):
     assert api.backup_report(job_uid=values["job"]["metadata"]["uid"]) == report
 
 
+@pytest.mark.parametrize("seconds", [300, 0])
+def test_backup_pod_qualifies_only_standard_admission_tolerations(evidence, seconds):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api, values, report = evidence
+    values["pod"]["spec"]["tolerations"].extend([
+        {"key": "node.kubernetes.io/" + key, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": seconds}
+        for key in ("not-ready", "unreachable")
+    ])
+    if seconds == 300:
+        assert api.backup_report(job_uid=values["job"]["metadata"]["uid"]) == report
+    else:
+        with pytest.raises(ManagementInstallError):
+            api.backup_report(job_uid=values["job"]["metadata"]["uid"])
+
+
 @pytest.mark.parametrize("fault", ["owner", "image", "failed", "replaced_pod", "restarted"])
 def test_wrong_or_changed_backup_execution_never_supplies_object_proof(evidence, fault):
     from scripts.ops.nebius_management_install import ManagementInstallError

@@ -33,6 +33,14 @@ class PhaseAPI:
     def get_resource(self, doc):
         return copy.deepcopy(self.resources.get(self.key(doc)))
 
+    def get_database_claim(self):
+        return copy.deepcopy(self.resources.get("PersistentVolumeClaim:data-loom-postgres-0"))
+
+    def get_database_volume(self):
+        claim = self.get_database_claim()
+        name = (claim or {}).get("spec", {}).get("volumeName")
+        return copy.deepcopy(self.resources.get("PersistentVolume:" + str(name)))
+
     def default_resource(self, doc):
         value = copy.deepcopy(doc)
         if doc["kind"] == "Job":
@@ -237,6 +245,24 @@ def test_workload_defaulting_cannot_expand_runtime_privileges(inputs, tmp_path, 
     with pytest.raises(ManagementStageError, match="defaulting"):
         stage_management_resources(rendered=rendered, phase="40-services.yaml", binding=binding, api=api,
                                    state_dir=tmp_path / "stage")
+    assert not api.creates
+
+
+@pytest.mark.parametrize("extra", [{"type": "LoadBalancer"}, {"externalIPs": ["203.0.113.20"]},
+                                   {"externalName": "foreign.example.com"}, {"publishNotReadyAddresses": True}])
+def test_service_defaulting_cannot_publish_private_database(inputs, tmp_path, extra):
+    from scripts.ops.nebius_management_stage import ManagementStageError, stage_management_resources
+
+    rendered, binding, api = inputs
+
+    def mutate(doc):
+        if doc["kind"] == "Service":
+            doc["spec"].update(extra)
+
+    api.default_change = mutate
+    with pytest.raises(ManagementStageError, match="defaulting"):
+        stage_management_resources(rendered=rendered, phase="20-database.yaml", binding=binding, api=api,
+                                   state_dir=tmp_path / "database")
     assert not api.creates
 
 

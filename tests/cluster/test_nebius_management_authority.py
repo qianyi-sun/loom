@@ -36,7 +36,10 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
         HTTPSBootstrapAPI,
         bootstrap_management,
     )
-    from scripts.ops.nebius_management_evidence import HTTPSManagementEvidenceAPI
+    from scripts.ops.nebius_management_evidence import (
+        HTTPSManagementEvidenceAPI,
+        _matches_backup_template,
+    )
     from scripts.ops.nebius_management_install import ManagementInstallError, render_installation
     from scripts.ops.nebius_management_live import HTTPSManagementInstallationAPI
     from scripts.ops.nebius_management_material import ManagementBinding
@@ -89,6 +92,17 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
         with live.resources(binding, "config") as api:
             stage_management_resources(rendered=live.rendered, phase="10-config-network.yaml", binding=binding,
                                        api=api, state_dir=tmp_path / "config")
+        # Real Pod-only admission defaults differ from Job-template defaults.
+        # Dry-runs prove compatibility without claiming a database backup ran.
+        batch = client.BatchV1Api(core.api_client)
+        job = core.api_client.sanitize_for_serialization(batch.create_namespaced_job(
+            binding.namespace, live.rendered.files["85-backup-verify.yaml"][0], dry_run="All"))
+        template = job["spec"]["template"]["spec"]
+        admitted = core.api_client.sanitize_for_serialization(core.create_namespaced_pod(binding.namespace, {
+            "apiVersion": "v1", "kind": "Pod", "metadata": {"generateName": "backup-evidence-"}, "spec": template,
+        }, dry_run="All"))
+        assert len(admitted["spec"]["tolerations"]) > len(template["tolerations"])
+        assert _matches_backup_template(admitted["spec"], template)
         with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
                                         api_server=endpoint, ssl_context=operator_trust) as api:
             arguments = dict(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")

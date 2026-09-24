@@ -57,7 +57,7 @@ class InstallationAPI:
             raise RuntimeError("private-public-diagnostic")
 
     def complete(self, kind):
-        for doc in self.store.resources.values():
+        for doc in list(self.store.resources.values()):
             if doc["kind"] != kind:
                 continue
             if kind == "Job":
@@ -67,6 +67,19 @@ class InstallationAPI:
                 doc["status"] = {"observedGeneration": 1, "replicas": 1, "readyReplicas": 1,
                                  "updatedReplicas": 1, "availableReplicas": 1,
                                  "currentRevision": "current", "updateRevision": "current"}
+            if kind == "StatefulSet":
+                claim = copy.deepcopy(doc["spec"]["volumeClaimTemplates"][0])
+                claim.update(apiVersion="v1", kind="PersistentVolumeClaim", status={"phase": "Bound"})
+                claim["metadata"].update(name="data-loom-postgres-0", namespace=self.store.binding.namespace, uid=str(uuid4()))
+                claim["spec"]["volumeName"] = "pvc-" + claim["metadata"]["uid"]
+                self.store.resources["PersistentVolumeClaim:data-loom-postgres-0"] = claim
+                self.store.resources["PersistentVolume:" + claim["spec"]["volumeName"]] = {
+                    "apiVersion": "v1", "kind": "PersistentVolume", "metadata": {"name": claim["spec"]["volumeName"], "uid": str(uuid4())},
+                    "spec": {"claimRef": {"namespace": self.store.binding.namespace, "name": "data-loom-postgres-0", "uid": claim["metadata"]["uid"]},
+                             "storageClassName": claim["spec"]["storageClassName"], "capacity": {"storage": "10Gi"},
+                             "csi": {"driver": "test.csi.example.com", "volumeHandle": "database-disk"}},
+                    "status": {"phase": "Bound"},
+                }
 
 
 @pytest.fixture
@@ -215,3 +228,18 @@ def test_external_backup_or_public_auth_failure_cannot_report_installation_compl
     assert "private-" not in str(error.value)
     if blocked == "backup":
         assert not any(doc["kind"] in {"Deployment", "Ingress"} for doc in api.store.resources.values())
+
+
+def test_database_volume_replacement_blocks_replay_before_migration_or_new_workloads(installation, tmp_path):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    run(installation, tmp_path)
+    api = installation[1]
+    api.complete("StatefulSet")
+    assert run(installation, tmp_path)["phase"] == "migration"
+    api.complete("Job")
+    before = len(api.store.creates)
+    api.store.resources["PersistentVolumeClaim:data-loom-postgres-0"]["metadata"]["uid"] = str(uuid4())
+    with pytest.raises(ManagementInstallError):
+        run(installation, tmp_path)
+    assert len(api.store.creates) == before
