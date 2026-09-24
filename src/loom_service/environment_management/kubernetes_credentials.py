@@ -39,11 +39,14 @@ class ProjectedKubernetesCredentials:
             # replaces credentials. Nonblocking open also rejects special files
             # without waiting for a writer; validate the actual opened inode.
             descriptor = os.open(self.token_file, os.O_RDONLY | os.O_NONBLOCK)
-            with os.fdopen(descriptor, "rb") as stream:
-                info = os.fstat(stream.fileno())
+            try:
+                info = os.fstat(descriptor)
                 if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o027:
                     raise ValueError()
-                raw = stream.read(16385)
+                with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                    raw = stream.read(16385)
+            finally:
+                os.close(descriptor)
             if not 0 < len(raw) <= 16384:
                 raise ValueError()
             token = raw.decode("ascii").strip()
