@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path, PurePosixPath
 
+import httpx
 import pytest
 
 from loom.driver.service_sandbox import ServiceSandboxDriver
@@ -139,15 +140,15 @@ async def sandboxes(native_binary, tmp_path):
                                           dynamic_network_policy=False, mounted_fs=False, resource_modes=frozenset({"limit"})),
                 network_policy=NoNetwork(),
             )
+            drivers.append(driver)
             for attempt in range(100):
                 try:
                     await driver.start()
                     break
-                except (OSError, RuntimeError):
+                except (OSError, RuntimeError, httpx.ConnectError):
                     if attempt == 99:
                         raise
                     await asyncio.sleep(0.05)
-            drivers.append(driver)
         yield drivers
     finally:
         for driver in drivers:
