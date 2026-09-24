@@ -61,6 +61,40 @@ def _report(root: Path, capsys: pytest.CaptureFixture[str], *, profile: bool = T
     return rc, json.loads(captured.out)
 
 
+@pytest.mark.parametrize(("source", "declared", "blocked", "line"), [
+    ("FROM ubuntu:24.04\nWORKDIR /media/project\n", "/app", True, 2),
+    ("FROM ubuntu:24.04\nWORKDIR /media/project\n", "/media/project", False, 2),
+    ("FROM ubuntu:24.04 AS base\nWORKDIR /media/project\nFROM base\n", "/app", True, 2),
+    ("FROM ubuntu:24.04 AS base\nWORKDIR /media\nFROM base\nWORKDIR project\n",
+     "/media/project", False, 4),
+    ("FROM ubuntu:24.04 AS base\nWORKDIR /media\nFROM base\nWORKDIR project\n",
+     "/app", True, 4),
+    ("FROM ubuntu:24.04\nWORKDIR project\n", "/app", True, 2),
+    ("FROM ubuntu:24.04\nWORKDIR ${TASK_ROOT}\n", "/app", True, 2),
+    ("FROM ubuntu:24.04 AS unused\nWORKDIR /media\nFROM ubuntu:24.04\nWORKDIR /app\n",
+     "/app", False, 4),
+    ("FROM ubuntu:24.04\nWORKDIR /app\nRUN <<EOF\nWORKDIR /tests\nEOF\n",
+     "/app", False, 2),
+])
+def test_report_preserves_authored_workdir_or_explains_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    source: str, declared: str, blocked: bool, line: int,
+) -> None:
+    bundle = _write_bundle(tmp_path, "working-directory", workdir=declared)
+    dockerfile = bundle / "environment/Dockerfile"
+    dockerfile.write_text(source)
+    before = {str(p): p.read_bytes() for p in bundle.rglob("*") if p.is_file()}
+    rc, payload = _report(tmp_path, capsys)
+    report, = payload["compatibility_report"]["tasks"]
+    assert rc == int(blocked)
+    assert report["status"] == ("blocked" if blocked else "converted")
+    diagnostics = [d for d in report["diagnostics"] if d["code"] == "dockerfile_workdir_overridden"]
+    assert bool(diagnostics) is blocked
+    if blocked:
+        assert diagnostics[0]["source_location"] == f"{dockerfile}:{line}"
+    assert {str(p): p.read_bytes() for p in bundle.rglob("*") if p.is_file()} == before
+
+
 def test_report_covers_every_task_after_parse_and_adaptation_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:

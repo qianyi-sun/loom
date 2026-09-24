@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import pytest
@@ -87,6 +87,31 @@ def test_continuation_admission_uses_resolved_agent_not_source_default(agent_nam
 def test_default_completion_does_not_restrict_direct_completion():
     reasons = automatic_service_execution_rejections(_task(), _trial(), source_provenance=_provenance())
     assert "agent_continuation_unsupported" not in reasons
+
+
+@pytest.mark.parametrize("workdir", ["/media/project", "/opt/project", "/root/project"])
+@pytest.mark.parametrize("agent", ["terminus-2", "direct-completion"])
+def test_custom_workdir_admission_is_scoped_to_terminus(workdir: str, agent: str) -> None:
+    task = _task()
+    task = task.model_copy(update={"environment": task.environment.model_copy(
+        update={"workdir": PurePosixPath(workdir)},
+    )})
+    trial = _trial().model_copy(update={"agent_name": agent})
+    reasons = automatic_service_execution_rejections(task, trial, source_provenance=_provenance())
+    assert ("standard_workspace_identity_required" in reasons) is (agent != "terminus-2")
+
+
+@pytest.mark.parametrize("workdir", ["/", "/loom", "/opt", "/tests", "/var", "/tmp", "/app/../tests"])
+def test_terminus_rejects_protected_workdir(workdir: str) -> None:
+    task = _task()
+    task = task.model_copy(update={"environment": task.environment.model_copy(
+        update={"workdir": PurePosixPath(workdir)},
+    )})
+    reasons = automatic_service_execution_rejections(
+        task, _trial().model_copy(update={"agent_name": "terminus-2"}),
+        source_provenance=_provenance(),
+    )
+    assert "standard_workspace_identity_required" in reasons
 
 
 def _provenance() -> dict[str, object]:
