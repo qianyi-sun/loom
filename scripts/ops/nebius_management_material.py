@@ -10,15 +10,15 @@ import base64
 import copy
 import hashlib
 import json
-import os
 import re
-import subprocess
+import ssl
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+import httpx
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 
@@ -72,59 +72,68 @@ class MaterialAPI(Protocol):
         ...
 
 
-class KubectlMaterialAPI:
-    """Gateway-local fixed Secret transport, not a shared-cluster CLI entrypoint."""
+class HTTPSMaterialAPI:
+    """Fixed Secret transport with explicit TLS/auth, no redirects or retries.
 
-    def __init__(self, kubeconfig: Path, *, binding: ManagementBinding, executable: Path, api_server: str):
+    The protected installer supplies a qualified client-certificate context or
+    bearer token. This transport never loads ambient kubeconfig or executes a
+    credential plugin. In particular, kubectl POST's built-in retry is not used.
+    """
+
+    def __init__(self, *, binding: ManagementBinding, api_server: str, ssl_context: ssl.SSLContext,
+                 token: str | None = None):
         try:
             endpoint = urlsplit(api_server)
-            if (not kubeconfig.is_absolute() or kubeconfig != kubeconfig.resolve() or not executable.is_absolute()
-                    or endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password
-                    or endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment):
+            if (endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password
+                    or endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment
+                    or any(char.isspace() for char in api_server) or endpoint.port == 0
+                    or not isinstance(ssl_context, ssl.SSLContext)
+                    or ssl_context.verify_mode != ssl.CERT_REQUIRED or not ssl_context.check_hostname
+                    or (token is not None and (not isinstance(token, str) or len(token) > 16384
+                                               or re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token) is None))):
                 raise ValueError()
-            private_state._private_read(kubeconfig, limit=512 * 1024)
-            cache = kubeconfig.parent / ".loom-management-kubectl-cache"
-            private_state._private_directory(cache)
         except Exception:
             raise MaterialError("private management Kubernetes configuration unavailable") from None
         self.binding, self.api_server = binding, api_server
-        self.prefix = [str(executable), "--kubeconfig", str(kubeconfig), "--request-timeout=30s", "--cache-dir", str(cache)]
+        self.client = httpx.Client(
+            base_url=api_server, headers={"Accept-Encoding": "identity",
+                                         **({"Authorization": "Bearer " + token} if token else {})},
+            timeout=30, follow_redirects=False, trust_env=False,
+            transport=httpx.HTTPTransport(verify=ssl_context, retries=0, trust_env=False),
+        )
 
-    def _run(self, arguments: list[str], *, payload: bytes | None = None) -> bytes:
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.client.close()
+
+    def _request(self, method: str, path: str, *, document: dict[str, Any] | None = None) -> dict[str, Any] | None:
         try:
-            result = subprocess.run([*self.prefix, *arguments], input=payload, capture_output=True, timeout=40,
-                                    check=False, env={"PATH": os.defpath, "LANG": "C.UTF-8"})
-            if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
-                raise ValueError()
-            return result.stdout
+            with self.client.stream(method, path, json=document) as response:
+                if method == "GET" and response.status_code == 404:
+                    return None
+                if (response.status_code != (200 if method == "GET" else 201)
+                        or response.headers.get("content-encoding", "identity").lower() != "identity"):
+                    raise ValueError()
+                content = bytearray()
+                for chunk in response.iter_bytes(chunk_size=16384):
+                    if len(content) + len(chunk) > 4 * 1024 * 1024:
+                        raise ValueError()
+                    content.extend(chunk)
+                value = json.loads(content)
+                if not isinstance(value, dict):
+                    raise ValueError()
+                return value
         except Exception:
             raise MaterialError("protected management Kubernetes outcome unavailable") from None
-
-    def _get(self, kind: str, name: str, namespace: str | None = None) -> dict[str, Any] | None:
-        raw = self._run(["get", kind, name, *(["-n", namespace] if namespace is not None else []),
-                         "--ignore-not-found", "-o", "json"])
-        if not raw.strip():
-            return None
-        try:
-            value = json.loads(raw)
-            if not isinstance(value, dict):
-                raise ValueError()
-            return value
-        except Exception:
-            raise MaterialError("protected management Kubernetes readback unavailable") from None
 
     def verify_identity(self, binding: ManagementBinding) -> None:
         try:
             if binding != self.binding:
                 raise ValueError()
-            clusters = json.loads(self._run(["config", "view", "--minify", "-o", "json"]))["clusters"]
-            if (len(clusters) != 1 or clusters[0]["cluster"]["server"] != self.api_server
-                    or clusters[0]["cluster"].get("insecure-skip-tls-verify")
-                    or not (clusters[0]["cluster"].get("certificate-authority")
-                            or clusters[0]["cluster"].get("certificate-authority-data"))):
-                raise ValueError()
             for name, uid in (("kube-system", binding.kube_system_uid), (binding.namespace, binding.namespace_uid)):
-                value = self._get("namespace", name)
+                value = self._request("GET", "/api/v1/namespaces/" + name)
                 if (value is None or value.get("kind") != "Namespace" or value["metadata"]["name"] != name
                         or value["metadata"]["uid"] != uid or value["metadata"].get("deletionTimestamp")
                         or (name == binding.namespace and value["metadata"].get("labels", {}).get(_LABEL) != binding.installation_id)):
@@ -135,7 +144,7 @@ class KubectlMaterialAPI:
     def get_secret(self, namespace: str, name: str) -> dict[str, Any] | None:
         if namespace != self.binding.namespace or name not in _KEYS:
             raise MaterialError("Secret outside management material scope")
-        return self._get("secret", name, namespace)
+        return self._request("GET", "/api/v1/namespaces/" + namespace + "/secrets/" + name)
 
     def create_secret(self, document: dict[str, Any]) -> None:
         try:
@@ -156,7 +165,7 @@ class KubectlMaterialAPI:
         except Exception:
             raise MaterialError("Secret outside management material scope") from None
         self.verify_identity(self.binding)
-        self._run(["create", "-f", "-", "-o", "name"], payload=json.dumps(document).encode())
+        self._request("POST", "/api/v1/namespaces/" + self.binding.namespace + "/secrets", document=document)
 
 
 def _digest(material: dict[str, Any]) -> str:

@@ -12,9 +12,9 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 
@@ -339,7 +339,11 @@ def https_api(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("status", [429, 503, 307])
 def test_http_unknown_write_never_retries_or_redirects(https_api, tmp_path, status):
-    from scripts.ops.nebius_management_material import HTTPSMaterialAPI, MaterialError, deliver_material
+    from scripts.ops.nebius_management_material import (
+        HTTPSMaterialAPI,
+        MaterialError,
+        deliver_material,
+    )
 
     binding, backend, wire, endpoint, trust = https_api
     wire.update(response=status, store=False)
@@ -370,7 +374,7 @@ def test_http_lost_success_is_resolved_only_by_secret_readback(https_api, tmp_pa
 @pytest.mark.parametrize("change", ["namespace", "name", "owner", "operation", "immutable", "extra", "data", "type"])
 def test_transport_cannot_write_outside_fixed_secret_shape(tmp_path, monkeypatch, change):
     from scripts.ops.nebius_management_material import (
-        KubectlMaterialAPI,
+        HTTPSMaterialAPI,
         MaterialError,
         deliver_material,
     )
@@ -396,16 +400,77 @@ def test_transport_cannot_write_outside_fixed_secret_shape(tmp_path, monkeypatch
         doc["data"]["secret-store-master-key"] = "not-base64-private-payload"
     else:
         doc["type"] = "kubernetes.io/service-account-token"
-    kubeconfig = tmp_path / "config"
-    kubeconfig.write_text("private-kubeconfig")
-    kubeconfig.chmod(0o600)
-    adapter = KubectlMaterialAPI(kubeconfig, binding=binding, executable=Path("/usr/bin/kubectl"),
-                                 api_server="https://cluster.example.test")
-
     def no_command(*args, **kwargs):
-        raise AssertionError("Rejected documents must never reach a subprocess")
+        raise AssertionError("Rejected documents must never reach the network")
 
-    monkeypatch.setattr(subprocess, "run", no_command)
-    with pytest.raises(MaterialError, match="outside management material scope") as error:
-        adapter.create_secret(doc)
+    monkeypatch.setattr(httpx.Client, "send", no_command)
+    with HTTPSMaterialAPI(binding=binding, api_server="https://cluster.example.test",
+                          ssl_context=ssl.create_default_context()) as adapter:
+        with pytest.raises(MaterialError, match="outside management material scope") as error:
+            adapter.create_secret(doc)
     assert "private-payload" not in str(error.value)
+
+
+@pytest.mark.parametrize("change", ["http", "query", "path", "userinfo", "token", "verify", "hostname"])
+def test_https_transport_rejects_unsafe_endpoint_or_tls(change):
+    from scripts.ops.nebius_management_material import HTTPSMaterialAPI, MaterialError
+
+    binding, _ = delivery()
+    context = ssl.create_default_context()
+    endpoint, token = "https://cluster.example.test", "valid-token"
+    if change == "http":
+        endpoint = "http://cluster.example.test"
+    elif change == "query":
+        endpoint += "?private=value"
+    elif change == "path":
+        endpoint += "/foreign"
+    elif change == "userinfo":
+        endpoint = "https://private@cluster.example.test"
+    elif change == "token":
+        token = "private\r\nInjected: value"
+    else:
+        context.check_hostname = False
+        if change == "verify":
+            context.verify_mode = ssl.CERT_NONE
+    with pytest.raises(MaterialError) as error:
+        HTTPSMaterialAPI(binding=binding, api_server=endpoint, ssl_context=context, token=token)
+    assert "private" not in str(error.value).removeprefix("private management")
+
+
+def test_https_transport_requires_actual_trust(https_api, tmp_path):
+    from scripts.ops.nebius_management_material import (
+        HTTPSMaterialAPI,
+        MaterialError,
+        deliver_material,
+    )
+
+    binding, backend, wire, endpoint, _ = https_api
+    with HTTPSMaterialAPI(binding=binding, api_server=endpoint, ssl_context=ssl.create_default_context()) as api:
+        with pytest.raises(MaterialError):
+            deliver_material(binding=binding, api=api, state_dir=tmp_path / "material")
+    assert not backend.secrets and not wire["requests"]
+
+
+def test_crash_between_initialization_and_material_journal_cannot_restart(tmp_path, monkeypatch):
+    from scripts.ops.nebius_management_material import (
+        MaterialError,
+        deliver_material,
+        private_state,
+    )
+
+    binding, api = delivery()
+    state = tmp_path / "material"
+    persist = private_state._atomic_json
+
+    def crash(path, value):
+        if path.name == "material.json":
+            raise OSError("interrupted material journal persistence")
+        return persist(path, value)
+
+    monkeypatch.setattr(private_state, "_atomic_json", crash)
+    with pytest.raises(MaterialError):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    monkeypatch.setattr(private_state, "_atomic_json", persist)
+    with pytest.raises(MaterialError, match="journal missing"):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert not api.created and not (state / "material.json").exists()
