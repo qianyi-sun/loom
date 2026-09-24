@@ -249,6 +249,7 @@ def test_plain_pip_accepts_unversioned_auxiliary_requirement() -> None:
 @pytest.mark.parametrize("dependency", [
     "https://example.com/package.whl", "git+https://example.com/project.git@main",
     "./local-package", "pandas;echo", "pandas>=2", "${DEPENDENCY}",
+    "auxiliary-1.0-py3-none-any.whl", "auxiliary-1.0.tar.gz", "auxiliary-1.0.zip",
 ])
 def test_unversioned_requirement_support_does_not_accept_other_sources(dependency: str) -> None:
     with pytest.raises(ValueError, match="nebius-terminus"):
