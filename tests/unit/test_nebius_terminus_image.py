@@ -535,3 +535,92 @@ def test_uvx_without_python_pin_uses_base_interpreter_in_isolated_venv(tmp_path)
     assert "--system-site-packages" not in derived
     assert "/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA" in result.script
     assert result.script.endswith(script[script.index("if [ $? -eq 0 ]"):])
+
+
+OPENHANDS_STAGE = 'FROM terminalworld-openhands-sdk-cache:1.34.0-py312-musl-v3 AS terminalworld_openhands_runtime_cache\n'
+OPENHANDS_PATHS = ('/opt/openhands-python', '/opt/openhands-sdk-venv', '/opt/openhands-musl-loader')
+OPENHANDS_COPIES = ''.join(f'COPY --from=terminalworld_openhands_runtime_cache {p} {p}\n' for p in OPENHANDS_PATHS)
+
+
+@pytest.mark.parametrize("task_setup", ["RUN mkdir /task-data\n", "RUN printf 'alpha\u2028omega' > /task-data\n"])
+def test_terminus_derivation_omits_complete_foreign_agent_cache_only(tmp_path, task_setup):
+    env = bundle(tmp_path)
+    source = tmp_path / 'environment/Dockerfile'
+    task_image = 'FROM ubuntu:22.04\n' + task_setup + 'COPY data /task-data\nCMD ["/bin/bash"]\n'
+    original = OPENHANDS_STAGE + task_image + OPENHANDS_COPIES
+    source.write_text(original)
+    assert prepare_nebius_terminus_image(tmp_path, env)
+    derived = (tmp_path / env['dockerfile']).read_text()
+    assert source.read_text() == original
+    from loom.dockerfile_instructions import dockerfile_instructions
+    instructions = dockerfile_instructions(derived)
+    assert all('terminalworld_openhands_runtime_cache' not in i.arguments for i in instructions)
+    assert all('terminalworld-openhands-sdk-cache' not in i.arguments for i in instructions)
+    assert task_image in derived
+    assert 'OpenHands' in derived and 'Terminus' in derived
+    assert not prepare_nebius_terminus_image(tmp_path, env)
+
+
+@pytest.mark.parametrize('alteration', [
+    'cache_run', 'extra_copy', 'changed_destination', 'partial', 'task_dependency',
+    'numeric_reference', 'unknown_tag', 'another_stage',
+])
+def test_noncanonical_foreign_agent_cache_requires_explicit_adaptation(tmp_path, alteration):
+    env = bundle(tmp_path)
+    source = tmp_path / 'environment/Dockerfile'
+    original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + OPENHANDS_COPIES
+    if alteration == 'cache_run':
+        original = original.replace('FROM ubuntu', 'RUN touch /task-input\nFROM ubuntu')
+    if alteration == 'extra_copy':
+        original += 'COPY --from=terminalworld_openhands_runtime_cache /task-input /task-input\n'
+    if alteration == 'changed_destination':
+        original = original.replace('/opt/openhands-python /opt/openhands-python', '/opt/openhands-python /task-input')
+    if alteration == 'partial':
+        original = original.replace(OPENHANDS_COPIES.splitlines(keepends=True)[0], '')
+    if alteration == 'task_dependency':
+        original += 'RUN /opt/openhands-python/bin/python /task-setup.py\n'
+    if alteration == 'numeric_reference':
+        original += 'COPY --from=0 /other /other\n'
+    if alteration == 'unknown_tag':
+        original = original.replace('1.34.0-py312-musl-v3', 'new-version')
+    if alteration == 'another_stage':
+        original += 'FROM ubuntu:22.04\n'
+    source.write_text(original)
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
+        prepare_nebius_terminus_image(tmp_path, env)
+    assert source.read_text() == original
+    assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
+
+
+def test_foreign_cache_adaptation_retains_parser_directives():
+    from loom.dockerfile_instructions import dockerfile_instructions
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    directives = '# syntax=docker/dockerfile:1\n# escape=`\n'
+    task = 'FROM ubuntu:22.04\nRUN echo hello`\nworld\n'
+    result = _without_packaged_openhands_runtime(directives + OPENHANDS_STAGE + task + OPENHANDS_COPIES)
+    assert result.startswith(directives)
+    assert [(i.keyword, i.arguments) for i in dockerfile_instructions(result)] == [
+        (i.keyword, i.arguments) for i in dockerfile_instructions(directives + task)]
+
+
+@pytest.mark.parametrize('dependency', [
+    'COPY --from=TERMINALWORLD_OPENHANDS_RUNTIME_CACHE /other /other\n',
+    'COPY --from=terminalworld-openhands-sdk-cache:1.34.0-py312-musl-v3 /other /other\n',
+    'COPY --from="0" /other /other\n',
+    'COPY <<EOF /entrypoint.sh\n#!/bin/sh\nexec /opt/openhands-python/bin/python /task.py\nEOF\n',
+])
+def test_hidden_foreign_runtime_dependencies_are_not_removed(dependency):
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + dependency + OPENHANDS_COPIES
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
+        _without_packaged_openhands_runtime(original)
+
+
+def test_runtime_copies_cannot_precede_implicit_task_dependencies():
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + OPENHANDS_COPIES + 'RUN cp -a /opt /task-input\n'
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
+        _without_packaged_openhands_runtime(original)
