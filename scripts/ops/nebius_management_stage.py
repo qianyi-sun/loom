@@ -17,7 +17,8 @@ from uuid import UUID, uuid4
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_material import HTTPSMaterialAPI, ManagementBinding
+from scripts.ops.nebius_management_material import ManagementBinding
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 from loom_service.environment_management.deployment import RenderedManagement
 from loom_service.environment_management.kubernetes_provider import _contains
@@ -77,7 +78,7 @@ def _documents(rendered: RenderedManagement, phase: str, binding: ManagementBind
         raise ManagementStageError("resource outside fixed management phase") from None
 
 
-class HTTPSManagementStageAPI(HTTPSMaterialAPI):
+class HTTPSManagementStageAPI(ManagementKubernetesTransport):
     """Explicit TLS/auth, no retry; only the fixed phase's rendered objects."""
 
     error_type = ManagementStageError
@@ -85,14 +86,26 @@ class HTTPSManagementStageAPI(HTTPSMaterialAPI):
     def __init__(self, *, binding: ManagementBinding, rendered: RenderedManagement, phase: str,
                  api_server: str, ssl_context: ssl.SSLContext, token: str | None = None):
         self.documents = _documents(rendered, phase, binding)
-        super().__init__(binding=binding, api_server=api_server, ssl_context=ssl_context, token=token)
+        self.binding = binding
+        super().__init__(api_server=api_server, ssl_context=ssl_context, token=token)
 
     def verify_identity(self, binding: ManagementBinding) -> None:
-        super().verify_identity(binding)
-        namespace = self._request("GET", "/api/v1/namespaces/" + binding.namespace)
-        if (namespace is None or _uid(namespace) != binding.namespace_uid
-                or namespace["metadata"].get("labels", {}).get("pod-security.kubernetes.io/enforce") != "restricted"):
-            raise ManagementStageError("management namespace policy differs")
+        try:
+            if binding != self.binding:
+                raise ValueError()
+            for name, uid in (("kube-system", binding.kube_system_uid), (binding.namespace, binding.namespace_uid)):
+                namespace = self._request("GET", "/api/v1/namespaces/" + name)
+                if (namespace is None or namespace.get("kind") != "Namespace" or _uid(namespace) != uid
+                        or namespace["metadata"]["name"] != name or namespace["metadata"].get("deletionTimestamp")
+                        or namespace["metadata"].get("ownerReferences")):
+                    raise ValueError()
+                if name == binding.namespace:
+                    labels = namespace["metadata"].get("labels", {})
+                    if (labels.get(_LABEL) != binding.installation_id
+                            or labels.get("pod-security.kubernetes.io/enforce") != "restricted"):
+                        raise ValueError()
+        except Exception:
+            raise ManagementStageError("management namespace identity or policy differs") from None
 
     def _approved(self, document: dict[str, Any], *, writing: bool = False) -> str:
         try:
@@ -130,9 +143,75 @@ class HTTPSManagementStageAPI(HTTPSMaterialAPI):
 
 def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, Any]:
     observed = api.default_resource(desired)
-    if not _contains(observed, desired):
+    if not _contains(_canonical_quantities(observed), _canonical_quantities(desired)):
         raise ManagementStageError("management defaulting changed requested configuration")
-    return _snapshot(observed, allocation=False)
+    kind = desired["kind"]
+    if kind in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+        actual_spec, wanted_spec = observed["spec"], desired["spec"]
+        if kind == "CronJob":
+            actual_spec, wanted_spec = actual_spec["jobTemplate"]["spec"], wanted_spec["jobTemplate"]["spec"]
+        actual, wanted = actual_spec["template"]["spec"], wanted_spec["template"]["spec"]
+        if (any(actual.get(field, False) != wanted.get(field, False) for field in (
+            "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
+        )) or any(actual.get(field) != wanted.get(field) for field in ("nodeName", "priorityClassName", "hostAliases"))
+                or actual.get("securityContext", {}) != wanted.get("securityContext", {})
+                or actual.get("ephemeralContainers", []) != wanted.get("ephemeralContainers", [])):
+            raise ManagementStageError("management defaulting changed Pod security")
+        for field in ("containers", "initContainers"):
+            for container, expected in zip(actual.get(field, []), wanted.get(field, []), strict=True):
+                if (container.get("securityContext", {}) != expected.get("securityContext", {})
+                        or container.keys() - expected.keys() - {"imagePullPolicy", "terminationMessagePath", "terminationMessagePolicy"}):
+                    raise ManagementStageError("management defaulting changed container security")
+    return _comparison_snapshot(observed)
+
+
+def _canonical_quantities(document: dict[str, Any]) -> dict[str, Any]:
+    """Exact decimal equality for API-equivalent resource spellings, no rounding."""
+    from kubernetes.utils.quantity import parse_quantity
+
+    result = copy.deepcopy(document)
+    kind = result.get("kind")
+    if kind not in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+        return result
+    spec = result["spec"]
+    if kind == "CronJob":
+        spec = spec["jobTemplate"]["spec"]
+    pod = spec["template"]["spec"]
+    resources = [item.get("resources", {}) for item in pod.get("containers", []) + pod.get("initContainers", [])]
+    resources += [claim["spec"].get("resources", {}) for claim in spec.get("volumeClaimTemplates", [])]
+    maps = [resource.get(section, {}) for resource in resources for section in ("requests", "limits")]
+    maps += [volume["emptyDir"] for volume in pod.get("volumes", []) if "sizeLimit" in volume.get("emptyDir", {})]
+    for quantities in maps:
+        for key in quantities:
+            if key == "medium":
+                continue
+            amount = parse_quantity(quantities[key])
+            if not amount.is_finite() or amount < 0:
+                raise ManagementStageError("management resource quantity invalid")
+            quantities[key] = str(amount.normalize())
+    return result
+
+
+def _comparison_snapshot(document: dict[str, Any]) -> dict[str, Any]:
+    """Check server-allocated Job labels before excluding them from dry-run comparison.
+
+    Dry-run and persisted Jobs receive different UIDs. The full persisted snapshot
+    still freezes those fields on replay; only the dry-run comparison omits them.
+    """
+    result = _canonical_quantities(_snapshot(document, allocation=False))
+    if document["kind"] == "Job":
+        uid, name = _uid(document), document["metadata"]["name"]
+        spec = result["spec"]
+        if spec.get("manualSelector", False) or spec.pop("selector", None) != {
+            "matchLabels": {"batch.kubernetes.io/controller-uid": uid},
+        }:
+            raise ManagementStageError("management Job allocation differs")
+        labels = spec["template"]["metadata"]["labels"]
+        for key, value in (("controller-uid", uid), ("job-name", name)):
+            for prefix in ("", "batch.kubernetes.io/"):
+                if labels.pop(prefix + key, None) != value:
+                    raise ManagementStageError("management Job allocation differs")
+    return result
 
 
 def stage_management_resources(*, rendered: RenderedManagement, phase: str, binding: ManagementBinding,
@@ -171,7 +250,7 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
                 item = record["resources"][key]
                 if (set(item) != {"desired", "expected", "status", "uid", "observed"}
                         or item["desired"] != desired or item["status"] not in {"prepared", "create_intent", "created"}
-                        or not _contains(item["expected"], desired)
+                        or not _contains(item["expected"], _canonical_quantities(desired))
                         or (item["status"] == "created") != (item["uid"] is not None and item["observed"] is not None)
                         or (item["status"] != "created" and (item["uid"] is not None or item["observed"] is not None))):
                     raise ManagementStageError("management resource journal differs")
@@ -191,7 +270,7 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
                 if actual is None:
                     raise ManagementStageError("management create unresolved; preserve intent")
                 uid, snapshot = _uid(actual), _snapshot(actual)
-                if (_snapshot(actual, allocation=False) != item["expected"]
+                if (_comparison_snapshot(actual) != item["expected"]
                         or (item["uid"] is not None and (item["uid"] != uid or item["observed"] != snapshot))):
                     raise ManagementStageError("management resource differs from recorded intent")
                 api.verify_identity(binding)
