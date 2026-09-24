@@ -14,6 +14,13 @@ test("sidebar shows the loaded build revision without opening details", async ({
   await page.goto(`${browserHarness.baseURL}/settings`);
   await waitForReady(page, { locator: "main" });
 
+  // Below lg the whole nav (version entry included) collapses behind the
+  // compact Menu button; open it first. The version details stay closed.
+  const nav = page.getByRole("navigation", { name: "Primary" });
+  if ((page.viewportSize()?.width ?? 1440) < 1024) {
+    await nav.getByRole("button", { name: "Menu", exact: true }).click();
+  }
+
   const entry = page.getByRole("button", { name: "Deployed version details" });
   const revision = page.getByTestId("sidebar-build-revision");
   await expect(revision).toBeVisible();
@@ -33,8 +40,7 @@ test("sidebar shows the loaded build revision without opening details", async ({
     .toBe(true);
 
   await testInfo.attach("sidebar-version-entry", {
-    path: await page
-      .getByRole("navigation", { name: "Primary" })
+    path: await nav
       .screenshot({ path: testInfo.outputPath("sidebar-version-entry.png") })
       .then(() => testInfo.outputPath("sidebar-version-entry.png")),
     contentType: "image/png",
