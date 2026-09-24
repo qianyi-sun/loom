@@ -31,6 +31,9 @@ LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install"}
+DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
+    "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
+    "publication", "cloud_identity", "provider_quota", "backup_access", "public_route"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -151,13 +154,17 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             raise ValueError()
         value = json.loads(raw)
         status = value["status"]
-        if status not in {"preflight_qualified", "pending", "management_installed"}:
+        if status not in {"preflight_qualified", "pending", "management_installed", "blocked"}:
             raise ValueError()
         result = {"status": status}
         for key in ("source_sha", "candidate", "installation_id", "namespace"):
             if value[key] != operation[key]:
                 raise ValueError()
             result[key] = value[key]
+        if status == "blocked":
+            if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
+                raise ValueError()
+            result["stage"] = value["stage"]
         if status in {"pending", "management_installed"}:
             uid, revision = value["namespace_uid"], value["revision"]
             if str(UUID(uid)) != uid or UUID(uid).int == 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", revision):
@@ -192,7 +199,7 @@ def authorized_main(expected_sha256: str) -> int:
         _, operation = unpack_bundle(content)
         release = prepare_release(content)
         report = safe_report(run_private(command(release, action), timeout=1800), operation)
-        if (action == "preflight") != (report["status"] == "preflight_qualified"):
+        if report["status"] != "blocked" and (action == "preflight") != (report["status"] == "preflight_qualified"):
             raise ValueError()
         print(json.dumps(report, sort_keys=True))
         return 0

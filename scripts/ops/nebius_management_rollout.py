@@ -95,7 +95,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
         if result.returncode:
             raise ValueError()
         report = safe_report(result.stdout, operation)
-        if (action == "preflight") != (report["status"] == "preflight_qualified"):
+        if report["status"] != "blocked" and (action == "preflight") != (report["status"] == "preflight_qualified"):
             raise ValueError()
         return report
     except Exception:

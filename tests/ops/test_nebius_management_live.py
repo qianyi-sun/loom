@@ -84,6 +84,29 @@ def test_live_preflight_checks_actual_cluster_before_other_prerequisites(install
     assert api.diagnostic_stage == "cluster_identity"
 
 
+def test_successful_live_preflight_clears_prior_failure_stage(installation, monkeypatch):
+    from scripts.ops.nebius_management_bootstrap import HTTPSBootstrapAPI
+    from scripts.ops.nebius_management_install import ManagementInstallError, render_installation
+
+    request, _ = installation
+    api = make_live(request, Checks())
+    status = 403
+    real = HTTPSBootstrapAPI.__init__
+    def setup(self, **kwargs):
+        real(self, **kwargs)
+        self.client.close()
+        self.client = httpx.Client(base_url=self.api_server, transport=httpx.MockTransport(lambda req:
+            httpx.Response(status, json={"kind": "Namespace", "metadata": {
+                "name": "kube-system", "uid": request.binding.kube_system_uid}})))
+    monkeypatch.setattr(HTTPSBootstrapAPI, "__init__", setup)
+    with pytest.raises(ManagementInstallError):
+        api.preflight(request, render_installation(request))
+    assert api.diagnostic_stage == "cluster_identity"
+    status = 200
+    api.preflight(request, render_installation(request))
+    assert api.diagnostic_stage is None
+
+
 def test_missing_authority_journal_cannot_issue_token_or_restage_policy(installation, tmp_path):
     from scripts.ops.nebius_management_install import ManagementInstallError
     from scripts.ops.nebius_management_material import ManagementBinding
