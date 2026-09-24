@@ -30,6 +30,10 @@ from scripts.ops.nebius_management_stage import (
     management_phase_ready,
     stage_management_resources,
 )
+from scripts.ops.nebius_management_storage import (
+    prepare_management_storage,
+    verify_management_storage,
+)
 from scripts.ops.nebius_management_supplied import deliver_supplied_material
 
 from loom.nebius_environment_render import _envelope
@@ -43,7 +47,7 @@ from loom_service.environment_management.kubernetes_credentials import Projected
 
 _PHASES = {
     "bootstrap": None, "config": "10-config-network.yaml", "authority": None, "supplied": None,
-    "database": "20-database.yaml", "migration": "30-migrate.yaml", "backup": "85-backup-verify.yaml",
+    "database": "20-database.yaml", "storage": None, "migration": "30-migrate.yaml", "backup": "85-backup-verify.yaml",
     "schedule": "80-backup.yaml", "service": "40-services.yaml", "public": "70-public.yaml",
 }
 
@@ -90,6 +94,9 @@ def render_installation(request: ManagementInstallRequest) -> RenderedManagement
         raise ManagementInstallError("management installation requires bound projected authority")
     rendered = render_management(deployment, candidate=request.candidate, profile=request.profile,
                                  repo_root=Path(__file__).resolve().parents[2])
+    stateful = next(doc for doc in rendered.files["20-database.yaml"] if doc["kind"] == "StatefulSet")
+    for claim in stateful["spec"]["volumeClaimTemplates"]:
+        claim["metadata"].setdefault("labels", {})["loom.nebius/management-installation"] = request.binding.installation_id
     cronjob = rendered.files["80-backup.yaml"][0]
     job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": copy.deepcopy(cronjob["metadata"]),
            "spec": copy.deepcopy(cronjob["spec"]["jobTemplate"]["spec"])}
@@ -103,6 +110,8 @@ def render_installation(request: ManagementInstallRequest) -> RenderedManagement
 
 
 def _journal_names(phase: str) -> tuple[str, ...]:
+    if phase == "database":
+        return ("stage.json", "storage-intent.json")
     return ("bootstrap.json", "material/initialized.json", "material/material.json") if phase == "bootstrap" else ("stage.json",)
 
 
@@ -183,8 +192,11 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                                                     receipt["namespace_uid"], request.binding.kube_system_uid)
                     else:
                         assert binding is not None
-                        with api.resources(binding, phase) as stage_api:
-                            if phase == "authority":
+                        with api.resources(binding, "database" if phase == "storage" else phase) as stage_api:
+                            if phase == "storage":
+                                receipt = verify_management_storage(rendered=rendered, binding=binding, api=stage_api,
+                                    state_dir=state / "database", evidence_dir=phase_state)
+                            elif phase == "authority":
                                 authority = request.deployment.installation.foundation.namespace_authority
                                 assert authority is not None
                                 receipt = stage_management_authority(authority=authority, binding=binding,
@@ -194,6 +206,8 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                                                                    api=stage_api, state_dir=phase_state)
                             else:
                                 assert filename is not None
+                                if phase == "database":
+                                    prepare_management_storage(rendered=rendered, binding=binding, api=stage_api, state_dir=phase_state)
                                 receipt = stage_management_resources(rendered=rendered, phase=filename,
                                                                      binding=binding, api=stage_api, state_dir=phase_state)
                     if item["status"] == "complete":

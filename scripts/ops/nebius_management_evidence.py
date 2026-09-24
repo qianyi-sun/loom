@@ -23,6 +23,25 @@ from loom_service.environment_management.deployment import RenderedManagement
 from loom_service.environment_management.kubernetes_provider import _contains
 
 
+def _matches_backup_template(pod: dict[str, Any], template: dict[str, Any]) -> bool:
+    def quantities(spec: dict[str, Any]) -> dict[str, Any]:
+        normalized = _canonical_quantities({"kind": "Job", "spec": {"template": {"spec": spec}}})
+        result: dict[str, Any] = normalized["spec"]["template"]["spec"]
+        return result
+
+    observed, wanted = quantities(pod), quantities(template)
+    # DefaultTolerationSeconds mutates Pods, not controller templates. Qualify
+    # only these additions; different grace periods or extra tolerations fail.
+    wanted_tolerations = wanted.get("tolerations", [])
+    tolerations = observed.get("tolerations", [])
+    for key in ("not-ready", "unreachable"):
+        default = {"key": "node.kubernetes.io/" + key, "operator": "Exists",
+                   "effect": "NoExecute", "tolerationSeconds": 300}
+        if default not in wanted_tolerations and default in tolerations:
+            tolerations.remove(default)
+    return _contains(observed, wanted)
+
+
 class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
     error_type = ManagementInstallError
 
@@ -114,13 +133,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             # Match executable contents from the actual Job; quantity spelling may
             # be canonicalized by the API. Extra containers cannot supply evidence.
             expected = job["spec"]["template"]["spec"]
-            def quantities(spec: dict[str, Any]) -> dict[str, Any]:
-                normalized = _canonical_quantities({"kind": "Job", "spec": {"template": {"spec": spec}}})
-                result: dict[str, Any] = normalized["spec"]["template"]["spec"]
-                return result
-
-            observed, wanted = quantities(pod["spec"]), quantities(expected)
-            if not _contains(observed, wanted) or pod.get("status", {}).get("phase") != "Succeeded":
+            if not _matches_backup_template(pod["spec"], expected) or pod.get("status", {}).get("phase") != "Succeeded":
                 raise ValueError()
             for field, status_field in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
                 names = {row["name"] for row in expected.get(field, [])}

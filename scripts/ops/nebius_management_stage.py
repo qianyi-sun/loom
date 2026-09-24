@@ -56,6 +56,8 @@ class ManagementStageAPI(Protocol):
     def get_resource(self, document: dict[str, Any]) -> dict[str, Any] | None: ...
     def default_resource(self, document: dict[str, Any]) -> dict[str, Any]: ...
     def create_resource(self, document: dict[str, Any]) -> None: ...
+    def get_database_claim(self) -> dict[str, Any] | None: ...
+    def get_database_volume(self) -> dict[str, Any] | None: ...
 
 
 def _documents(rendered: RenderedManagement, phase: str, binding: ManagementBinding) -> dict[str, dict[str, Any]]:
@@ -130,6 +132,21 @@ class HTTPSManagementStageAPI(ManagementKubernetesTransport):
     def get_resource(self, document: dict[str, Any]) -> dict[str, Any] | None:
         return self._request("GET", self._approved(document) + "/" + document["metadata"]["name"])
 
+    def get_database_claim(self) -> dict[str, Any] | None:
+        if not any(doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == "loom-postgres" for doc in self.documents.values()):
+            raise ManagementStageError("database storage outside fixed management phase")
+        self.verify_identity(self.binding)
+        return self._request("GET", "/api/v1/namespaces/" + self.binding.namespace + "/persistentvolumeclaims/data-loom-postgres-0")
+
+    def get_database_volume(self) -> dict[str, Any] | None:
+        claim = self.get_database_claim()
+        name = (claim or {}).get("spec", {}).get("volumeName")
+        if name is None:
+            return None
+        if not isinstance(name, str) or re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", name) is None:
+            raise ManagementStageError("invalid bound database volume name")
+        return self._request("GET", "/api/v1/persistentvolumes/" + name)
+
     def default_resource(self, document: dict[str, Any]) -> dict[str, Any]:
         path = self._approved(document, writing=True)
         self.verify_identity(self.binding)
@@ -148,6 +165,17 @@ def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, An
     if not _contains(_canonical_quantities(observed), _canonical_quantities(desired)):
         raise ManagementStageError("management defaulting changed requested configuration")
     kind = desired["kind"]
+    if kind == "Service":
+        actual, wanted = observed["spec"], desired["spec"]
+        if (actual.get("type", "ClusterIP") != "ClusterIP"
+                or actual.get("selector") != wanted.get("selector")
+                or any(actual.get(field) for field in (
+                    "externalIPs", "externalName", "loadBalancerIP", "loadBalancerClass", "loadBalancerSourceRanges",
+                    "allocateLoadBalancerNodePorts", "healthCheckNodePort", "externalTrafficPolicy",
+                ))
+                or actual.get("publishNotReadyAddresses", False) != wanted.get("publishNotReadyAddresses", False)
+                or any(port.get("nodePort", 0) for port in actual.get("ports", []))):
+            raise ManagementStageError("management defaulting changed private Service exposure")
     if kind in {"Deployment", "StatefulSet", "Job", "CronJob"}:
         actual_spec, wanted_spec = observed["spec"], desired["spec"]
         if kind == "CronJob":
