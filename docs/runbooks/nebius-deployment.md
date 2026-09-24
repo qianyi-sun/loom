@@ -393,8 +393,8 @@ python3 -I /private/install_nebius_ingress_entrypoint.py \
 
 The installer appends one `restrict` forced-command grant, bound to the bundle
 and bootstrap/supervisor source hashes. It accepts only
-`loom-nebius-ingress-v1`, `loom-nebius-ingress-rollback-v1` and
-`loom-nebius-ingress-image-intent-v1`. Existing conflicting
+`loom-nebius-ingress-v1`, `loom-nebius-ingress-rollback-v1`,
+`loom-nebius-ingress-image-intent-v1` and `loom-nebius-ingress-dns-v1`. Existing conflicting
 authority for that key is rejected. Keep the private key only in protected
 Environment secret `NEBIUS_INGRESS_SSH_KEY`; set the matching metadata variable
 `NEBIUS_INGRESS_INSTALLATION_JSON`. Use the existing verified deployment target,
@@ -444,8 +444,41 @@ the guard, delete a journal, or blindly dispatch again. Completed cutovers canno
 be reversed through this paused-recovery operation. A new attempt after completed
 rollback requires operator reconciliation preserving the old journal.
 
-The workflow has no DNS-publication or scheduled-renewal operation. Qualify those
-separately before accepting unattended management or personal environments.
+### Publish the personal and management DNS routes
+
+After a completed, freshly qualified ingress cutover, dispatch `nebius-rollout`
+from `dev` with `operation=ingress-dns`. The exact installed tooling must include
+this action; changing a bundle requires a new dedicated key grant, not an
+overwrite of existing authority. DNS uses the same protected Environment and
+workflow concurrency but receives no registry credential and performs no image
+scan/copy, certificate issuance, Kubernetes write or rollout-guard mutation.
+
+The fixed action loads the expiry-checked DNS credential privately on the gateway
+from the bound certificate installation. It can create only the wildcard A record
+`*.<child_domain>` and the exact `<management_host>` A record, with TTL 600. Their
+public IPv4 address is freshly read from the retained, UID-bound public Service;
+neither names nor address are dispatch inputs. Completed staging/cutover evidence,
+current candidate, certificate delivery, controller Pods and legacy/public HTTPS
+must still qualify. Both names' provider inventory and authoritative ownership
+are checked before publication; target/credential drift blocks further writes.
+
+Existing identical single A records are retained as `external`, not adopted.
+Conflicting/duplicate A, AAAA, aliases or delegation block publication. Same-name
+TXT and unrelated records remain untouched. The private
+`state/dns/dns-publication.json` journal records intent before each POST and allows
+at most one POST per name across replacement invocations. A lost reply followed by
+matching readback is recorded as `uncertain`, not proof of exclusive ownership.
+An absent uncertain record, changed recorded identity or changed target requires
+operator reconciliation; never erase the journal to retry. There is no automatic
+rollback or delete operation for a partially published pair.
+
+`dns_published` means every discovered authority returned the exact A address and
+no AAAA/alias for a fresh wildcard child and the management host, ordinary recursive
+resolution agreed, and trusted exact-IP TLS matched the delivered certificate for
+both hosts. The sanitized evidence contains record IDs and origins, not credentials.
+This proves routing, not management API availability or multi-owner acceptance.
+Scheduled renewal/delivery and DNS-token renewal remain separate operational work
+before accepting unattended management or personal environments.
 
 ### Render management manifests
 

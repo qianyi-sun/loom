@@ -110,6 +110,24 @@ def test_rollback_does_not_require_certificate_availability(tmp_path, monkeypatc
     assert calls == ["restored"]
 
 
+def test_dns_dispatch_uses_bound_read_only_qualifier_not_ingress_installation(tmp_path, monkeypatch, capsys):
+    path, config = installed(tmp_path)
+    sentinel = object()
+    certificate = {"installation_id": config["binding"]["certificate_installation_id"],
+                   "child_domain": "dev.example.test", "management_host": "management.example.test"}
+    monkeypatch.setattr(module(), "LiveIngressAPI", lambda *args, **kwargs: sentinel)
+    monkeypatch.setattr(module(), "load_installation", lambda p: certificate)
+    monkeypatch.setattr(module(), "install_ingress", lambda **kwargs: pytest.fail("DNS re-entered installation"))
+
+    def dns(**kwargs):
+        assert kwargs == {"api": sentinel, "certificate_config": certificate, "state_dir": path.parent / "nebius-ingress/state"}
+        return {"status": "dns_published"}
+
+    monkeypatch.setattr(module(), "publish_ingress_dns", dns, raising=False)
+    assert module().main(str(path), "dns") == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "dns_published", "namespace": config["binding"]["namespace"]}
+
+
 @pytest.mark.parametrize("change", ["image", "namespace", "api_server", "cluster_id", "unknown_action", "public_file"])
 def test_unqualified_authority_rejected_before_constructing_cluster_client(tmp_path, monkeypatch, capsys, change):
     path, config = installed(tmp_path)

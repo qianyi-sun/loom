@@ -47,6 +47,7 @@ def test_install_preserves_certificate_key_and_replays_without_changes(inputs):
     entry = root / "authority" / digest / "entrypoint.py"
     for command, expected in [("loom-nebius-ingress-v1", 0), ("loom-nebius-ingress-rollback-v1", 0),
                               ("loom-nebius-ingress-image-intent-v1", 0),
+                              ("loom-nebius-ingress-dns-v1", 0), ("loom-nebius-ingress-dns-v1 example.test 8.8.8.8", 126),
                               ("loom-nebius-certificate-v1", 126), ("python -c pass", 126)]:
         result = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
                                 env={"SSH_ORIGINAL_COMMAND": command}, timeout=10)

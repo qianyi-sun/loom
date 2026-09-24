@@ -23,7 +23,7 @@ from typing import Any
 from uuid import UUID
 
 MAX_BUNDLE = 100 * 1024 * 1024
-COMMANDS = ("loom-nebius-ingress-v1", "loom-nebius-ingress-rollback-v1", "loom-nebius-ingress-image-intent-v1")
+COMMANDS = ("loom-nebius-ingress-v1", "loom-nebius-ingress-rollback-v1", "loom-nebius-ingress-image-intent-v1", "loom-nebius-ingress-dns-v1")
 SOURCES = ("scripts/ops/nebius_ingress_bootstrap.py", "scripts/ops/nebius_certificate_gateway.py")
 
 

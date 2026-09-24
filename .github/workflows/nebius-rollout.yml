@@ -10,7 +10,7 @@ on:
       operation:
         description: Idle rollout, inventory, certificates, or owned ingress installation/recovery
         type: choice
-        options: [rollout, inspect, certificate, ingress, ingress-rollback]
+        options: [rollout, inspect, certificate, ingress, ingress-rollback, ingress-dns]
         default: rollout
 
 permissions:
@@ -204,7 +204,7 @@ jobs:
       github.repository == 'qianyi-sun/loom' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'ingress' || inputs.operation == 'ingress-rollback')
+      (inputs.operation == 'ingress' || inputs.operation == 'ingress-rollback' || inputs.operation == 'ingress-dns')
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     permissions:
@@ -269,7 +269,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
           LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
           NEBIUS_INGRESS_INSTALLATION_JSON: ${{ vars.NEBIUS_INGRESS_INSTALLATION_JSON }}
-          NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON: ${{ secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON }}
+          NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON: ${{ inputs.operation == 'ingress' && secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -286,6 +286,7 @@ jobs:
           case "$INGRESS_OPERATION" in
             ingress) operation=install ;;
             ingress-rollback) operation=rollback ;;
+            ingress-dns) operation=dns ;;
             *) exit 1 ;;
           esac
           uv run --no-sync python -m scripts.ops.nebius_ingress_rollout \

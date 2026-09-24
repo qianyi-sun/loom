@@ -20,10 +20,12 @@ from pathlib import Path
 import pytest
 import yaml
 from cryptography.hazmat.primitives import serialization
+from scripts.ops.nebius_dns_publication import PublicationError, publish_dns
 from scripts.ops.nebius_ingress_operation import (
     LiveIngressAPI,
     OperationError,
     install_ingress,
+    qualify_dns_target,
     rollback_ingress,
 )
 from scripts.ops.nebius_ingress_rollout import build_wheels
@@ -38,6 +40,7 @@ from tests.cluster.test_nebius_shared_ingress import (
 )
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops import test_nebius_certificates as certificate_material
+from tests.ops.test_nebius_dns_publication import Provider
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -182,7 +185,21 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             *_guard_documents(namespace),
         ]
         _run(container, "kubectl", "apply", "-f", "-", payload=yaml.safe_dump_all(documents))
-        core.patch_namespaced_service_status("loom-web", namespace, {"status": {"loadBalancer": {"ingress": [{"ip": address}]}}})
+        # K3s has no cloud LoadBalancer. Advertise a fixture public VIP and route
+        # only that exact socket endpoint to its local externalIP. TLS, SNI,
+        # certificate validation and Kubernetes readback remain real; no packet
+        # for this VIP leaves the disposable fixture, and production IP checks
+        # are not bypassed.
+        public_address = "8.8.8.8"
+        connect = socket.create_connection
+
+        def fixture_load_balancer(endpoint, *args, **kwargs):
+            if endpoint == (public_address, 443):
+                endpoint = (address, 443)
+            return connect(endpoint, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "create_connection", fixture_load_balancer)
+        core.patch_namespaced_service_status("loom-web", namespace, {"status": {"loadBalancer": {"ingress": [{"ip": public_address}]}}})
         deadline = time.monotonic() + 120
         while True:
             pods = core.list_namespaced_pod(namespace, label_selector="app=guard").items
@@ -247,6 +264,31 @@ server.socket=context.wrap_socket(server.socket,server_side=True); server.serve_
             public.metadata.uid, public.spec.cluster_ip, public.spec.ports, public.spec.external_i_ps)
         assert after.metadata.annotations["foreign"] == "retained"
         assert core.read_namespaced_secret("legacy-tls", namespace).data == legacy.data
+        # DNS publication uses the actual installed observer but a fake provider;
+        # failure after the pair is created cannot alter ingress or pause work.
+        cutover_path = state / "cutover/cutover.json"
+        completed_cutover = cutover_path.read_bytes()
+
+        def qualify():
+            return qualify_dns_target(api=api, certificate_config=config, state_dir=state)
+
+        target = qualify()
+        assert target["address"] == public_address and target["service_uid"] == public.metadata.uid
+        dns = Provider()
+        dns.rows = {"*.dev": [], "management": []}
+
+        def propagation_unavailable(_target):
+            raise PublicationError("fixture authority not yet converged")
+
+        arguments = {"provider": dns, "target": target, "state_dir": tmp_path / "dns-state", "qualify": qualify}
+        with pytest.raises(PublicationError, match="not yet converged"):
+            publish_dns(**arguments, wait=propagation_unavailable)
+        assert cutover_path.read_bytes() == completed_cutover
+        assert api.guard("observe", record["owner"], api.candidate) == {"status": "open"}
+        assert api.read()[0]["spec"]["selector"] == {"app": "loom-shared-ingress"}
+        assert publish_dns(**arguments, wait=lambda value: None)["status"] == "dns_published"
+        assert dns.posts == ["*.dev", "management"]
+        assert cutover_path.read_bytes() == completed_cutover
         alpn = original_context(cadata=old_tls["tls.crt"])
         alpn.set_alpn_protocols(["acme-tls/1"])
         with socket.create_connection((address, 443), timeout=5) as stream:

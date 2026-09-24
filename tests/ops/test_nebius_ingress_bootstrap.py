@@ -159,7 +159,7 @@ def test_modified_release_is_not_reused(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("command", ["", "loom-nebius-ingress-v1 extra", "python -c pass",
-                                      "loom-nebius-certificate-v1"])
+                                      "loom-nebius-certificate-v1", "loom-nebius-ingress-dns-v1 evil.test 1.1.1.1"])
 def test_forced_ingress_command_rejects_other_authority_before_input(command, monkeypatch):
     import sys
 
@@ -177,6 +177,45 @@ def test_force_command_cannot_execute_different_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(content)))
     assert module().authorized_main("a" * 64) == 126
     assert not (tmp_path / "nebius-ingress").exists()
+
+
+@pytest.mark.parametrize("change", [None, "private_ip", "multicast", "foreign_zone", "child_management",
+                                   "extra_record", "wrong_name", "bad_id", "bad_origin", "missing_fingerprint"])
+def test_dns_report_rejects_unqualified_targets_and_strips_private_fields(change):
+    report = {
+        "status": "dns_published", "installation_id": "18718d96-d389-40b3-a79b-11489924d0d4",
+        "candidate": "b" * 40, "namespace": "loom-dev", "service_uid": "2a83a179-ff51-46ce-bfdd-e6a547618edd",
+        "fingerprint_sha256": "c" * 64, "zone": "example.test", "child_domain": "dev.example.test",
+        "management_host": "management.example.test", "address": "8.8.8.8", "private": "fixture-secret",
+        "records": [{"name": "*.dev", "record_id": "record-1", "origin": "created", "private": "fixture-secret"},
+                    {"name": "management", "record_id": "record-2", "origin": "external"}],
+    }
+    if change == "private_ip":
+        report["address"] = "10.0.0.1"
+    elif change == "multicast":
+        report["address"] = "224.0.0.1"
+    elif change == "foreign_zone":
+        report["zone"] = "foreign.test"
+    elif change == "child_management":
+        report["management_host"] = "owner.dev.example.test"
+    elif change == "extra_record":
+        report["records"].append(dict(report["records"][0]))
+    elif change == "wrong_name":
+        report["records"][0]["name"] = "@"
+    elif change == "bad_id":
+        report["records"][0]["record_id"] = "private\ntext"
+    elif change == "bad_origin":
+        report["records"][0]["origin"] = "owned"
+    elif change == "missing_fingerprint":
+        del report["fingerprint_sha256"]
+    if change:
+        with pytest.raises(module().BootstrapError):
+            module().safe_report(json.dumps(report).encode())
+    else:
+        clean = module().safe_report(json.dumps(report).encode())
+        assert clean["records"] == [{"name": "*.dev", "record_id": "record-1", "origin": "created"},
+                                    {"name": "management", "record_id": "record-2", "origin": "external"}]
+        assert "fixture-secret" not in json.dumps(clean)
 
 
 def qualify_installed_watchdog(release, python, tmp_path):

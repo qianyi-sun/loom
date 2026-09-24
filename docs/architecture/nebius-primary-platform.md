@@ -198,9 +198,22 @@ configuration remain unchanged. Public HTTPS proof precedes pause release.
 Explicit paused recovery can restore only still-owned incomplete transitions
 using the journaled original backend. It does not depend on healthy new ingress
 or certificate issuance. Drift and unresolved release intents fail closed;
-completed deployments are not reversed by this operation. Protected live
-installation, DNS publication and renewal scheduling still require operational
-qualification; these source contracts do not establish installed readiness.
+completed deployments are not reversed by this operation.
+
+The separate protected `operation=ingress-dns` publishes only the bound personal
+wildcard and management A records at the freshly qualified public Service IPv4
+address. Its preflight observes completed staging/cutover, retained resource UIDs,
+current candidate, delivered TLS and working legacy/public routes without invoking
+installation or mutating Kubernetes/the guard. DNS credentials stay on the gateway;
+this operation receives no registry credential. Durable intent limits each name
+to one POST across process replacement. Matching preexisting records remain external;
+lost-reply readback is explicitly uncertain ownership. No record is overwritten or
+deleted, and partial publication remains journaled for reconciliation. Authoritative
+wildcard/management proof, recursive resolution and trusted TLS must agree before
+success. This is routing qualification, not management application readiness.
+
+Protected live installation, DNS publication and renewal scheduling still require
+operational qualification; these source contracts do not establish installed readiness.
 
 ## Independent management service runtime
 
