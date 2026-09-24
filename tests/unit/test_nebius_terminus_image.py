@@ -216,7 +216,7 @@ def test_relocated_guard_preserves_enclosing_branch_semantics(condition: str) ->
     [
         ("pytest==8.4.1", "pytest>=8"),
         ("-p 3.13", "--python latest"),
-        ("-w pandas==2.3.3", "--with pandas"),
+        ("-w pandas==2.3.3", "--with pandas>=2"),
         ("uv/0.9.5", "uv/latest"),
         ("apt-get install -y curl primer3", "apt-get install -y curl && echo danger"),
         ("rm *.csv", "python3 -m pip install pandas"),
@@ -226,6 +226,33 @@ def test_relocated_guard_preserves_enclosing_branch_semantics(condition: str) ->
 def test_refuses_unknown_bootstrap_without_silent_fallback(old: str, new: str) -> None:
     with pytest.raises(ValueError, match="nebius-terminus"):
         adapt_harbor_test_script(SCRIPT.replace(old, new))
+
+
+@pytest.mark.parametrize("dependency", ["pandas", "uproot", "GitPython"])
+def test_unversioned_auxiliary_requirement_retains_original_verification(dependency: str) -> None:
+    source = SCRIPT.replace("pandas==2.3.3", dependency)
+    result = adapt_harbor_test_script(source)
+    assert result.requirements == ("pytest==8.4.1", dependency, "pytest-json-ctrf==0.3.5")
+    assert result.script == adapt_harbor_test_script(SCRIPT).script
+
+
+def test_plain_pip_accepts_unversioned_auxiliary_requirement() -> None:
+    result = adapt_harbor_test_script(
+        "pip install pytest==8.4.1 GitPython\n"
+        "python -m pytest /tests/test_state.py -rA\n"
+    )
+    assert result.requirements == ("pytest==8.4.1", "GitPython")
+    assert result.system_site_packages
+    assert result.script == "/opt/verifier/bin/python -m pytest /tests/test_state.py -rA\n"
+
+
+@pytest.mark.parametrize("dependency", [
+    "https://example.com/package.whl", "git+https://example.com/project.git@main",
+    "./local-package", "pandas;echo", "pandas>=2", "${DEPENDENCY}",
+])
+def test_unversioned_requirement_support_does_not_accept_other_sources(dependency: str) -> None:
+    with pytest.raises(ValueError, match="nebius-terminus"):
+        adapt_harbor_test_script(SCRIPT.replace("pandas==2.3.3", dependency))
 
 
 def test_requires_original_recognized_bootstrap() -> None:
