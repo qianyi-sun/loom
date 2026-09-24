@@ -65,11 +65,12 @@ class NebiusSdkEnvironmentApi:
         # These APIs have no get-by-name. Bound every page and reject duplicate
         # matches; don't silently choose one credential from ambiguous inventory.
         request_class = getattr(module, "List" + name + "sRequest")
+        list_resources = client.list_members if kind == "membership" else client.list
         token = ""
         seen: set[str] = set()
         found: dict[str, Any] | None = None
         for _ in range(100):
-            page = await self._call(client.list, request_class(
+            page = await self._call(list_resources, request_class(
                 parent_id=metadata["parent_id"], page_size=100, page_token=token,
             ))
             for resource in getattr(page, "memberships" if kind == "membership" else "items"):
