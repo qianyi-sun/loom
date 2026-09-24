@@ -346,6 +346,17 @@ their environment, mounts and network settings must not disappear. Preserve
 supplied service fixtures and qualify their isolated images, network aliases,
 health checks, dependencies and verifier lifecycle; a packaged local service
 does not establish a missing external endpoint.
+The report also identifies literal `echo`/`printf`-generated workspace shell
+scripts that invoke `pytest`, `python -m pytest`, or `uvx ... pytest` against a
+file in the bundled private `/tests` tree as `agent_private_verifier_dependency`.
+For example, a public `validate.sh` that invokes `/tests/test_state.py` requires
+an explicit task-package review and repair; copying withheld verifier inputs
+into the agent workspace is not a repair. The diagnostic follows local image
+stage inheritance and reports the original Dockerfile line without changing
+the package. It is a source check, not a shell interpreter: dynamically generated
+scripts, heredoc bodies, copied scripts and registry-image contents still need
+task-author review. Independent public checks and private scoring must preserve
+the original task contract; see [#1263](https://github.com/qianyi-sun/loom/issues/1263).
 The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
