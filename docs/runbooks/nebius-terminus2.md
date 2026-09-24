@@ -312,7 +312,7 @@ the default runtime remains non-root with gateway-only networking.
 The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
-Python version and pinned verifier dependencies declared by the supported Harbor
+Python version and verifier dependencies declared by the supported Harbor
 bootstrap. Build-time dependency installation may run as root independently
 of the selected task execution identity.
 
@@ -320,7 +320,14 @@ The generated `verifier/harbor-offline.sh` removes only recognized online
 bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
 bootstraps retain the base Python interpreter and its task dependencies through
 a verifier venv with system-site-packages; uv bootstraps retain their declared
-Python version, exact dependency pins and package-index selection. Recognized
+Python version, exact dependency pins and package-index selection. Pytest must
+remain exactly pinned; auxiliary dependencies may also use ordinary unversioned
+package names such as `pandas`, `uproot` or `GitPython`. These names resolve only
+during image preparation. The image records installed versions in
+`/opt/verifier/resolved-requirements.txt`, and verification uses that prepared
+environment offline. A future rebuild may resolve different auxiliary versions.
+Version ranges, arbitrary URLs, local paths and shell expressions are rejected.
+Recognized
 installer forms include apt's `-qq` and pip's `--no-cache-dir` flags, pinned uv
 installation followed by `source "$HOME/.local/bin/env"` or
 `export PATH="$HOME/.local/bin:$PATH"`, and simple missing-command guards for
@@ -352,7 +359,7 @@ before a model batch. This adapter supports Debian/Ubuntu final images and the
 Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
 and preinstalled `uvx -p ... -w package==version ... pytest` (including the
 equivalent `--python` and `--with` options),
-exact-pinned pip plus pytest/python-module invocations, and explicit uv
+pip with exactly pinned pytest plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Official Debian-based Python full
 and slim images are supported; Alpine images are not. Prebuilt images, malformed
