@@ -16,7 +16,7 @@ describe("resource commands", () => {
       "loom eval trial download trial-1 --kind artifact --artifact-key main/report.json --output artifact.bin",
     );
     expect(usageCommand("2026-06-01", "2026-06-30", "team-1", true)).toBe(
-      "loom eval usage --start 2026-06-01 --end 2026-06-30 --team-id team-1 --include-batches",
+      "loom eval usage --start 2026-06-01 --end 2026-06-30 --group-by day --team-id team-1 --include-batches",
     );
     expect(usageCommand("2026-06-01", "2026-06-30")).not.toContain("--team-id");
   });

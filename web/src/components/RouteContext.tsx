@@ -1,3 +1,4 @@
+import { useRouteScroll } from "../hooks/useRouteScroll";
 import { useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 
@@ -10,6 +11,7 @@ const sections: Record<string, string> = {
   settings: "Settings",
   admin: "Team access",
   pipelines: "Pipelines",
+  "pipeline-artifacts": "Pipeline artifact",
   batches: "Batch",
   trials: "Trial",
   tasks: "Tasks",
@@ -21,17 +23,19 @@ const sections: Record<string, string> = {
 };
 
 export function RouteContext(): JSX.Element | null {
+  useRouteScroll();
   const { pathname, search } = useLocation();
   const [section, detail] = pathname.split("/").filter(Boolean);
   const parent = sections[section] ?? "Page not found";
   let title = section ? parent : "Home";
   if (section === "batches" && detail === "new") title = "New batch";
+  else if (section === "trials" && detail === "compare") title = "Compare trials";
   else if (section === "auth")
     title = detail === "setup" ? "Set up account" : detail === "reset" ? "Reset password" : "Sign in";
   else if (section === "pipelines" && pathname.includes("/artifacts/")) title = "Pipeline artifact";
   else if (section === "monitor") {
     const view = new URLSearchParams(search).get("view");
-    title = `Monitor · ${view === "trials" ? "Trials" : view === "resources" ? "Resources" : "Batches"}`;
+    title = `Monitor · ${view === "trials" ? "Trials" : (view === "resources" || view === "capacity") ? "Capacity" : "Batches"}`;
   } else if (detail && section !== "admin" && section !== "invites") {
     title = `${parent} · ${detail === "new" ? "New" : "Details"}`;
   }

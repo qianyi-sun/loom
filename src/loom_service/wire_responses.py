@@ -641,6 +641,7 @@ class BatchDetailRerunBatchesItem(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class Batch(TypedDict):
+    purpose: NotRequired[Literal["evaluation", "trajectory_generation"]]
     id: str
     team_id: str
     owner_team: NotRequired[BatchOwnerTeam]

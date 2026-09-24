@@ -188,10 +188,8 @@ async def test_corrected_download_assembles_with_original_source(case: SimpleNam
     import io
     import tarfile
 
-    from loom_service.delivery_export import (
-        build_canonical_trial_bundle_archive,
-        canonical_bundle_from_artifact,
-    )
+    from loom_service.delivery_export import build_canonical_trial_bundle_archive
+    from loom_service.trial_bundles import canonical_bundle_from_artifact
 
     case.artifact.manifest_sha256 = "sha256:" + "a" * 64
     case.artifact.content_hash = "sha256:" + "b" * 64

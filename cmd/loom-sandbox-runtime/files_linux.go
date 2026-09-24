@@ -10,11 +10,16 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 // Every directory is pinned by descriptor before traversing the next component.
 // O_NOFOLLOW on all components prevents task-controlled symlink races.
 func fileParent(path string, create bool) (int, string, error) {
+	return openFileParent(path, create, syscall.O_RDONLY)
+}
+
+func openFileParent(path string, create bool, directoryFlags int) (int, string, error) {
 	if !strings.HasPrefix(path, "/") || strings.ContainsRune(path, '\x00') {
 		return -1, "", errors.New("absolute path required")
 	}
@@ -24,16 +29,16 @@ func fileParent(path string, create bool) (int, string, error) {
 			return -1, "", errors.New("invalid path component")
 		}
 	}
-	fd, err := syscall.Open("/", syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
+	fd, err := syscall.Open("/", directoryFlags|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", err
 	}
 	for _, part := range parts[:len(parts)-1] {
-		next, err := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+		next, err := syscall.Openat(fd, part, directoryFlags|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if create && errors.Is(err, syscall.ENOENT) {
 			err = syscall.Mkdirat(fd, part, 0755)
 			if err == nil || errors.Is(err, syscall.EEXIST) {
-				next, err = syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+				next, err = syscall.Openat(fd, part, directoryFlags|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 			}
 		}
 		syscall.Close(fd)
@@ -62,6 +67,30 @@ func readFile(path string) (*os.File, error) {
 		return nil, errors.New("regular file required")
 	}
 	return f, nil
+}
+
+// Read only the literal link text. Pin its parent using the same no-follow
+// traversal as file transfers; readlinkat never dereferences the leaf.
+func readSymlink(path string) (string, error) {
+	dir, name, err := fileParent(path, false)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.Close(dir)
+	leaf, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, 4097)
+	n, _, errno := syscall.Syscall6(syscall.SYS_READLINKAT, uintptr(dir),
+		uintptr(unsafe.Pointer(leaf)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
+	if errno != 0 {
+		return "", errno
+	}
+	if n == 0 || n > 4096 {
+		return "", errors.New("symlink target exceeds limit")
+	}
+	return string(buf[:n]), nil
 }
 
 func writeFile(path string, body io.Reader, mode uint32) error {

@@ -281,3 +281,72 @@ async def test_stop_cancels_reference_inspection_and_closes_stream(tmp_path):
         assert closed.is_set() and not driver._requests
     finally:
         await driver.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [b"python3.11", b"/usr/local/bin/python3.11"])
+async def test_inspect_reference_symlink_preserves_literal_target(tmp_path, target):
+    import httpx
+
+    def handle(request):
+        assert request.url.path == "/readlink"
+        assert request.url.params["path"] == "/usr/local/bin/python3"
+        return httpx.Response(200, content=target)
+
+    driver = driver_for(tmp_path / "unused.sock")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(handle), base_url="http://sandbox")
+    try:
+        assert await driver.inspect_reference_symlink(PurePosixPath("/usr/local/bin/python3")) == target.decode()
+        assert not driver._requests
+    finally:
+        await driver.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,headers", [
+    (b"", {}), (b"a\x00b", {}), (b"\xff", {}), (b"x" * 4097, {}),
+    (b"abc", {"Content-Length": "2"}), (b"abc", {"Content-Length": "4"}),
+    (b"abc", {"Content-Length": "invalid"}),
+])
+async def test_inspect_reference_symlink_rejects_malformed_reply(tmp_path, content, headers):
+    import httpx
+
+    driver = driver_for(tmp_path / "unused.sock")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=content, headers=headers)), base_url="http://sandbox")
+    try:
+        with pytest.raises(DriverError, match="symlink"):
+            await driver.inspect_reference_symlink(PurePosixPath("/usr/local/bin/python3"))
+        assert not driver._requests
+    finally:
+        await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_reference_symlink_read(tmp_path):
+    import httpx
+
+    reading, closed = asyncio.Event(), asyncio.Event()
+
+    class PendingBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            reading.set()
+            await asyncio.Event().wait()
+            yield b"x"
+
+        async def aclose(self):
+            closed.set()
+
+    driver = driver_for(tmp_path / "unused.sock")
+    driver._client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"Content-Length": "1"}, stream=PendingBody())),
+        base_url="http://sandbox")
+    inspection = asyncio.create_task(driver.inspect_reference_symlink(PurePosixPath("/bin/python")))
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=2)
+        await driver.stop()
+        with pytest.raises(asyncio.CancelledError):
+            await inspection
+        assert closed.is_set() and not driver._requests
+    finally:
+        await driver.stop()

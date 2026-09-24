@@ -223,6 +223,41 @@ async def trials_setup(
         sync_engine.dispose()
 
 
+async def test_trial_search_finds_later_pages_and_preserves_scope(
+    trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
+) -> None:
+    """F1: a known trial outside page one must be found before pagination."""
+    app, raw, team_id, trial_ids = trials_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        headers = {"Authorization": f"Bearer {raw}"}
+        first = await client.get("/api/v1/trials", params={"limit": 1}, headers=headers)
+        assert first.status_code == 200
+        assert first.json()["items"][0]["id"] == str(trial_ids[0])
+        assert first.json()["next_cursor"]
+        cursor = first.json()["next_cursor"]
+        for index in (1, 2):
+            page = await client.get("/api/v1/trials", params={"q": f"TrialOwner-{team_id.hex[:8]}", "limit": 1, "cursor": cursor}, headers=headers)
+            assert page.status_code == 200
+            assert [item["id"] for item in page.json()["items"]] == [str(trial_ids[index])]
+            cursor = page.json()["next_cursor"]
+        assert cursor is None
+        match = await client.get("/api/v1/trials", params={"q": str(trial_ids[2]), "limit": 1}, headers=headers)
+        assert match.status_code == 200
+        assert [item["id"] for item in match.json()["items"]] == [str(trial_ids[2])]
+        assert match.json()["next_cursor"] is None
+        assert match.json()["items"][0]["team_id"] == str(team_id)
+        summary = await client.get("/api/v1/monitor/summary", params={"view": "trials", "q": str(trial_ids[2])}, headers=headers)
+        assert summary.status_code == 200, summary.text
+        assert summary.json()["state_counts"]["trials"]["succeeded"] == 1
+        assert summary.json()["state_counts"]["trials"]["running"] == 0
+        empty = await client.get("/api/v1/trials", params={"q": "no-such-task-2099"}, headers=headers)
+        assert empty.json() == {"items": [], "next_cursor": None}
+        literal = await client.get("/api/v1/trials", params={"q": "%_"}, headers=headers)
+        assert literal.json()["items"] == []
+        forbidden = await client.get("/api/v1/trials", params={"q": str(trial_ids[2]), "team_id": str(uuid4())}, headers=headers)
+        assert forbidden.status_code == 403
+
+
 async def test_list_my_trials(
     trials_setup: tuple[FastAPI, str, UUID, list[UUID]],
 ) -> None:

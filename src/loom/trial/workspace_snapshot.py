@@ -120,6 +120,7 @@ async def _import_workspace_archive(
     *,
     policy: WorkspaceStagingPolicy | None = None,
     preserve_acls: bool = False,
+    external_reference_files: frozenset[PurePosixPath] = frozenset(),
 ) -> None:
     """Restore an archive, replacing public state when a policy is supplied.
 
@@ -132,7 +133,10 @@ async def _import_workspace_archive(
     await asyncio.to_thread(check_acl_declaration, src, preserve_acls=preserve_acls)
     native = getattr(driver, "import_workspace_archive", None)
     if native is not None:
-        if preserve_acls:
+        if external_reference_files:
+            await native(src, dst, policy=policy, preserve_acls=preserve_acls,
+                         external_reference_files=external_reference_files)
+        elif preserve_acls:
             await native(src, dst, policy=policy, preserve_acls=True)
         elif policy is None:
             await native(src, dst)
@@ -144,7 +148,8 @@ async def _import_workspace_archive(
         await require_acl_support(driver, dst)
 
     if policy is not None:
-        await _prepare_workspace_import(driver, src, dst, policy, user="root")
+        await _prepare_workspace_import(driver, src, dst, policy, user="root",
+                                        external_reference_files=external_reference_files)
 
     token = uuid4().hex
     remote_archive = PurePosixPath(f"/tmp/loom-workspace-{token}.tar")
@@ -192,6 +197,7 @@ def _workspace_deletions(
 async def _prepare_workspace_import(
     driver: Driver, archive: Path, dst: PurePosixPath, policy: WorkspaceStagingPolicy,
     *, user: str | None = None,
+    external_reference_files: frozenset[PurePosixPath] = frozenset(),
 ) -> None:
     """Clear public baseline state in a quiescent verifier before extraction.
 
@@ -201,7 +207,8 @@ async def _prepare_workspace_import(
     """
     if dst.anchor != "/" or len(dst.parts) < 2 or ".." in dst.parts:
         raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
-    await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=dst)
+    await asyncio.to_thread(_validate_workspace_archive, archive, policy, root=dst,
+                            external_reference_files=external_reference_files)
     checks = [f"test ! -L {shlex.quote(str(path))}" for path in (*reversed(dst.parents), dst)]
     quoted = shlex.quote(str(dst))
     checks.append(f"(test ! -e {quoted} || test -d {quoted})")

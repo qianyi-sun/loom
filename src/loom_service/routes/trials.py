@@ -59,12 +59,8 @@ from loom_service.auth_guards import (
     require_team_or_admin,
 )
 from loom_service.debug_evidence import build_trial_debug_evidence
-from loom_service.delivery_export import (
-    ArchiveBuildResult,
-    DeliveryExportError,
-    build_canonical_trial_bundle_archive,
-    canonical_bundle_for_trial,
-)
+from loom_service.delivery_export import ArchiveBuildResult, build_canonical_trial_bundle_archive
+from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_trial_diagnosis
 from loom_service.forwarders import forward, propagate
@@ -81,6 +77,7 @@ from loom_service.service_execution_status import service_execution_lifecycle_st
 from loom_service.stale_running_debug import trial_stale_running_debug_context
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_image_preparation import task_image_preparation_for_trial
+from loom_service.trial_bundles import canonical_bundle_for_trial
 from loom_service.trial_progress import load_trial_progress
 from loom_service.trial_timing import trial_started_at
 from loom_service.usage_accounting import (
@@ -357,6 +354,7 @@ async def list_trials(
     request: Request,
     sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search trial ID, task ID, or owner")] = None,
     task_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
@@ -386,6 +384,7 @@ async def list_trials(
     stmt = apply_trial_monitor_filters(
         stmt,
         target_team=target_team,
+        trial_q=q,
         task_id=task_id,
         batch_id=batch_id,
         benchmark_id=benchmark_id,

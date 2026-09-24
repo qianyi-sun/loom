@@ -1,4 +1,7 @@
-"""One-command delivery bundle export for completed batch families (#390)."""
+"""One-command delivery bundle export for completed batch families (#390).
+
+Shared bundle contracts and errors are re-exported for existing Python consumers.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -38,6 +41,25 @@ from loom.trajectory.object_identity import (
     TrajectoryObjectFilename,
     resolve_trajectory_object_key,
 )
+from loom_service.delivery_export_errors import (
+    CorruptDeliveryObjectsError as CorruptDeliveryObjectsError,
+)
+from loom_service.delivery_export_errors import DeliveryExportError as DeliveryExportError
+from loom_service.delivery_export_errors import (
+    InvalidDeliveryBatchFamilyError as InvalidDeliveryBatchFamilyError,
+)
+from loom_service.delivery_export_errors import (
+    MissingDeliveryObjectsError as MissingDeliveryObjectsError,
+)
+from loom_service.delivery_export_errors import (
+    TerminalStateMismatchError as TerminalStateMismatchError,
+)
+from loom_service.delivery_export_errors import (
+    UnreadableDeliveryObjectsError as UnreadableDeliveryObjectsError,
+)
+from loom_service.delivery_export_errors import (
+    UnresolvedDeliveryTrialsError as UnresolvedDeliveryTrialsError,
+)
 from loom_service.delivery_export_openhands import (
     build_per_trial_openhands_bundle,
 )
@@ -46,6 +68,18 @@ from loom_service.delivery_export_tb2_v2 import (
     parse_trajectory_events,
     resolve_verifier_artifacts,
 )
+from loom_service.trial_bundles import CanonicalTrialBundle as CanonicalTrialBundle
+from loom_service.trial_bundles import CanonicalTrialBundleFile as CanonicalTrialBundleFile
+from loom_service.trial_bundles import CanonicalTrialIdentity as CanonicalTrialIdentity
+from loom_service.trial_bundles import ObjectRef as ObjectRef
+from loom_service.trial_bundles import canonical_bundle_for_trial as canonical_bundle_for_trial
+from loom_service.trial_bundles import (
+    canonical_bundle_from_artifact as canonical_bundle_from_artifact,
+)
+from loom_service.trial_bundles import (
+    canonical_trial_bundle_manifest as canonical_trial_bundle_manifest,
+)
+from loom_service.trial_bundles import has_archive_path_traversal
 
 SELECTION_RULE = "highest_priority_deliverable_by_task_sample_combination"
 EXPLICIT_TRIAL_IDS_SELECTION_RULE = "explicit_trial_ids"
@@ -60,58 +94,6 @@ DeliveryExportMode = Literal[
     "raw-harbor-tb2-v2",
     "openhands-export",
 ]
-
-
-class DeliveryExportError(Exception):
-    """Base class for user-actionable delivery export failures."""
-
-    code = "delivery_export_failed"
-    status_code = 409
-
-    def __init__(self, detail: dict[str, Any]) -> None:
-        super().__init__(self.code)
-        self.detail = {"code": self.code, **detail}
-
-
-class MissingDeliveryObjectsError(DeliveryExportError):
-    code = "delivery_export_objects_missing"
-
-
-class UnreadableDeliveryObjectsError(DeliveryExportError):
-    code = "delivery_export_objects_unreadable"
-
-
-class CorruptDeliveryObjectsError(DeliveryExportError):
-    code = "delivery_export_objects_corrupt"
-
-
-class UnresolvedDeliveryTrialsError(DeliveryExportError):
-    code = "delivery_export_unresolved_trials"
-
-
-class InvalidDeliveryBatchFamilyError(DeliveryExportError):
-    code = "delivery_export_invalid_batch_family"
-    status_code = 400
-
-
-class TerminalStateMismatchError(DeliveryExportError):
-    code = "delivery_export_terminal_state_mismatch"
-
-
-@dataclass(frozen=True)
-class ObjectRef:
-    kind: str
-    trial_id: UUID
-    bucket: str
-    key: str
-
-    def as_dict(self) -> dict[str, str]:
-        return {
-            "kind": self.kind,
-            "trial_id": str(self.trial_id),
-            "bucket": self.bucket,
-            "key": self.key,
-        }
 
 
 @dataclass(frozen=True)
@@ -131,37 +113,6 @@ class SelectedTrial:
             int(self.trial.sample_idx),
             int(self.trial.combination_idx),
         )
-
-
-@dataclass(frozen=True)
-class CanonicalTrialBundleFile:
-    relative_path: str
-    ref: ObjectRef
-    size_bytes: int
-    sha256: str
-    media_type: str
-
-
-@dataclass(frozen=True)
-class CanonicalTrialBundle:
-    artifact_id: UUID
-    trial_id: UUID
-    task_id: str
-    attempt: int
-    manifest_sha256: str
-    content_sha256: str
-    files: tuple[CanonicalTrialBundleFile, ...]
-
-
-class CanonicalTrialIdentity(Protocol):
-    @property
-    def id(self) -> UUID: ...
-
-    @property
-    def task_id(self) -> str: ...
-
-    @property
-    def attempt_count(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -194,27 +145,9 @@ def _safe_slug(value: str, *, max_len: int = 96) -> str:
     return slug[:max_len].rstrip("-._") or "task"
 
 
-def _has_traversal(rel: str) -> bool:
-    parts = Path(rel.replace("\\", "/")).parts
-    if not parts:
-        return False
-    if parts[0] in ("/", "\\") or (len(parts[0]) == 2 and parts[0][1] == ":"):
-        return True
-    return ".." in parts
-
-
-def _is_sha256(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and value.startswith("sha256:")
-        and len(value) == 71
-        and all(character in "0123456789abcdef" for character in value[7:])
-    )
-
-
 def _task_archive_relpath(source_key: str, prefix: str) -> str | None:
     rel = source_key[len(prefix) :].lstrip("/")
-    if not rel or _has_traversal(rel):
+    if not rel or has_archive_path_traversal(rel):
         return None
     return rel
 
@@ -514,133 +447,6 @@ async def _resource_usage_for_selected(
     for row in rows:
         out.setdefault(row.trial_id, []).append(row)
     return out
-
-
-def canonical_bundle_from_artifact(
-    artifact: Artifact,
-    *,
-    trial: CanonicalTrialIdentity,
-) -> CanonicalTrialBundle | None:
-    if artifact.trial_id != trial.id:
-        return None
-    storage = artifact.storage if isinstance(artifact.storage, dict) else {}
-    if storage.get("schema_version") != "loom.canonical-trial-bundle-storage.v1":
-        return None
-    attempt = storage.get("attempt")
-    if attempt != trial.attempt_count:
-        return None
-    raw_files = storage.get("files")
-    raw_source_evidence = storage.get("source_evidence")
-    manifest_sha256 = artifact.manifest_sha256
-    if not _is_sha256(manifest_sha256) and isinstance(raw_source_evidence, list):
-        source_manifest = next(
-            (
-                raw.get("sha256")
-                for raw in raw_source_evidence
-                if isinstance(raw, dict)
-                and raw.get("relative_path") == "source/_manifest.json"
-            ),
-            None,
-        )
-        manifest_sha256 = source_manifest if isinstance(source_manifest, str) else None
-    if not _is_sha256(manifest_sha256) or not _is_sha256(artifact.content_hash):
-        raise InvalidDeliveryBatchFamilyError(
-            {"message": "canonical Trial bundle digest identity is invalid"}
-        )
-    if not isinstance(raw_files, list) or not isinstance(raw_source_evidence, list):
-        raise InvalidDeliveryBatchFamilyError(
-            {"message": "canonical Trial bundle inventory is incomplete"}
-        )
-    files: list[CanonicalTrialBundleFile] = []
-    archive_paths: set[str] = set()
-    for raw, prefix in (
-        *((record, "files/") for record in raw_files),
-        *((record, "") for record in raw_source_evidence),
-    ):
-        if not isinstance(raw, dict):
-            raise InvalidDeliveryBatchFamilyError(
-                {"message": "canonical Trial bundle file is invalid"}
-            )
-        source_path = raw.get("relative_path")
-        relative_path = prefix + source_path if isinstance(source_path, str) else ""
-        bucket = raw.get("bucket")
-        key = raw.get("key")
-        size_bytes = raw.get("size_bytes")
-        sha256 = raw.get("sha256")
-        media_type = raw.get("media_type")
-        if (
-            not relative_path
-            or _has_traversal(relative_path)
-            or relative_path in archive_paths
-            or not isinstance(bucket, str)
-            or not bucket
-            or not isinstance(key, str)
-            or not key
-            or isinstance(size_bytes, bool)
-            or not isinstance(size_bytes, int)
-            or size_bytes < 0
-            or not _is_sha256(sha256)
-            or not isinstance(media_type, str)
-            or not media_type
-        ):
-            raise InvalidDeliveryBatchFamilyError(
-                {"message": "canonical Trial bundle file identity is invalid"}
-            )
-        archive_paths.add(relative_path)
-        files.append(
-            CanonicalTrialBundleFile(
-                relative_path=relative_path,
-                ref=ObjectRef(
-                    kind="trial_bundle",
-                    trial_id=trial.id,
-                    bucket=bucket,
-                    key=key,
-                ),
-                size_bytes=size_bytes,
-                sha256=cast(str, sha256),
-                media_type=media_type,
-            )
-        )
-    return CanonicalTrialBundle(
-        artifact_id=artifact.id,
-        trial_id=trial.id,
-        task_id=trial.task_id,
-        attempt=attempt,
-        manifest_sha256=cast(str, manifest_sha256),
-        content_sha256=str(artifact.content_hash or ""),
-        files=tuple(files),
-    )
-
-
-async def canonical_bundle_for_trial(
-    session: Any,
-    *,
-    trial: Trial,
-) -> CanonicalTrialBundle | None:
-    artifacts = list(
-        (
-            await session.execute(
-                select(Artifact)
-                .where(
-                    Artifact.trial_id == trial.id,
-                    Artifact.control_producer_kind == "service_execution",
-                )
-                .order_by(Artifact.created_at.asc(), Artifact.id.asc()),
-            )
-        )
-        .scalars()
-        .all()
-    )
-    bundles = [
-        bundle
-        for artifact in artifacts
-        if (bundle := canonical_bundle_from_artifact(artifact, trial=trial)) is not None
-    ]
-    if len(bundles) > 1:
-        raise InvalidDeliveryBatchFamilyError(
-            {"message": "multiple canonical Trial bundles match one selected attempt"}
-        )
-    return bundles[0] if bundles else None
 
 
 async def _canonical_bundles_for_selected(
@@ -1961,27 +1767,6 @@ def _build_archive(
         sha256=hashing_spool.sha256.hexdigest(),
         size_bytes=size_bytes,
     )
-
-
-def canonical_trial_bundle_manifest(bundle: CanonicalTrialBundle) -> dict[str, Any]:
-    return {
-        "schema_version": "loom.canonical-trial-bundle-export.v1",
-        "artifact_id": str(bundle.artifact_id),
-        "trial_id": str(bundle.trial_id),
-        "task_id": bundle.task_id,
-        "attempt": bundle.attempt,
-        "manifest_sha256": bundle.manifest_sha256,
-        "content_sha256": bundle.content_sha256,
-        "files": [
-            {
-                "relative_path": file.relative_path,
-                "size_bytes": file.size_bytes,
-                "sha256": file.sha256,
-                "media_type": file.media_type,
-            }
-            for file in bundle.files
-        ],
-    }
 
 
 def build_canonical_trial_bundle_archive(

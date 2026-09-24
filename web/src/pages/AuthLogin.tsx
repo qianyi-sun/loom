@@ -18,6 +18,10 @@ const SIGN_IN_FAILURE = new Error(
   "Sign-in failed. Check your username and password, then try again.",
 );
 
+const PUBLIC_TEAMS_FAILURE = new Error(
+  "Could not load registration teams. Please try again.",
+);
+
 const FIELD_LABEL = "block text-sm font-medium text-slate-700";
 
 export default function AuthLogin(): JSX.Element {
@@ -157,7 +161,24 @@ export default function AuthLogin(): JSX.Element {
               description="Choose a team that allows public registration. Ask an admin if your team is missing."
             />
             <Card.Body className="space-y-3">
-              {!publicTeams.isPending && !hasPublicTeams ? (
+              {publicTeams.isFetching ? (
+                <p role="status" className="text-sm text-slate-600">
+                  Loading registration teams…
+                </p>
+              ) : null}
+              {publicTeams.isError ? (
+                <div className="space-y-2">
+                  <ErrorState error={PUBLIC_TEAMS_FAILURE} />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={publicTeams.isFetching}
+                    onClick={() => void publicTeams.refetch()}
+                  >
+                    Retry loading teams
+                  </Button>
+                </div>
+              ) : publicTeams.isSuccess && !hasPublicTeams ? (
                 <EmptyState label="No teams are currently open for public registration." />
               ) : null}
               <form

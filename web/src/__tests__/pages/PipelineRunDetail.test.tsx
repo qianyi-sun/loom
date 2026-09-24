@@ -132,6 +132,7 @@ test("renders durable progress from bounded StageRun and Artifact pages", async 
         items: [{
           id: "artifact-1",
           name: "runtime-task.tar.gz",
+          detail_path: "/pipelines/run-1/stages/stage-1/artifacts/artifact-1",
           artifact_type: "terminal_task_bundle",
           access_class: "team_runtime",
           stored_size_bytes: 512,
@@ -161,6 +162,10 @@ test("renders durable progress from bounded StageRun and Artifact pages", async 
     "/api/v1/pipeline-artifacts/artifact-1/download",
   );
   expect(screen.getByRole("button", { name: "Cancel PipelineRun" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "runtime-task.tar.gz" })).toHaveAttribute("href", "/pipelines/run-1/stages/stage-1/artifacts/artifact-1");
+  const technical = screen.getByText("Technical details and budget").closest("details");
+  expect(technical).not.toHaveAttribute("open");
+  expect(screen.getByRole("heading", { name: "Durable progress" }).compareDocumentPosition(technical!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 
   fireEvent.click(screen.getByRole("button", { name: /generate, container, 2 shards/i }));
   await waitFor(() => {

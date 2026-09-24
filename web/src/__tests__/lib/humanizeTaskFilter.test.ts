@@ -43,3 +43,11 @@ describe("humanizeTaskFilter", () => {
     expect(out.diagnostics).toContain("Unrecognized field: unexpected");
   });
 });
+
+it("describes persisted TaskSet-backed plans without unknown-field warnings", () => {
+  const summary = humanizeTaskFilter({ task_set_ids: ["set-one"], subset_kind: "all" }, { matchedTaskCount: 3 });
+  expect(summary.primary).toContain("1 task set");
+  expect(summary.primary).toContain("3 tasks");
+  expect(summary.details).toContain("Task set: set-one");
+  expect(summary.diagnostics).toEqual([]);
+});

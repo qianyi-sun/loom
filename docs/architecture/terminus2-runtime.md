@@ -39,6 +39,15 @@ components (`..`), and every intermediate target must remain inside that root
 and outside private paths. Cross-root links, cycles, chains exceeding Linux's
 40-link limit, traversal, devices, FIFOs, and sockets fail closed. These checks
 also apply independently to each declared mutable directory snapshot.
+Native Terminus tasks can additionally declare exact image executable leaves in
+`environment.workspace_reference_files`. A workspace link may terminate at one
+of those leaves; no parent-directory authority is granted. An image alias needs
+an explicit literal target in `environment.reference_file_symlinks`, resolving
+in one hop to a regular executable declared in the same reference group.
+The trusted native RPC reads alias text without following it and fingerprints
+the executable's bytes, mode and ownership. A private manifest binds those
+records to the workspace archive digest. The fresh verifier must match before
+replacement and after import; missing inspection support or drift fails closed.
 Restoration replaces public workdir contents, including
 deletions, while preserving freshly staged private verifier inputs and their
 parent directories. It rejects symlink destinations, incomplete inventories,

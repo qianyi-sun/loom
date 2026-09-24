@@ -17,6 +17,7 @@ const KNOWN_TASK_FILTER_KEYS = new Set([
   "subset_kind",
   "tag_filters",
   "task_ids",
+  "task_set_ids",
 ]);
 
 const BENCHMARK_LABELS: Record<string, string> = {
@@ -48,7 +49,9 @@ export function humanizeTaskFilter(
     };
   }
 
-  const benchmarkLabel = benchmarkSummary(benchmarkIds);
+  const taskSets = Array.isArray(filter.task_set_ids) ? filter.task_set_ids.map(String) : [];
+  if (taskSets.length) details.unshift(...taskSets.map((id) => `Task set: ${id}`));
+  const benchmarkLabel = taskSets.length ? `${taskSets.length} task set${taskSets.length === 1 ? "" : "s"}` : benchmarkSummary(benchmarkIds);
 
   if (subset === "first_n" || subset === "last_n") {
     const direction = subset === "first_n" ? "first" : "last";

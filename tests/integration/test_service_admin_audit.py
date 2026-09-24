@@ -451,3 +451,55 @@ async def test_admin_audit_uuid_cursor_is_stable_and_rolling_compatible(
     assert UUID(cursors[0] or "") == first_page_last_id
     assert invalid.status_code == 400
     assert "invalid cursor" in invalid.json()["detail"]
+
+
+async def test_access_audit_filters_before_cursor_pagination(
+    audit_app: FastAPI, postgres_url: str,
+) -> None:
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    rows = [
+        {"id": UUID(int=90_000 + index), "created_at": now - timedelta(minutes=index),
+         "actor": "reviewer%" if index % 2 == 0 else "other",
+         "action": "token.create" if index % 2 == 0 else "capacity.refresh",
+         "target_type": "token" if index % 2 == 0 else "capacity",
+         "target_id": str(index), "event_metadata": {}}
+        for index in range(110)
+    ]
+    engine = create_engine(postgres_url)
+    with engine.begin() as connection:
+        connection.execute(insert(AdminAuditEvent), rows)
+    engine.dispose()
+    transport = httpx.ASGITransport(app=audit_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+        filters = {"scope": "access", "actor": "reviewer%", "action": "token.",
+                   "start": "2026-09-23T10:00:00Z", "end": "2026-09-23T13:00:00Z", "limit": "20"}
+        ids = []
+        cursor = None
+        for expected_count in [20, 20, 15]:
+            query = {**filters, **({"cursor": cursor} if cursor else {})}
+            response = await client.get("/api/v1/admin/audit-events", params=query, headers=_admin_headers())
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert len(body["items"]) == expected_count
+            assert all(event["target_type"] == "token" for event in body["items"])
+            ids.extend(event["id"] for event in body["items"])
+            cursor = body["next_cursor"]
+        assert cursor is None
+        assert len(set(ids)) == 55
+        empty = await client.get("/api/v1/admin/audit-events", params={**filters, "actor": "missing"}, headers=_admin_headers())
+        assert empty.json() == {"items": [], "next_cursor": None}
+        full = await client.get("/api/v1/admin/audit-events", params={"scope": "all", "limit": 200}, headers=_admin_headers())
+        assert len(full.json()["items"]) == 110
+
+
+@pytest.mark.parametrize(("start", "end", "status"), [
+    ("2026-09-23T00:00:00", "2026-09-24T00:00:00Z", 200),
+    ("2026-09-24T00:00:00", "2026-09-23T00:00:00Z", 400),
+    ("2026-09-23T01:00:00+02:00", "2026-09-23T00:00:00", 200),
+])
+async def test_audit_date_boundaries_normalize_utc(
+    audit_app: FastAPI, start: str, end: str, status: int,
+) -> None:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=audit_app), base_url="http://svc") as client:
+        response = await client.get("/api/v1/admin/audit-events", params={"start": start, "end": end}, headers=_admin_headers())
+    assert response.status_code == status, response.text

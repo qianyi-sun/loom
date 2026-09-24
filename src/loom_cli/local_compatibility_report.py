@@ -334,6 +334,7 @@ def _dockerfile_runtime_requirements(
         instructions = dockerfile_instructions(dockerfile.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return
+    _image_script_private_test_diagnostics(bundle, dockerfile, instructions, prepared_workdir, report)
     directory, workdir_instruction = _dockerfile_workdir(instructions)
     if workdir_instruction is not None and directory != prepared_workdir:
         report.add("unsupported_conversion", "dockerfile_workdir_overridden",
@@ -398,6 +399,175 @@ def _dockerfile_runtime_requirements(
                        "Review the original image identity and declare its supported environment.user and HOME explicitly; "
                        "named users or UID-only identities may require image metadata inspection. Do not infer a replacement identity.",
                        source=f"{dockerfile}:{effective.line}")
+
+
+class _ShellOperator(str):
+    """An unquoted shell operator, distinct from a quoted word with that value."""
+
+
+def _shell_commands(source: str) -> list[list[str]]:
+    """Keep lexical boundaries before shlex removes quote/comment information.
+
+    Only split literal commands and words; do not evaluate shell expressions.
+    Shlex unquotes each word after its role as data or syntax is established.
+    """
+    commands: list[list[str]] = [[]]
+    pending: list[str] = []
+    quote = ""
+    position = 0
+
+    def word() -> None:
+        if pending:
+            values = shlex.split("".join(pending), comments=False, posix=True)
+            if len(values) != 1:
+                raise ValueError("nonliteral shell word")
+            commands[-1].append(values[0])
+            pending.clear()
+
+    try:
+        while position < len(source):
+            char = source[position]
+            position += 1
+            if char == "\\" and quote != "'" and position < len(source):
+                following = source[position]
+                position += 1
+                if following != "\n":
+                    pending.extend((char, following))
+            elif quote:
+                pending.append(char)
+                if char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+                pending.append(char)
+            elif char == "#" and not pending:
+                while position < len(source) and source[position] != "\n":
+                    position += 1
+            elif char in "\n;&|":
+                word()
+                commands.append([])
+            elif char in "<>":
+                word()
+                operator = char
+                while position < len(source) and source[position] in "<>":
+                    operator += source[position]
+                    position += 1
+                commands[-1].append(_ShellOperator(operator))
+            elif char.isspace():
+                word()
+            else:
+                pending.append(char)
+        word()
+    except ValueError:
+        return []  # Unknown shell forms remain subject to task-author review.
+    return [command for command in commands if command]
+
+
+def _script_private_tests(source: str, bundle: Path) -> set[str]:
+    references: set[str] = set()
+    for command in _shell_commands(source):
+        while command and command[0] in {"if", "then", "else", "!"}:
+            command = command[1:]
+        if not command:
+            continue
+        executable = PurePosixPath(command[0]).name
+        arguments: list[str] | None = None
+        if executable == "pytest":
+            arguments = command[1:]
+        elif executable in {"python", "python3"} and command[1:3] == ["-m", "pytest"]:
+            arguments = command[3:]
+        elif executable == "uvx":
+            position = 1
+            while position < len(command):
+                option = command[position]
+                if option in {"-p", "--python", "-w", "--with", "--from"}:
+                    position += 2
+                elif option.startswith(("--python=", "--with=", "--from=")):
+                    position += 1
+                else:
+                    break
+            if command[position:position + 1] == ["pytest"]:
+                arguments = command[position + 1:]
+        if arguments is None:
+            continue
+        # Only positional pytest selection paths establish this dependency.
+        # Option values such as --ignore and -k are not selected test files.
+        skip_value = False
+        for word in arguments:
+            if skip_value:
+                skip_value = False
+                continue
+            if isinstance(word, _ShellOperator):
+                skip_value = True
+                continue
+            if word in {"--ignore", "--ignore-glob", "--deselect", "--confcutdir", "--basetemp",
+                        "--rootdir", "--junitxml", "--junit-xml", "--junit-prefix", "--log-file",
+                        "-k", "-m", "-c", "-o", "--override-ini"}:
+                skip_value = True
+                continue
+            path = PurePosixPath(word.split("::", 1)[0])
+            if not path.is_relative_to("/tests") or ".." in path.parts or "$" in word:
+                continue
+            local = bundle / "tests" / path.relative_to("/tests")
+            if local.resolve().is_relative_to((bundle / "tests").resolve()) and local.is_file():
+                references.add(str(path))
+    return references
+
+
+def _image_script_private_test_diagnostics(
+    bundle: Path, dockerfile: Path, instructions: tuple[DockerfileInstruction, ...],
+    workdir: str, report: TaskCompatibilityReport,
+) -> None:
+    """Flag literal echo/printf-generated workspace scripts using bundled private tests.
+
+    This is a source diagnostic, not a shell interpreter or image filesystem
+    proof. Follow local FROM inheritance; ignore discarded build stages.
+    """
+    stages: dict[str, list[DockerfileInstruction]] = {}
+    current: list[DockerfileInstruction] = []
+    for instruction in instructions:
+        if instruction.keyword == "FROM":
+            words = instruction.arguments.split()
+            words = [word for word in words if not word.startswith("--")]
+            if not words:
+                return
+            current = list(stages.get(words[0].lower(), []))
+            if len(words) == 3 and words[1].upper() == "AS":
+                stages[words[2].lower()] = current
+        elif instruction.keyword == "RUN":
+            current.append(instruction)
+    for instruction in current:
+        for command in _shell_commands(instruction.arguments):
+            if command[0] not in {"echo", "printf"}:
+                continue
+            redirects = [i for i, word in enumerate(command) if isinstance(word, _ShellOperator) and word in {">", ">>"}]
+            if len(redirects) != 1 or redirects[0] != len(command) - 2:
+                continue
+            target = PurePosixPath(command[-1])
+            if not target.is_absolute() or not target.is_relative_to(workdir) or target.suffix != ".sh" or ".." in target.parts:
+                continue
+            content = command[1:redirects[0]]
+            if command[0] == "printf":
+                if not content or content[0] not in {"%s\\n", "%s"}:
+                    continue
+                separator = "\n" if content[0] == "%s\\n" else ""
+                content = content[1:]
+            else:
+                separator = " "
+                if content[:1] == ["-n"]:
+                    content = content[1:]
+                if content and content[0].startswith("-"):
+                    continue  # Escape-interpreting echo variants need shell evaluation.
+            for reference in sorted(_script_private_tests(separator.join(content), bundle)):
+                report.add(
+                    "package_defect", "agent_private_verifier_dependency",
+                    f"Image source writes a pytest invocation of bundled private test {reference!r} "
+                    f"into workspace script {str(target)!r}.",
+                    "Review the public script/private verifier contract and publish an explicit package repair "
+                    "that preserves task and scoring semantics. Do not expose private tests to make the script run; "
+                    "keep the task blocked until the conflict is resolved (see #1263).",
+                    source=f"{dockerfile}:{instruction.line}",
+                )
 
 
 def _prepared_user_matches(source_user: str, task: TaskConfig) -> bool:

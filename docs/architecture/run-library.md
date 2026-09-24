@@ -61,6 +61,12 @@ evidence stays in the full bundle download, outside the reusable file inventory.
 The artifact id identifies the original bundle; the selected key and relative
 path identify its file, and reuse provenance retains both bundle and file digests.
 
+`loom_service.trial_bundles` owns this shared inventory parser, attempt identity,
+bundle lookup and manifest projection. Run Library, Trial routes and delivery
+exports use that same contract. `loom_service.delivery_export_errors` owns the
+shared error types; routes retain visibility checks and error redaction.
+Archive construction and object publication remain in `delivery_export`.
+
 Within the producing team, `safe` or `verified_internal` outputs may be reused
 while sharing/redaction scans are pending. Explicitly blocked, unsafe, unknown,
 or redaction-blocked content is not reusable. This does not change the stored
@@ -115,7 +121,12 @@ arbitrary source files into a task's workspace.
   digests, and the authenticated complete-bundle download URL. Cross-team
   readers do not receive this owner-only bundle inventory.
 - `GET /api/v1/run-library/artifacts`: list typed artifact metadata under the
-  same Run Library read policy and artifact filters.
+  same Run Library read policy and artifact filters. `limit` defaults to 200
+  (maximum 500); follow `next_cursor` with `cursor` until null. Pages use
+  `created_at DESC, id DESC` after authorization and effective filters. Pipeline
+  bundles are represented as bundles even when storage uses a manifest instead
+  of a Trial object key. Restricted Pipeline artifacts retain their creator,
+  team-owner, or platform-admin read boundary.
 - `GET /api/v1/run-library/artifacts/export`: export safe typed artifact
   metadata as JSONL or JSON. The export route does not read or include object
   bodies; it only emits redacted metadata for artifacts that pass the
@@ -240,3 +251,33 @@ Automated coverage exercises these cases:
   not copy source provider secrets; typed reuse provenance records source
   artifact id, type, schema version, and content hash.
 - Cross-team mutation of the original source run remains denied.
+
+## Web inspection and downloads
+
+The Library has explicit Runs and Pipeline artifacts modes. Search, state, and
+team are visible by default; secondary filters remain under Advanced filters.
+List cursor/history parameters remain in the URL through reload and detail
+returns, and changing an effective filter clears them before the next request.
+
+Run details prioritize the complete batch delivery bundle, then complete Trial
+bundles, metadata export, and individual files grouped by type and Trial. Files
+show archive-relative names (or a filename when unavailable); storage keys and
+scan internals are in File details. A diagnostic download permitted by the API
+does not imply that pending or blocked content is approved for sharing or reuse.
+Empty stdout and stderr stay in diagnostics rather than reusable outputs.
+
+Pipeline lists show an explicit empty state and bind date drafts to URL history
+(UTC dates). Run detail prioritizes status, failure, progress, graph and outputs;
+identity, frozen digests and the full budget remain in technical details. Artifact
+names open details, and Run, Stage and input-Artifact lineage are links. Input
+lineage resolves `GET /api/v1/pipeline-artifacts/{artifact_id}` using the same
+current-team and restricted-artifact policy as the contextual detail route.
+
+Committed imported and recipe-prepared inputs open a read-only source metadata
+view: name/type, source identity, recipe, state, size and digests. The lookup
+requires the same team and applies the existing artifact access-class rules
+(using the source creator for restricted input metadata). It does not expose
+storage locators, file contents or a new download route. A missing, uncommitted
+or restricted source opens an explicit unavailable state with a return to the
+downstream result and current-team guidance. Unexpected request failures keep a
+retry action and the same contextual return.

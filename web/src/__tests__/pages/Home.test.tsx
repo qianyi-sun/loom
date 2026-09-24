@@ -192,7 +192,7 @@ describe("Home overview", () => {
     renderWithProviders(<App />, {route: "/"});
     expect(await screen.findByText("Capacity unknown")).toBeInTheDocument();
     expect(screen.getByRole("link", {name: "Create a batch"})).toBeInTheDocument();
-    expect(screen.getByRole("link", {name: "View nodes and scheduling"})).toHaveAttribute("href", "/monitor");
+    expect(screen.getByRole("link", {name: "View nodes and scheduling"})).toHaveAttribute("href", "/monitor?view=capacity");
     expect(screen.queryByText("Start at least one worker")).not.toBeInTheDocument();
   });
 

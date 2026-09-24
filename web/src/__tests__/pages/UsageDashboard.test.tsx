@@ -136,6 +136,42 @@ describe("UsageDashboard", () => {
     );
   });
 
+  it.each(["day", "week", "month"])("exports %s with the effective admin team scope", async (group) => {
+    const fetchMock = mockUsageDashboard({ platformAdmin: true });
+    renderWithProviders(<UsageDashboard />, { route: "/usage" });
+    const user = userEvent.setup();
+    await screen.findByRole("option", { name: "Runtime Research" });
+    await user.selectOptions(screen.getByLabelText("Group by"), group);
+    for (const team of ["team-b", ""]) {
+      await user.selectOptions(screen.getByLabelText("Team"), team);
+      await user.click(screen.getByRole("button", { name: "Export usage query" }));
+      const command = screen.getByText(/loom eval usage --start/);
+      expect(command).toHaveTextContent(`--group-by ${group}`);
+      expect(command).toHaveTextContent("--include-batches");
+      if (team) expect(command).toHaveTextContent(`--team-id ${team}`);
+      else expect(command).not.toHaveTextContent("--team-id");
+      const requests = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/v1/usage"));
+      const url = new URL(String(requests.at(-1)![0]), "http://localhost");
+      expect(command).toHaveTextContent(`--start ${url.searchParams.get("start")} --end ${url.searchParams.get("end")}`);
+      expect(url.searchParams.get("group_by")).toBe(group);
+      expect(url.searchParams.get("team_id")).toBe(team || null);
+      await user.click(screen.getByRole("button", { name: "close" }));
+    }
+  });
+
+  it.each(["day", "week", "month"])("exports member %s without admin scope flags", async (group) => {
+    mockUsageDashboard();
+    renderWithProviders(<UsageDashboard />, { route: "/usage" });
+    const user = userEvent.setup();
+    await screen.findByText("Alpha");
+    await user.selectOptions(screen.getByLabelText("Group by"), group);
+    await user.click(screen.getByRole("button", { name: "Export usage query" }));
+    const command = screen.getByText(/loom eval usage --start/);
+    expect(command).toHaveTextContent(`--group-by ${group}`);
+    expect(command).not.toHaveTextContent("--include-batches");
+    expect(command).not.toHaveTextContent("--team-id");
+  });
+
   it("waits for session authority before requesting authorization-dependent usage", async () => {
     let releaseAuth!: () => void;
     const authGate = new Promise<void>((resolve) => {
@@ -215,6 +251,13 @@ describe("UsageDashboard", () => {
 
     expect(await screen.findByText("self-deployed token-only batch"))
       .toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Tokens per bucket" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Estimated LLM cost per bucket" })).not.toBeInTheDocument();
+    const breakdown = screen.getByText("self-deployed token-only batch").closest("details");
+    expect(breakdown).not.toHaveAttribute("open");
+    await userEvent.click(screen.getByText("Batch breakdown (1)"));
+    expect(breakdown).toHaveAttribute("open");
+    expect(screen.getByText(/Mixed combines priced and token-only calls/)).toHaveTextContent("price_unknown means a matching price is unavailable");
     expect(screen.getAllByText("n/a").length).toBeGreaterThan(0);
     expect(screen.getAllByText("not_applicable").length).toBeGreaterThan(0);
     expect(screen.getAllByText("partial").length).toBeGreaterThan(0);

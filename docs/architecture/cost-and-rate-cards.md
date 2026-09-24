@@ -298,3 +298,20 @@ Both modes support it:
 - [`llm-gateway.md`](llm-gateway.md) — where the lookup happens in
   service mode
 - [`cli-mode.md`](cli-mode.md) — where the lookup happens in CLI mode
+
+## Web inspection and publication
+
+Usage exports preserve the selected start/end, `--group-by day|week|month`,
+team scope, and the admin batch-breakdown flag. Admin All teams omits
+`--team-id`; member usage remains scoped by the authenticated team. When no
+bucket has a priced cost, Usage charts token volume and explains missing
+price coverage or token-only calls. Unknown costs remain unknown. Per-bucket
+batch rows expand on demand.
+
+Rate cards first show published versions and model prices. Publishing is a
+separate action with advanced JSON input, a model-price preview, and a comparison
+with the current card. The publish payload is `{ "id": "version", "entries": [...] }`,
+not the read API's `{ "table": ... }` envelope. Example prices are illustrative.
+The gateway selects the latest captured card; publishing refreshes its captured
+time, and reusing an ID updates that version. Existing calls retain their cost
+snapshots. The final confirmation still uses the existing admin authorization.

@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router-dom";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +50,26 @@ describe("AdminAccess", () => {
   afterEach(() => {
     setFrontendConfigForTests(null);
     vi.restoreAllMocks();
+  });
+
+  it("opens token deep links and restores the previous tab with browser history", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => jsonResponse(String(input).includes("/auth/me") ? platformAdminMe : { items: [] }));
+    function Back(): JSX.Element { const navigate = useNavigate(); return <button onClick={() => navigate(-1)}>Browser back</button>; }
+    renderWithProviders(<><AdminAccess /><Back /></>, { route: "/admin/access?tab=tokens" });
+    expect(await screen.findByRole("tab", { name: "API tokens" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(screen.getByRole("tab", { name: "Invites" }));
+    expect(screen.getByRole("tab", { name: "Invites" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Browser back" }));
+    expect(screen.getByRole("tab", { name: "API tokens" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("does not expose platform access tabs or requests to an ordinary member", async () => {
+    const member = { ...ownerMe, role: "member", current_team: { ...ownerMe.current_team, role: "member" }, teams: [{ ...ownerMe.current_team, role: "member" }], scopes: ["read:own", "submit"] };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => jsonResponse(String(input).includes("/auth/me") ? member : { items: [] }));
+    renderWithProviders(<AdminAccess />, { route: "/admin/access?tab=audit" });
+    expect(await screen.findByText(/Ask a team owner/)).toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/admin/"))).toBe(false);
   });
 
   it("fetches section data only when the section is visible", async () => {
@@ -522,20 +543,19 @@ describe("AdminAccess", () => {
 
     renderWithProviders(<AdminAccess />);
 
-    await userEvent.click(await screen.findByRole("tab", { name: "Accounts" }));
+    await screen.findByRole("tab", { name: "Requests" });
 
     expect(await screen.findByText("Account requests")).toBeInTheDocument();
     expect(screen.getByText("Ada")).toBeInTheDocument();
     expect(screen.getByText("Dev")).toBeInTheDocument();
-    expect(screen.getByText("Password resets")).toBeInTheDocument();
-    expect(screen.getByText("Hongjian")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Approve account Ada" }));
     expect(await screen.findByText(
       "https://loom.example.com/auth/setup?token=loom_setup_manual",
     )).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Approve reset Hongjian" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Accounts" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Approve reset Hongjian" }));
     expect(await screen.findByText(
       "https://loom.example.com/auth/reset?token=loom_reset_manual",
     )).toBeInTheDocument();

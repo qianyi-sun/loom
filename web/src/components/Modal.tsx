@@ -41,6 +41,7 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
+  "summary",
   "area[href]",
   "button:not(:disabled)",
   "input:not(:disabled):not([type='hidden'])",
@@ -135,6 +136,9 @@ function focusableElements(dialog: HTMLElement): HTMLElement[] {
   return Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
     (element) =>
       !element.hidden &&
+      !Array.from(dialog.querySelectorAll("details:not([open])")).some((details) =>
+        details.contains(element) && !details.querySelector(":scope > summary")?.contains(element)
+      ) &&
       element.tabIndex >= 0 &&
       !element.closest("[hidden], [inert], [aria-hidden='true']"),
   );

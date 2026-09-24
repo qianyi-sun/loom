@@ -1,8 +1,9 @@
 import { queryKeys } from "../../api/queryKeys";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { api, type AdminAuditEvent } from "../../api";
-import { useCursorPage } from "../../hooks/useCursorPage";
+import { clearCursorParams, useUrlCursorPage } from "../../hooks/useUrlCursorPage";
 import { formatLocalDateTime } from "../../lib/dateTime";
 import { Card } from "../Card";
 import EmptyState from "../EmptyState";
@@ -51,10 +52,24 @@ function AuditRows({ events }: { events: AdminAuditEvent[] }): JSX.Element {
 }
 
 export default function AdminAuditLog(): JSX.Element {
-  const page = useCursorPage("admin-audit-events");
+  const [params, setParams] = useSearchParams();
+  const scope = params.get("auditScope") === "all" ? "all" : "access";
+  const actor = params.get("actor") ?? "";
+  const action = params.get("action") ?? "";
+  const start = params.get("start") ?? "";
+  const end = params.get("end") ?? "";
+  const filters = { scope, actor: actor || undefined, action: action || undefined,
+    start: start ? `${start}T00:00:00Z` : undefined, end: end ? `${end}T23:59:59.999999Z` : undefined } as const;
+  const page = useUrlCursorPage();
+  const update = (key: string, value: string): void => {
+    const next = new URLSearchParams(params);
+    clearCursorParams(next);
+    if (value) next.set(key, value); else next.delete(key);
+    setParams(next, { replace: true });
+  };
   const query = useQuery({
-    queryKey: queryKeys["admin"]("audit-events", page.cursor),
-    queryFn: () => api.listAdminAuditEvents(50, page.cursor ?? undefined),
+    queryKey: queryKeys["admin"]("audit-events", filters, page.cursor),
+    queryFn: () => api.listAdminAuditEvents(50, page.cursor ?? undefined, filters),
   });
 
   return (
@@ -67,6 +82,13 @@ export default function AdminAuditLog(): JSX.Element {
         description="Admin access decisions with actor, action, and target."
       />
       <Card.Body>
+        <div className="mb-4 flex flex-wrap gap-3 text-sm">
+          <label>Audit scope<select className="block rounded border p-2" value={scope} onChange={(event) => update("auditScope", event.target.value)}><option value="access">Access and accounts</option><option value="all">Full system audit</option></select></label>
+          <label>Actor<input className="block rounded border p-2" value={actor} onChange={(event) => update("actor", event.target.value)} /></label>
+          <label>Action<input className="block rounded border p-2" value={action} onChange={(event) => update("action", event.target.value)} /></label>
+          <label>From (UTC)<input type="date" className="block rounded border p-2" value={start} onChange={(event) => update("start", event.target.value)} /></label>
+          <label>Through (UTC)<input type="date" className="block rounded border p-2" value={end} onChange={(event) => update("end", event.target.value)} /></label>
+        </div>
         {query.isPending ? <LoadingState announce={false} label="Loading audit events…" /> : null}
         {query.isError ? <ErrorState error={query.error} /> : null}
         {query.data ? <AuditRows events={query.data.items} /> : null}

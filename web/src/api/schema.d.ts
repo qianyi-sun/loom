@@ -1258,6 +1258,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/pipeline-artifacts/{artifact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pipeline Artifact By Id
+         * @description Resolve an input lineage link through the existing artifact read policy.
+         */
+        get: operations["get_pipeline_artifact_by_id_api_v1_pipeline_artifacts__artifact_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/pipeline-artifacts/{artifact_id}/download": {
         parameters: {
             query?: never;
@@ -2830,6 +2850,11 @@ export interface components {
             priced_llm_calls_count?: number;
             /** Pricing Modes */
             pricing_modes?: string[];
+            /**
+             * Purpose
+             * @enum {string}
+             */
+            purpose?: "evaluation" | "trajectory_generation";
             /** Rerun Of Batch Id */
             rerun_of_batch_id: string | null;
             /** Rerun Targets */
@@ -3011,6 +3036,11 @@ export interface components {
             /** Pricing Modes */
             pricing_modes?: string[];
             progress?: components["schemas"]["ProgressSummary"];
+            /**
+             * Purpose
+             * @enum {string}
+             */
+            purpose?: "evaluation" | "trajectory_generation";
             /** Rerun Batches */
             rerun_batches: components["schemas"]["BatchDetailRerunBatchesItem"][];
             /** Rerun Of Batch Id */
@@ -4982,6 +5012,55 @@ export interface components {
             /** Worker Pool Class */
             worker_pool_class: string | null;
         };
+        /**
+         * PipelineInputArtifactDetailV1
+         * @description Locator-free metadata for an existing imported/materialized input.
+         */
+        PipelineInputArtifactDetailV1: {
+            /** Artifact Type */
+            artifact_type: string;
+            /** Content Sha256 */
+            content_sha256: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** File Count */
+            file_count: number | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Manifest Sha256 */
+            manifest_sha256: string | null;
+            /** Name */
+            name: string;
+            /** Recipe Name */
+            recipe_name: string;
+            /** Recipe Version */
+            recipe_version: number;
+            /** Safety State */
+            safety_state: string;
+            /**
+             * Source Id
+             * Format: uuid
+             */
+            source_id: string;
+            /**
+             * Source Kind
+             * @enum {string}
+             */
+            source_kind: "input_import" | "recipe_input_materialization";
+            /**
+             * State
+             * @constant
+             */
+            state: "committed";
+            /** Stored Size Bytes */
+            stored_size_bytes: number | null;
+        };
         /** PipelineInputImportAbortV1 */
         PipelineInputImportAbortV1: {
             /** Reason */
@@ -6533,6 +6612,8 @@ export interface components {
         TaskSetDetailResponse: {
             /** Capabilities */
             capabilities: string[];
+            /** Display Name */
+            display_name?: string | null;
             /** Error Summary */
             error_summary?: unknown[];
             /** Evaluation Ready */
@@ -6552,6 +6633,8 @@ export interface components {
             status_reason: string | null;
             /** Task Count */
             task_count: number;
+            /** Task Preview */
+            task_preview?: string[];
             /** Task Set Id */
             task_set_id: string;
             /** Warnings */
@@ -7894,6 +7977,11 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                scope?: "all" | "access";
+                actor?: string | null;
+                action?: string | null;
+                start?: string | null;
+                end?: string | null;
             };
             header?: {
                 authorization?: string | null;
@@ -10536,6 +10624,7 @@ export interface operations {
                 batch_id?: string | null;
                 q?: string | null;
                 benchmark_id?: string | null;
+                view?: string;
                 agent_name?: string | null;
                 model_provider?: string | null;
                 model_name?: string | null;
@@ -10634,6 +10723,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OverviewSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_pipeline_artifact_by_id_api_v1_pipeline_artifacts__artifact_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineArtifactDetailV1"] | components["schemas"]["PipelineInputArtifactDetailV1"];
                 };
             };
             /** @description Validation Error */
@@ -12369,6 +12491,7 @@ export interface operations {
                 pipeline_result?: string | null;
                 team_id?: string | null;
                 limit?: number;
+                cursor?: string | null;
             };
             header?: {
                 authorization?: string | null;
@@ -13254,6 +13377,8 @@ export interface operations {
         parameters: {
             query?: {
                 team_id?: string | null;
+                /** @description Search trial ID, task ID, or owner */
+                q?: string | null;
                 task_id?: string | null;
                 batch_id?: string | null;
                 benchmark_id?: string | null;

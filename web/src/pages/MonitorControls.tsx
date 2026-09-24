@@ -3,12 +3,12 @@ export function SegmentedToggle({
   value,
   onChange,
 }: {
-  value: View;
-  onChange: (v: View) => void;
+  value: View | "capacity";
+  onChange: (v: View | "capacity") => void;
 }): JSX.Element {
   return (
     <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
-      {(["batches", "trials"] as const).map((v) => {
+      {(["batches", "trials", "capacity"] as const).map((v) => {
         const active = v === value;
         return (
           <button
@@ -19,14 +19,14 @@ export function SegmentedToggle({
             title={
               v === "batches"
                 ? "Show aggregate batch rows and their overall state."
-                : "Show individual trial rows across batches."
+                : v === "trials" ? "Show individual trial rows across batches." : "Inspect nodes, scheduling and shared capacity."
             }
             className={
               "rounded-md px-3 py-1 text-sm font-medium transition-colors " +
               (active ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")
             }
           >
-            {v === "batches" ? "Batches" : "Trials"}
+            {v === "batches" ? "Batches" : v === "trials" ? "Trials" : "Capacity"}
           </button>
         );
       })}

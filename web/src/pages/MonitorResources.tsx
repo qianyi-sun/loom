@@ -96,7 +96,7 @@ export function NebiusExecutionBreakdown({
           const draining = target.desired_state === "draining";
           const healthy = target.health_status === "healthy" && observation?.is_fresh === true;
           return (
-            <div key={target.target_id} className="rounded-lg border border-sky-200 bg-white p-3">
+            <div key={target.target_id ?? `${target.pool_id}:${target.region}`} className="rounded-lg border border-sky-200 bg-white p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="font-semibold text-slate-900">
                   {target.pool_id} · {target.environment} · {target.region}
@@ -177,11 +177,15 @@ export function NebiusExecutionBreakdown({
                 </span>
                 <span>commands waiting: {target.command_backlog}</span>
               </div>
+              {profile?.immediate_executable_slots == null ? <p className="mt-2 text-xs text-slate-600">Capacity is unknown because a current, complete observation is unavailable. This does not mean zero available capacity.</p> : null}
               <NebiusPlacement targetId={target.target_id} />
               {[...target.blockers, ...(profile?.blockers ?? [])].length > 0 ? (
-                <p className="mt-2 break-words text-xs text-amber-800">
-                  Blockers: {[...new Set([...target.blockers, ...(profile?.blockers ?? [])])].join(", ")}
-                </p>
+                <div className="mt-2 text-xs text-amber-800">
+                  <p>Scheduling is waiting on capacity or service readiness. Review the node observation and placement above.</p>
+                  <details><summary className="cursor-pointer">Technical blocker details</summary>
+                    <p className="break-words">Blockers: {[...new Set([...target.blockers, ...(profile?.blockers ?? [])])].join(", ")}</p>
+                  </details>
+                </div>
               ) : null}
             </div>
           );
@@ -192,7 +196,7 @@ export function NebiusExecutionBreakdown({
           {serviceExecution.targets
             .filter((target) => ["disabled", "retired"].includes(target.desired_state))
             .map((target) => (
-              <p key={target.target_id} className="mt-2 text-sm text-slate-600">
+              <p key={target.target_id ?? `${target.pool_id}:${target.region}`} className="mt-2 text-sm text-slate-600">
                 {target.pool_id} · {target.region} ·{" "}
                 {target.desired_state === "disabled" ? "Disabled" : target.desired_state}
               </p>

@@ -400,6 +400,8 @@ test("a route failure leaves a healthy sibling usable", async ({
   expect(response?.ok()).toBe(true);
   await expectFocusedRecovery(page, "Loom could not display this section");
   await expect(page.getByRole("navigation")).toBeVisible();
+  const menu = page.getByRole("button", { name: "Menu", exact: true });
+  if (await menu.isVisible()) await menu.click();
   await page.getByRole("link", { name: "Monitor" }).click();
   await expect(
     page.getByRole("heading", { name: "Monitor", exact: true }),

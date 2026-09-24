@@ -346,6 +346,19 @@ their environment, mounts and network settings must not disappear. Preserve
 supplied service fixtures and qualify their isolated images, network aliases,
 health checks, dependencies and verifier lifecycle; a packaged local service
 does not establish a missing external endpoint.
+The report also identifies literal `echo`/`printf`-generated workspace shell
+scripts that invoke `pytest`, `python -m pytest`, or `uvx ... pytest` against a
+file in the bundled private `/tests` tree as `agent_private_verifier_dependency`.
+For example, a public `validate.sh` that invokes `/tests/test_state.py` requires
+an explicit task-package review and repair; copying withheld verifier inputs
+into the agent workspace is not a repair. The diagnostic follows local image
+stage inheritance and reports the original Dockerfile line without changing
+the package. It is a source check, not a shell interpreter: dynamically generated
+scripts, heredoc bodies, copied scripts and registry-image contents still need
+task-author review. Later overwrites or deletion are not evaluated, so a finding
+does not prove that the final image still contains the dependency. Independent
+public checks and private scoring must preserve
+the original task contract; see [#1263](https://github.com/qianyi-sun/loom/issues/1263).
 The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
@@ -415,7 +428,7 @@ Task-specific setup, pytest arguments, reward logic and the complete private
 adapters or image shapes fail with an adaptation error; configuration admission
 alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
-before a model batch. This adapter supports Debian/Ubuntu final images and the
+before a model batch. This adapter supports the final image families below and the
 Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
 or exact canonical `curl -LsSf https://astral.sh/uv/install.sh | sh` installer,
 and preinstalled `uvx -p ... -w package==version ... pytest` (including the
@@ -438,6 +451,20 @@ original application interpreter and PATH; plain pip verifiers inherit system
 packages so compiled PyROOT dependencies remain available. Validate the actual
 image and original verifier before execution; accepting a tag does not qualify
 its upstream contents. Alpine and Fedora variants remain unsupported.
+
+Official `archlinux:latest`, `archlinux:base` and `archlinux:base-devel` final
+images are also supported, including local stage inheritance. Preparation adds
+missing harness tools with pacman and builds the separate verifier environment
+with the same supported uv/pip bootstrap conversion. It leaves already installed
+packages at their authored versions and rejects a dependency transaction that
+would upgrade or downgrade one. A rolling repository can therefore require an
+explicitly reviewed compatible image or repository snapshot. Preparation uses a
+temporary package cache and preserves the image's existing package cache. Debian
+`apt` bootstrap dependencies are rejected on Arch instead of translating package
+names. This image support does not grant mounts, devices or kernel privileges;
+declare supported directory state separately and qualify its private-verifier
+handoff before running an original task.
+
 Prebuilt images, malformed
 Dockerfile `SHELL`, selected build targets, floating Git dependencies and
 unrecognized shell/installer forms need explicit adaptation. An upstream asset
@@ -645,6 +672,31 @@ preserved; cross-root hardlinks and special files fail explicitly. The aggregate
 limit is 256 MiB and 100,000 entries, across at most 16 roots. Declare all state
 needed by private verification, including installation metadata when relevant;
 undeclared system mutations do not appear in the fresh verifier.
+
+For an ordinary Python virtual environment with an image-owned interpreter,
+declare the actual executable and any single-hop image alias it references:
+
+```toml
+[environment]
+workspace_reference_files = ["/usr/local/bin/python3", "/usr/local/bin/python3.11"]
+
+[environment.reference_file_symlinks]
+"/usr/local/bin/python3" = "python3.11"
+```
+
+Inspect the original image first; these are examples, not portable Python paths.
+Keep the literal link targets created by the task. Each reference group admits
+at most 16 exact external leaves, outside all transferred and protected paths.
+Alias targets are either canonical absolute paths or a single relative basename;
+chains and cycles are rejected. Each group containing an alias must also list
+its regular target. The same alias declaration can accompany
+`mutable_path_reference_files` for external interpreters in mutable roots.
+Reference inspection shares a 256 MiB executable-byte budget per group.
+Workspaces with references also have a 256 MiB/100,000-entry archive budget.
+The required `artifacts/workspace-references.json` binds the archive to the
+observed references. A changed alias, executable, mode or owner fails handoff
+before workspace replacement; inspection is repeated after extraction. This
+does not transfer system executables or preinstall task-requested packages.
 
 For a task whose agent must start an HTTP service:
 

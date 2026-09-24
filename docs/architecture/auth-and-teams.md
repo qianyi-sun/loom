@@ -57,6 +57,13 @@ Changing the current team requires a membership unless the user is a platform
 administrator. A team can be disabled, have new submissions paused, or have
 public registration enabled or disabled through the admin team routes.
 
+The signed-out account-request form discovers eligible teams through the public
+team list. It distinguishes loading, a successful empty result, and discovery
+failure. Failure shows a fixed safe message and a retry action rather than claiming
+that no teams allow registration. Retry is disabled while the list request is
+pending; recovery preserves the requested username and requires an explicit team
+selection. Refreshing a list that removes the selected team clears that selection.
+
 ## Platform administrator changes
 
 Existing active platform administrators (session or user-owned token) and the
@@ -222,3 +229,17 @@ and compatibility invites in
 
 For attack assumptions and security invariants, see the
 [authentication threat model](auth-threat-model.md).
+
+## Access navigation and audit filters
+
+Team access tabs use `/admin/access?tab=requests|accounts|teams|invites|tokens|audit`,
+with role-specific visibility unchanged. Requests reviews new account/team
+applications; Accounts handles existing-account password recovery. Settings links
+Create CLI token directly to `?tab=tokens`.
+
+The Audit tab defaults to access/account/team/token events. Full system audit
+remains available. Scope, actor/action substrings, UTC date bounds, and cursor
+pagination are applied server-side before the page limit. Date-time API inputs
+without an offset are interpreted as UTC. Filters and page history are retained
+in the URL; changing a filter clears the old cursor. Ordinary users and team
+owners gain no platform-audit permission from these controls.

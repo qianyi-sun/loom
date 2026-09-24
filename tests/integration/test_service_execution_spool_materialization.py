@@ -698,10 +698,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
 
         if legacy_repair:
             from loom_control_plane.service_execution_accounting_repair import repair_accounting
-            from loom_service.delivery_export import (
-                build_canonical_trial_bundle_archive,
-                canonical_bundle_from_artifact,
-            )
+            from loom_service.delivery_export import build_canonical_trial_bundle_archive
+            from loom_service.trial_bundles import canonical_bundle_from_artifact
 
             monkeypatch.setattr(materializer_module, "read_service_execution_llm_calls", ledger_reader)
             original_objects = {
@@ -800,10 +798,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             assert current is not None and current.source_cleanup_state == "complete"
 
         if terminus and not legacy_repair:
-            from loom_service.delivery_export import (
-                build_canonical_trial_bundle_archive,
-                canonical_bundle_from_artifact,
-            )
+            from loom_service.delivery_export import build_canonical_trial_bundle_archive
+            from loom_service.trial_bundles import canonical_bundle_from_artifact
 
             # Exercise the actual SQL selector and MinIO-backed repair after
             # source GC. The request started before materialization but its

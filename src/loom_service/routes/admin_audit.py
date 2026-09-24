@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,12 +35,45 @@ async def list_admin_audit_events(
     sc: AdminSessionAndCtx,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query()] = None,
+    scope: Literal["all", "access"] = "all",
+    actor: Annotated[str | None, Query(max_length=200)] = None,
+    action: Annotated[str | None, Query(max_length=200)] = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> dict[str, Any]:
     session, _ctx = sc
     stmt = select(AdminAuditEvent).order_by(
         AdminAuditEvent.created_at.desc(),
         AdminAuditEvent.id.desc(),
     )
+    # Date/time inputs without an offset are interpreted as UTC, matching the UI.
+    if start is not None:
+        start = start.replace(tzinfo=UTC) if start.tzinfo is None else start.astimezone(UTC)
+    if end is not None:
+        end = end.replace(tzinfo=UTC) if end.tzinfo is None else end.astimezone(UTC)
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=400, detail="start must not be after end")
+    if scope == "access":
+        # Human access emitters use these target types. Managed owner/login
+        # events target an environment, so include their explicit access actions.
+        stmt = stmt.where(or_(
+            AdminAuditEvent.target_type.in_([
+                "user", "team", "token", "invite", "team_registration",
+                "registration_request", "password_reset_request",
+            ]),
+            AdminAuditEvent.action.in_([
+                "managed_environment.owner.enroll", "managed_environment.owner.revoke",
+                "managed_environment.login.issue",
+            ]),
+        ))
+    if actor:
+        stmt = stmt.where(AdminAuditEvent.actor.contains(actor, autoescape=True))
+    if action:
+        stmt = stmt.where(AdminAuditEvent.action.contains(action, autoescape=True))
+    if start is not None:
+        stmt = stmt.where(AdminAuditEvent.created_at >= start)
+    if end is not None:
+        stmt = stmt.where(AdminAuditEvent.created_at <= end)
     if cursor is not None:
         try:
             cursor_id = UUID(cursor)

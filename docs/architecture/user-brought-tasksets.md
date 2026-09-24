@@ -139,3 +139,19 @@ The service routes are implemented in
 [`src/loom_service/routes/tasksets.py`](../../src/loom_service/routes/tasksets.py).
 Manifest validation and materialization live under `src/loom/taskset_*`, and
 the persistence model is in [`src/loom/db/schema.py`](../../src/loom/db/schema.py).
+
+## Web discovery and import review
+
+Task sets, Tasks, and Benchmarks link to one another as task sources. The task-set
+list searches the complete visible collection locally; the API currently returns
+that collection without a page limit. Names are shown alongside source IDs and
+creation times. Details show the readable name and a preview of the first five
+materialized task IDs after the normal visibility check. Configure a batch opens
+the trajectory form with that task set selected.
+
+The submit page places manifest guidance before file selection and reviews parsed YAML/JSON task-set identity, declared purpose, source type, verifier, task template, task limit, and selected filenames/sizes before upload. Syntax, duplicate YAML fields, and required identity/source fields are checked locally. Changing files invalidates that review. This is not a claim that the
+manifest has passed complete server validation; import validation and status remain
+server-owned. The Errors tab labels retained **samples**: only the first 50 are
+stored, and reaching 50 can mean additional errors exist. The sample count is
+never presented as the total number of failures. Users can correct the reported
+input and rebuild, or provide the task-set ID/status reason for diagnosis.

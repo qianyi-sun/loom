@@ -3,10 +3,8 @@ from uuid import uuid4
 import pytest
 
 from loom.db.schema import Trial
-from loom_service.delivery_export import (
-    InvalidDeliveryBatchFamilyError,
-    _object_ref_for_trial,
-)
+from loom_service.delivery_export import _object_ref_for_trial
+from loom_service.delivery_export_errors import InvalidDeliveryBatchFamilyError
 
 
 def test_delivery_export_rejects_persisted_uri_outside_trial_identity() -> None:

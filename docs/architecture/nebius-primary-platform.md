@@ -294,6 +294,25 @@ backup dump and upload containers retain their separate database/storage access.
 Management database keys are newly generated once, persisted privately and reused
 on retry; regenerating them is not a supported update/recovery operation.
 
+The protected installer's `nebius_management_bootstrap` stage creates only its
+fixed management Namespace and the four generated management Secrets. It records
+create intent before the Namespace POST, reconciles lost replies by readback
+without retry, and freezes the Namespace UID before credential delivery. Existing
+untracked namespaces are not adopted. Restricted Pod security and installation
+ownership are checked at credential-write boundaries, not merely at entry.
+The HTTPS transport requires explicit trusted TLS/authentication, disables HTTP
+retries/redirects and does not load ambient kubeconfig or credential plugins.
+
+An outer private bootstrap journal records the material-stage intent outside the
+credential directory. Once that stage starts, missing material journals or loss
+of the entire credential directory blocks recovery instead of regenerating keys.
+An interruption between recording intent and creating the material journal also
+requires explicit recovery. The caller must independently detect loss of the
+entire installation state tree; it must not reinterpret that loss as a new install.
+The receipt contains namespace/Secret UIDs, not credential material. This stage
+does not install runtime authority, supplied cloud/publication/backup credentials,
+database workloads or public routes, and does not establish management readiness.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

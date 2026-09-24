@@ -35,14 +35,10 @@ from loom.db.schema import (
 )
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
-from loom_service.delivery_export import (
-    CanonicalTrialBundle,
-    CanonicalTrialBundleFile,
-    CorruptDeliveryObjectsError,
-    ObjectRef,
-    build_canonical_trial_bundle_archive,
-)
+from loom_service.delivery_export import build_canonical_trial_bundle_archive
+from loom_service.delivery_export_errors import CorruptDeliveryObjectsError
 from loom_service.delivery_export_tb2_v2 import SECRET_PATTERNS
+from loom_service.trial_bundles import CanonicalTrialBundle, CanonicalTrialBundleFile, ObjectRef
 
 
 def _assert_no_secret_patterns(text: str) -> None:
