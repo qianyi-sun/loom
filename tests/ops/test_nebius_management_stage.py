@@ -35,6 +35,14 @@ class PhaseAPI:
 
     def default_resource(self, doc):
         value = copy.deepcopy(doc)
+        if doc["kind"] == "Job":
+            uid = str(uuid4())
+            value["metadata"]["uid"] = uid
+            value["spec"]["selector"] = {"matchLabels": {"batch.kubernetes.io/controller-uid": uid}}
+            value["spec"]["template"]["metadata"]["labels"].update({
+                "controller-uid": uid, "batch.kubernetes.io/controller-uid": uid,
+                "job-name": doc["metadata"]["name"], "batch.kubernetes.io/job-name": doc["metadata"]["name"],
+            })
         if self.default_change:
             self.default_change(value)
         return value
@@ -44,7 +52,8 @@ class PhaseAPI:
         if self.failure == "before":
             raise OSError("private-request-detail")
         value = self.default_resource(doc)
-        value["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+        value["metadata"].setdefault("uid", str(uuid4()))
+        value["metadata"]["resourceVersion"] = "1"
         self.resources[self.key(doc)] = value
         if self.failure == "after":
             raise OSError("private-response-detail")
@@ -232,7 +241,10 @@ def test_workload_defaulting_cannot_expand_runtime_privileges(inputs, tmp_path, 
 
 
 def test_phase_readiness_is_read_only_and_requires_current_rollout_generation(inputs, tmp_path):
-    from scripts.ops.nebius_management_stage import management_phase_ready, stage_management_resources
+    from scripts.ops.nebius_management_stage import (
+        management_phase_ready,
+        stage_management_resources,
+    )
 
     rendered, binding, api = inputs
     args = dict(rendered=rendered, phase="40-services.yaml", binding=binding, api=api, state_dir=tmp_path / "services")
@@ -254,7 +266,11 @@ def test_phase_readiness_is_read_only_and_requires_current_rollout_generation(in
 
 
 def test_ready_counts_cannot_hide_replaced_or_mutated_workload(inputs, tmp_path):
-    from scripts.ops.nebius_management_stage import ManagementStageError, management_phase_ready, stage_management_resources
+    from scripts.ops.nebius_management_stage import (
+        ManagementStageError,
+        management_phase_ready,
+        stage_management_resources,
+    )
 
     rendered, binding, api = inputs
     args = dict(rendered=rendered, phase="40-services.yaml", binding=binding, api=api, state_dir=tmp_path / "services")
@@ -269,7 +285,10 @@ def test_ready_counts_cannot_hide_replaced_or_mutated_workload(inputs, tmp_path)
 
 
 def test_database_readiness_requires_matching_controller_revisions(inputs, tmp_path):
-    from scripts.ops.nebius_management_stage import management_phase_ready, stage_management_resources
+    from scripts.ops.nebius_management_stage import (
+        management_phase_ready,
+        stage_management_resources,
+    )
 
     rendered, binding, api = inputs
     args = dict(rendered=rendered, phase="20-database.yaml", binding=binding, api=api, state_dir=tmp_path / "database")
@@ -291,3 +310,26 @@ def test_readiness_never_stages_missing_state_or_claims_backup_and_public_proof(
     with pytest.raises(ManagementStageError):
         management_phase_ready(rendered=rendered, phase=phase, binding=binding, api=api, state_dir=tmp_path / "missing")
     assert not api.creates
+
+
+def test_migration_readiness_requires_complete_and_failed_job_is_never_retried(inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import (
+        ManagementStageError,
+        management_phase_ready,
+        stage_management_resources,
+    )
+
+    rendered, binding, api = inputs
+    args = dict(rendered=rendered, phase="30-migrate.yaml", binding=binding, api=api, state_dir=tmp_path / "migration")
+    stage_management_resources(**args)
+    assert management_phase_ready(**args) is False
+    job = next(iter(api.resources.values()))
+    job["status"] = {"succeeded": 1}
+    assert management_phase_ready(**args) is False
+    job["status"]["conditions"] = [{"type": "Complete", "status": "True"}]
+    assert management_phase_ready(**args) is True
+    job["status"]["conditions"] = [{"type": "Failed", "status": "True"}]
+    for _ in range(2):
+        with pytest.raises(ManagementStageError, match="migration failed"):
+            management_phase_ready(**args)
+    assert len(api.creates) == 1

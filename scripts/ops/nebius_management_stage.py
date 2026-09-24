@@ -214,6 +214,24 @@ def _comparison_snapshot(document: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _validate_record(record: dict[str, Any], identity: dict[str, Any], documents: dict[str, dict[str, Any]]) -> None:
+    if (not isinstance(record, dict) or set(record) != {*identity, "operation_id", "resources"}
+            or any(record[key] != value for key, value in identity.items())
+            or str(UUID(record["operation_id"])) != record["operation_id"] or UUID(record["operation_id"]).int == 0
+            or set(record["resources"]) != set(documents)):
+        raise ManagementStageError("management phase journal differs")
+    for key, doc in documents.items():
+        desired = copy.deepcopy(doc)
+        desired["metadata"].setdefault("annotations", {})[_MARKER] = record["operation_id"]
+        item = record["resources"][key]
+        if (set(item) != {"desired", "expected", "status", "uid", "observed"}
+                or item["desired"] != desired or item["status"] not in {"prepared", "create_intent", "created"}
+                or not _contains(item["expected"], _canonical_quantities(desired))
+                or (item["status"] == "created") != (item["uid"] is not None and item["observed"] is not None)
+                or (item["status"] != "created" and (item["uid"] is not None or item["observed"] is not None))):
+            raise ManagementStageError("management resource journal differs")
+
+
 def stage_management_resources(*, rendered: RenderedManagement, phase: str, binding: ManagementBinding,
                                api: ManagementStageAPI, state_dir: Path) -> dict[str, Any]:
     """Freeze all defaults before creating one phase; unknown writes only read back."""
@@ -238,22 +256,8 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
                                       "status": "prepared", "uid": None, "observed": None}
                 record = {**identity, "operation_id": operation, "resources": resources}
                 private_state._atomic_json(path, record)
-            if (not isinstance(record, dict) or set(record) != {*identity, "operation_id", "resources"}
-                    or any(record[key] != value for key, value in identity.items())
-                    or str(UUID(record["operation_id"])) != record["operation_id"] or UUID(record["operation_id"]).int == 0
-                    or set(record["resources"]) != set(documents)):
-                raise ManagementStageError("management phase journal differs")
             # Validate every item before the first write, including late entries.
-            for key, doc in documents.items():
-                desired = copy.deepcopy(doc)
-                desired["metadata"].setdefault("annotations", {})[_MARKER] = record["operation_id"]
-                item = record["resources"][key]
-                if (set(item) != {"desired", "expected", "status", "uid", "observed"}
-                        or item["desired"] != desired or item["status"] not in {"prepared", "create_intent", "created"}
-                        or not _contains(item["expected"], _canonical_quantities(desired))
-                        or (item["status"] == "created") != (item["uid"] is not None and item["observed"] is not None)
-                        or (item["status"] != "created" and (item["uid"] is not None or item["observed"] is not None))):
-                    raise ManagementStageError("management resource journal differs")
+            _validate_record(record, identity, documents)
             for item in record["resources"].values():
                 api.verify_identity(binding)
                 actual = api.get_resource(item["desired"])
@@ -289,3 +293,52 @@ def stage_management_resources(*, rendered: RenderedManagement, phase: str, bind
         raise
     except Exception:
         raise ManagementStageError("management staging unavailable; preserve recovery evidence") from None
+
+
+def management_phase_ready(*, rendered: RenderedManagement, phase: str, binding: ManagementBinding,
+                           api: ManagementStageAPI, state_dir: Path) -> bool:
+    """Observe one already-staged workload; never create, retry or replace it.
+
+    A healthy Deployment is not public authentication proof. A CronJob is not
+    backup or restore proof; those require the installer's separate checks.
+    """
+    try:
+        if phase not in {"20-database.yaml", "30-migrate.yaml", "40-services.yaml"}:
+            raise ManagementStageError("phase has no management workload readiness proof")
+        documents = _documents(rendered, phase, binding)
+        path = state_dir / "stage.json"
+        if not path.is_file():
+            raise ManagementStageError("management phase recovery evidence missing")
+        identity = {"schema": "loom.nebius-management-stage.v1", "binding": asdict(binding),
+                    "revision": rendered.revision, "phase": phase}
+        with private_state._locked_state(state_dir):
+            record = json.loads(private_state._private_read(path, limit=4 * 1024 * 1024))
+            _validate_record(record, identity, documents)
+            ready = True
+            for item in record["resources"].values():
+                if item["status"] != "created":
+                    raise ManagementStageError("management phase was not fully staged")
+                api.verify_identity(binding)
+                actual = api.get_resource(item["desired"])
+                if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                    raise ManagementStageError("management workload identity or configuration differs")
+                kind, status = actual["kind"], actual.get("status", {})
+                if kind == "Job":
+                    conditions = {row["type"]: row["status"] for row in status.get("conditions", [])}
+                    if conditions.get("Failed") == "True":
+                        raise ManagementStageError("management migration failed; explicit recovery required")
+                    ready &= conditions.get("Complete") == "True" and status.get("succeeded", 0) >= actual["spec"].get("completions", 1)
+                elif kind in {"StatefulSet", "Deployment"}:
+                    replicas = actual["spec"].get("replicas", 1)
+                    ready &= (replicas > 0 and status.get("observedGeneration", 0) >= actual["metadata"].get("generation", 1)
+                              and all(status.get(field, 0) == replicas for field in ("replicas", "readyReplicas", "updatedReplicas")))
+                    if kind == "StatefulSet":
+                        ready &= bool(status.get("currentRevision")) and status.get("currentRevision") == status.get("updateRevision")
+                    else:
+                        ready &= status.get("availableReplicas", 0) == replicas and status.get("unavailableReplicas", 0) == 0
+            api.verify_identity(binding)
+            return ready
+    except ManagementStageError:
+        raise
+    except Exception:
+        raise ManagementStageError("management readiness unavailable; preserve recovery evidence") from None

@@ -28,6 +28,7 @@ def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path,
     from scripts.ops.nebius_management_stage import (
         HTTPSManagementStageAPI,
         ManagementStageError,
+        management_phase_ready,
         stage_management_resources,
     )
 
@@ -59,6 +60,10 @@ def test_all_fixed_management_phases_preserve_real_defaulting_and_uids(tmp_path,
                 first = stage_management_resources(**arguments)
                 assert stage_management_resources(**arguments) == first
                 assert all(first["resource_uids"].values())
+                if phase in {"20-database.yaml", "30-migrate.yaml", "40-services.yaml"}:
+                    # This disposable API has no integration platform node or
+                    # runtime images. Creating resources cannot prove readiness.
+                    assert management_phase_ready(**arguments) is False
         service = core.read_namespaced_service("loom-postgres", binding.namespace)
         assert service.spec.cluster_ip and service.spec.cluster_ip != "None"
         core.patch_namespace(binding.namespace, {"metadata": {"labels": {
