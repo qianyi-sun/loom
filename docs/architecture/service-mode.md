@@ -337,7 +337,11 @@ The projection carries two durable outputs:
 
 The service detail API uses that projection to set `trajectory_ready`,
 `atif_ready`, and artifact download links. Clients should not infer
-output availability by guessing MinIO keys.
+output availability by guessing MinIO keys. An explicit ATIF URI marks it
+ready; the legacy timestamp fallback requires a terminal trial that both
+started and finished. A build failure or cancellation before execution does
+not advertise an ATIF download merely because it has a completion timestamp.
+These flags are projections, not live object-store availability checks.
 
 The same detail API also exposes user-facing diagnosis and debug evidence:
 

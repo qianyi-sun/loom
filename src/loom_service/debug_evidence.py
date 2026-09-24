@@ -675,8 +675,9 @@ def build_trial_debug_evidence(
     generated_at = now or datetime.now(UTC)
     trajectory_index = trial.trajectory_index or {}
     is_terminal = trial.state in {"succeeded", "failed", "cancelled"}
+    # Terminal preparation failures have no execution for the legacy finalize path.
     atif_ready = bool(trajectory_index.get("atif_uri")) or (
-        is_terminal and trial.finished_at is not None
+        is_terminal and trial.started_at is not None and trial.finished_at is not None
     )
     trajectory_ready = bool(trajectory_index.get("trajectory_uri")) or (
         trial.started_at is not None
