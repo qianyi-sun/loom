@@ -23,6 +23,7 @@ from loom.mutable_paths import (
     MAX_MUTABLE_ENTRIES,
     validate_mutable_paths,
     validate_mutable_reference_files,
+    validate_reference_file_symlinks,
 )
 from loom.trial.workspace import WorkspaceStagingPolicy
 from loom.trial.workspace_snapshot import (
@@ -71,18 +72,36 @@ class _ReferenceInspector(Protocol):
     ) -> dict[str, int | str]: ...
 
 
+@runtime_checkable
+class _SymlinkInspector(Protocol):
+    async def inspect_reference_symlink(self, path: PurePosixPath) -> str: ...
+
+
 async def _reference_evidence(
     driver: Driver, references: tuple[PurePosixPath, ...],
+    *, reference_symlinks: dict[str, str] | None = None,
 ) -> list[dict[str, int | str]]:
     """Inspect through trusted native RPC, never task-modifiable userland."""
     if not references:
         return []
     if not isinstance(driver, _ReferenceInspector):
         raise WorkspaceSnapshotError("driver lacks trusted mutable path reference inspection")
+    aliases = {str(path): reference_symlinks[str(path)] for path in references
+               if reference_symlinks and str(path) in reference_symlinks}
+    validate_reference_file_symlinks(aliases, groups=(references,))
+    if aliases and not isinstance(driver, _SymlinkInspector):
+        raise WorkspaceSnapshotError("driver lacks trusted reference symlink inspection")
     records: list[dict[str, int | str]] = []
     remaining = MAX_MUTABLE_BYTES
     for path in references:
         try:
+            if str(path) in aliases:
+                assert isinstance(driver, _SymlinkInspector)
+                target = await driver.inspect_reference_symlink(path)
+                if target != aliases[str(path)]:
+                    raise WorkspaceSnapshotError(f"reference symlink differs from declaration: {path}")
+                records.append({"path": str(path), "target": target})
+                continue
             record = await driver.inspect_reference_file(path, max_bytes=remaining)
         except DriverError as exc:
             raise WorkspaceSnapshotError(f"cannot fingerprint mutable path reference file: {path}") from exc
@@ -137,6 +156,7 @@ async def export_mutable_paths(
     driver: Driver, paths: tuple[PurePosixPath, ...], directory: Path, *, workdir: PurePosixPath,
     preserve_acls: bool = False,
     reference_files: tuple[PurePosixPath, ...] = (),
+    reference_symlinks: dict[str, str] | None = None,
 ) -> None:
     validate_mutable_paths(paths, workdir=workdir)
     validate_mutable_reference_files(reference_files, paths=paths, workdir=workdir)
@@ -157,7 +177,7 @@ async def export_mutable_paths(
         _check_totals(records)
     # Export commands execute task-owned utilities. Inspect references only
     # after every source command has completed.
-    references = await _reference_evidence(driver, reference_files)
+    references = await _reference_evidence(driver, reference_files, reference_symlinks=reference_symlinks)
     temporary = directory / "manifest.json.tmp"
     document = {"schema_version": 2 if reference_files else 1, "paths": records,
                 **({"reference_files": references} if reference_files else {})}
@@ -169,6 +189,7 @@ async def import_mutable_paths(
     driver: Driver, paths: tuple[PurePosixPath, ...], directory: Path, *, workdir: PurePosixPath,
     preserve_acls: bool = False,
     reference_files: tuple[PurePosixPath, ...] = (),
+    reference_symlinks: dict[str, str] | None = None,
 ) -> None:
     validate_mutable_paths(paths, workdir=workdir)
     validate_mutable_reference_files(reference_files, paths=paths, workdir=workdir)
@@ -181,7 +202,7 @@ async def import_mutable_paths(
     except (OSError, ValueError) as exc:
         raise WorkspaceSnapshotError("mutable paths manifest is missing or invalid") from exc
     records: list[dict[str, int | str]] = []
-    references = await _reference_evidence(driver, reference_files)
+    references = await _reference_evidence(driver, reference_files, reference_symlinks=reference_symlinks)
     # Validate every archive before changing any verifier directory.
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
@@ -220,5 +241,5 @@ async def import_mutable_paths(
         await _import_workspace_archive(
             driver, directory / f"{index}.tar", root, preserve_acls=preserve_acls,
         )
-    if await _reference_evidence(driver, reference_files) != references:
+    if await _reference_evidence(driver, reference_files, reference_symlinks=reference_symlinks) != references:
         raise WorkspaceSnapshotError("mutable path reference changed during restore")

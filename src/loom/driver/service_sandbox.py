@@ -378,6 +378,7 @@ class ServiceSandboxDriver:
     async def import_workspace_archive(
         self, src: Path, dst: PurePosixPath, *, policy: WorkspaceStagingPolicy | None = None,
         preserve_acls: bool = False,
+        external_reference_files: frozenset[PurePosixPath] = frozenset(),
     ) -> None:
         # workspace_snapshot validates/strips the archive in the trusted agent
         # before invoking this hook. The sandbox never chooses verifier inputs.
@@ -389,7 +390,8 @@ class ServiceSandboxDriver:
         if policy is not None:
             from loom.trial.workspace_snapshot import _prepare_workspace_import
 
-            await _prepare_workspace_import(self, src, dst, policy)
+            await _prepare_workspace_import(self, src, dst, policy,
+                                            external_reference_files=external_reference_files)
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         destination, archive = shlex.quote(str(dst)), shlex.quote(str(remote))
         try:

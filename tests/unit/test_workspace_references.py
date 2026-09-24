@@ -46,9 +46,10 @@ class Inspector:
         assert path == LEAF and max_bytes >= 6
         return dict(self.record)
 
-    async def import_workspace_archive(self, src, dst, *, policy, external_reference_files):
+    async def import_workspace_archive(self, src, dst, *, policy, preserve_acls, external_reference_files):
         from loom.trial.workspace_snapshot import _validate_workspace_archive
         assert dst == ROOT and external_reference_files == frozenset(REFERENCES)
+        assert preserve_acls is False
         _validate_workspace_archive(src, policy, root=dst, external_reference_files=external_reference_files)
         self.imported = True
         if self.mutate_on_import:
