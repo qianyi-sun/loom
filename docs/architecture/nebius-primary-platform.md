@@ -307,6 +307,36 @@ does not install the shared ingress, provision IAM/DNS/Secrets, verify a GitHub
 publication, or perform a live rollout. Those activation prerequisites and
 installed multi-owner acceptance remain separate from manifest generation.
 
+### Management namespace authority
+
+The optional protected `foundation.namespace_authority` binds an installation
+UUID and `loom-nebius-management[-suffix]` namespace to the fixed
+`loom-management-provisioner` ServiceAccount. Child rendering freezes the
+installation marker on each new namespace and a provisioner RoleBinding after
+the namespace creates, before cloud resources or Secrets. Imported namespaces
+cannot use this bootstrap path; existing operation plans retain their frozen
+documents. Omitting the field preserves the prior explicit-authority contract.
+
+`loom.nebius_management_authority.render_namespace_authority` produces separate
+installer-owned RBAC and Kubernetes v1 ValidatingAdmissionPolicy documents.
+The bootstrap grant allows namespace creation/metadata reads, RoleBinding
+creation/reads and binding one installation-specific namespaced resource role.
+It grants no cluster-wide Secret read, namespace update/delete, Node access,
+token issuance, exec or role escalation. Namespaced grants cover the existing
+provisioner and retained cleanup; they do not allow PVC deletion.
+
+Fail-closed admission limits the exact manager subject to generated namespace
+names, installation/environment/incarnation markers and restricted Pod Security.
+RoleBindings require that namespace ownership and either the exact provisioner
+subject/role or the existing local execution-observer binding. A namespace prefix
+alone never grants access. Cluster administrators remain trusted; runtime and
+child Pods must never receive their credentials.
+
+This pure renderer does not install authority. The protected installer must
+verify API support, policy type checking and actual denial probes before activating
+management. Applying RBAC without effective admission is not safe. Live grant
+installation and connected management acceptance remain separate work.
+
 ### Managed provisioning requests
 
 `LOOM_SVC_ENVIRONMENT_MANAGEMENT_CONFIG_FILE` optionally enables the request

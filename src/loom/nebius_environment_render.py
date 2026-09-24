@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from loom.nebius_environment_contract import EnvironmentRegistrationV1, FoundationBinding
+from loom.nebius_management_authority import INSTALLATION_LABEL, namespace_binding
 from loom.nebius_platform_render import (
     NebiusPlatformError,
     _build_platform,
@@ -161,9 +162,16 @@ def render_environment(
 ) -> RenderedEnvironment:
     """Render only the registered child, preserving standalone platform behavior."""
     row = registration
+    if foundation.namespace_authority is not None and row.binding_mode == "imported":
+        raise ValueError("namespace authority cannot adopt imported bindings")
     config = _configuration(row, foundation)
     files = _build_platform(config, candidate, profile, keyring, repo_root=repo_root)
     files["00-namespaces.yaml"] = [_namespace(ns) for ns in row.namespaces]
+    if foundation.namespace_authority is not None:
+        authority = foundation.namespace_authority
+        for doc in files["00-namespaces.yaml"]:
+            doc["metadata"]["labels"][INSTALLATION_LABEL] = str(authority.installation_id)
+        files["00-namespaces.yaml"].extend(namespace_binding(authority, ns) for ns in row.namespaces)
     files["60-execution.yaml"] = _closed_execution(row)
     files["70-public.yaml"] = [
         _service("loom-web", row.application_namespace, 8080), _shared_ingress(row, foundation),
