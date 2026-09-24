@@ -45,10 +45,10 @@ def legacy_result():
     })
 
 
-def build(runtime, *, exception=True):
+def build(runtime, *, exception=True, verifier_body=b'{"rewards":{"passed":0}}'):
     return build_canonical_events(
         trial_id=uuid4(), task_id="task-1", task_config=_task(), trial_config=_trial(),
-        runtime_result=runtime, trace_body=None, verifier_body=b'{"rewards":{"passed":0}}',
+        runtime_result=runtime, trace_body=None, verifier_body=verifier_body,
         exception_info=ExceptionInfo(exception_type="ServiceExecutionTaskError",
             exception_message="isolated verifier process failed", occurred_at=runtime.finished_at) if exception else None,
     )
@@ -88,3 +88,8 @@ def test_legacy_recovery_does_not_accept_other_reward_drift(change):
             update={"relative_path": "diagnostics/other.json"}), runtime.outputs[1])})
     with pytest.raises(MaterializationIntegrityError, match="verifier_reward_drift"):
         build(runtime, exception=change != "missing_exception")
+
+
+def test_legacy_recovery_requires_the_captured_verifier_score_body():
+    with pytest.raises(MaterializationIntegrityError, match="verifier_output_missing"):
+        build(legacy_result(), verifier_body=None)
