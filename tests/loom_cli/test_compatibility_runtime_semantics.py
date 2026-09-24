@@ -41,7 +41,7 @@ def test_harbor_bare_shell_cmd_records_reference_runner_conversion(tmp_path, cap
 @pytest.mark.parametrize("directive", [
     'CMD ["bash", "-c", "initialize"]', 'CMD ["bash", "--login"]',
     'CMD ["/custom/bash"]', 'CMD ["/start.sh"]', 'CMD bash',
-    'CMD ["bash", 1]', 'CMD ["bash",]', 'ENTRYPOINT ["bash"]',
+    'CMD ["bash", 1]', 'CMD ["bash",]', 'CMD [["bash"]]', 'ENTRYPOINT ["bash"]',
 ])
 def test_harbor_real_or_unrecognized_startup_still_requires_review(tmp_path, capsys, directive):
     _harbor_bundle(tmp_path, "FROM ubuntu:24.04\n" + directive + "\n")

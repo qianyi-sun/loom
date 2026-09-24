@@ -35,7 +35,10 @@ from loom.nebius_terminus_ingest import (
 )
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.service_execution_materialization import prepare_service_execution_input_manifest
-from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
+from loom.terminal_bench_normalize import (
+    is_terminal_bench_shape,
+    normalize_terminal_bench_task_toml,
+)
 
 
 @dataclass
@@ -122,7 +125,7 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         if not report.diagnostics:
             report.status = "schema_valid"
         return
-    _dockerfile_runtime_requirements(path.parent, task, report)
+    _dockerfile_runtime_requirements(path.parent, task, report, harbor_input=is_terminal_bench_shape(raw))
     _dropped_environment_requirements(raw, normalized, report)
     _dropped_runtime_requirements(raw, normalized, report)
     try:
@@ -268,7 +271,19 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                    source=f"{report.source_location}#verifier.args.script_path")
 
 
-def _dockerfile_runtime_requirements(bundle: Path, task: TaskConfig, report: TaskCompatibilityReport) -> None:
+def _bare_shell_cmd(value: str) -> bool:
+    try:
+        command = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return (isinstance(command, list) and len(command) == 1 and isinstance(command[0], str)
+            and command[0] in {"sh", "/bin/sh", "/usr/bin/sh", "bash", "/bin/bash", "/usr/bin/bash",
+                               "zsh", "/bin/zsh", "/usr/bin/zsh"})
+
+
+def _dockerfile_runtime_requirements(
+    bundle: Path, task: TaskConfig, report: TaskCompatibilityReport, *, harbor_input: bool = False,
+) -> None:
     """Report effective source metadata that preparation/runtime would override.
 
     Follow local stage inheritance, but never infer registry image metadata or
@@ -314,6 +329,17 @@ def _dockerfile_runtime_requirements(bundle: Path, task: TaskConfig, report: Tas
         value = effective.arguments.strip()
         if key != "USER":
             if not value or re.fullmatch(r"\[\s*\]", value):
+                continue
+            if key == "CMD" and harbor_input and _bare_shell_cmd(value):
+                # Pinned Harbor's Docker Compose command replaces image CMD;
+                # its Terminus tmux session independently starts Bash. An image
+                # ENTRYPOINT remains a separate requirement, checked above.
+                report.changes.append({
+                    "field": "environment.dockerfile.CMD", "before": value, "after": None,
+                    "category": "equivalent_conversion", "source_location": f"{dockerfile}:{effective.line}",
+                    "reason": "Harbor replaces the image CMD and Terminus starts Bash independently; "
+                              "this bare-shell default requires no startup initializer.",
+                })
                 continue
             if lifecycle is not None and lifecycle.startup_command:
                 continue  # The declaration records the author's reviewed initializer.

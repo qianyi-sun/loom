@@ -309,6 +309,14 @@ requirements for review. The profile points the verifier at relative
 and prepares a derived Dockerfile for the selected numeric identity.
 Explicit identity and web egress require qualified deployment opt-ins;
 the default runtime remains non-root with gateway-only networking.
+For Harbor-shaped input, a bare JSON `CMD` containing only `sh`, `bash`, or
+`zsh` (including `/bin/` and `/usr/bin/` paths) is recorded as an equivalent
+conversion. The pinned Harbor Docker runner overrides image `CMD`, and its
+Terminus session starts Bash independently, so these defaults do not require
+a service initializer or a different terminal shell. Shell arguments, scripts,
+shell-form commands, authored `ENTRYPOINT`, and native Loom input retain startup
+review diagnostics. Registry-image entrypoints are not inspected by this static
+check and still require source/runtime review before original-task acceptance.
 Packaged `environment/docker-compose.yaml` and the standard `.yml` or
 `compose.yaml` / `compose.yml` variants block profile conversion before derived
 files are written. The compatibility report identifies each source as
