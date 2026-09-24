@@ -925,9 +925,10 @@ async def get_trial(
     # `*_ready` flags so the SPA can avoid rendering a download link
     # that's going to 404. The trajectory exists as soon as the worker
     # starts the trial (first event flushed); ATIF only after finalize.
+    # A build failure or cancellation before execution never reaches finalize.
     is_terminal = trial.state in {"succeeded", "failed", "cancelled"}
     base["atif_ready"] = bool(trajectory_index.get("atif_uri")) or (
-        is_terminal and trial.finished_at is not None
+        is_terminal and trial.started_at is not None and trial.finished_at is not None
     )
     base["trajectory_ready"] = bool(trajectory_index.get("trajectory_uri")) or (
         trial.started_at is not None

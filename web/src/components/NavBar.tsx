@@ -17,12 +17,12 @@ import VersionInfo from "./VersionInfo";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home" },
+  { to: "/getting-started", label: "Getting started" },
   { to: "/batches/new", label: "New batch" },
   { to: "/monitor", label: "Monitor" },
   { to: "/pipelines", label: "Pipelines" },
   { to: "/library", label: "Run Library" },
   { to: "/providers", label: "Providers" },
-  { to: "/getting-started", label: "Getting started" },
 ];
 
 const TEAM_ADMIN_NAV_ITEM = { to: "/admin/access", label: "Team access" };
