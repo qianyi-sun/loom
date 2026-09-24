@@ -194,10 +194,13 @@ def deliver_material(*, binding: ManagementBinding, api: MaterialAPI, state_dir:
         with private_state._locked_state(state_dir):
             api.verify_identity(binding)
             path = state_dir / "material.json"
+            marker = state_dir / "initialized.json"
             identity = {"schema": "loom.nebius-management-material.v1", "binding": asdict(binding)}
             if path.exists() or path.is_symlink():
                 record = json.loads(private_state._private_read(path, limit=1024 * 1024))
             else:
+                if marker.exists() or marker.is_symlink():
+                    raise MaterialError("management material journal missing; preserve initialization evidence")
                 # Check every destination before generation or the first create.
                 if any(api.get_secret(binding.namespace, name) is not None for name in _KEYS):
                     raise MaterialError("untracked management Secret exists; refusing adoption")
@@ -206,6 +209,10 @@ def deliver_material(*, binding: ManagementBinding, api: MaterialAPI, state_dir:
                           "material_sha256": _digest(material),
                           "resources": {name: {"status": "prepared", "uid": None} for name in _KEYS}}
                 _documents(material, binding, record["operation_id"])
+                # Retain independent evidence before material or writes. A crash
+                # between these files is a recovery boundary, never a fresh run.
+                private_state._atomic_json(marker, {**identity, "operation_id": record["operation_id"],
+                                                     "material_sha256": record["material_sha256"]})
                 private_state._atomic_json(path, record)
             if (not isinstance(record, dict)
                     or set(record) != {*identity, "status", "operation_id", "material", "material_sha256", "resources"}
@@ -214,6 +221,12 @@ def deliver_material(*, binding: ManagementBinding, api: MaterialAPI, state_dir:
                     or record["material_sha256"] != _digest(record["material"])
                     or not isinstance(record["resources"], dict) or record["resources"].keys() != _KEYS.keys()):
                 raise MaterialError("management material journal differs")
+            if not marker.exists() and not marker.is_symlink():
+                raise MaterialError("management material journal initialization evidence missing")
+            initialized = json.loads(private_state._private_read(marker))
+            if initialized != {**identity, "operation_id": record["operation_id"],
+                               "material_sha256": record["material_sha256"]}:
+                raise MaterialError("management material journal initialization evidence differs")
             documents = _documents(record["material"], binding, record["operation_id"])
             # Validate the entire retained chain before resuming any writes.
             for item in record["resources"].values():
