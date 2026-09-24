@@ -324,6 +324,20 @@ Python version and verifier dependencies declared by the supported Harbor
 bootstrap. Build-time dependency installation may run as root independently
 of the selected task execution identity.
 
+For the complete Terminal World OpenHands packaging convention, the Terminus
+profile omits the foreign agent cache from the derived Dockerfile and records
+that adaptation in a comment at the omitted stage, preserving parser directives.
+Recognition requires the exact
+`terminalworld-openhands-sdk-cache:1.34.0-py312-musl-v3` image with alias
+`terminalworld_openhands_runtime_cache`, an otherwise empty cache stage, one
+task stage, and a final instruction block of exactly the three copies of `/opt/openhands-python`,
+`/opt/openhands-sdk-venv` and `/opt/openhands-musl-loader` to the same paths.
+The task stage's other instructions and original source file remain intact.
+Partial patterns, extra copies, changed destinations, numeric stage references,
+other cache tags and Dockerfile commands depending on the removed runtime
+require explicit adaptation. This rule does not supply task dependencies or
+download the task's requested artifacts.
+
 The generated `verifier/harbor-offline.sh` removes only recognized online
 bootstrap and runs pytest from the preinstalled verifier environment. Plain pip
 bootstraps retain the base Python interpreter and its task dependencies through

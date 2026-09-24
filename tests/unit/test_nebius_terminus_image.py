@@ -586,7 +586,7 @@ def test_noncanonical_foreign_agent_cache_requires_explicit_adaptation(tmp_path,
     if alteration == 'another_stage':
         original += 'FROM ubuntu:22.04\n'
     source.write_text(original)
-    with pytest.raises(ValueError, match='OpenHands.*explicit'):
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
         prepare_nebius_terminus_image(tmp_path, env)
     assert source.read_text() == original
     assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
@@ -614,7 +614,7 @@ def test_hidden_foreign_runtime_dependencies_are_not_removed(dependency):
     from loom.nebius_terminus_image import _without_packaged_openhands_runtime
 
     original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + dependency + OPENHANDS_COPIES
-    with pytest.raises(ValueError, match='OpenHands.*explicit'):
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
         _without_packaged_openhands_runtime(original)
 
 
@@ -622,5 +622,5 @@ def test_runtime_copies_cannot_precede_implicit_task_dependencies():
     from loom.nebius_terminus_image import _without_packaged_openhands_runtime
 
     original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + OPENHANDS_COPIES + 'RUN cp -a /opt /task-input\n'
-    with pytest.raises(ValueError, match='OpenHands.*explicit'):
+    with pytest.raises(ValueError, match=r'OpenHands.*explicit'):
         _without_packaged_openhands_runtime(original)

@@ -339,10 +339,77 @@ def _bundle_path(staged: Path, value: str, *, directory: bool = False) -> Path:
     return path
 
 
+def _without_packaged_openhands_runtime(original: str) -> str:
+    """Replace only the complete known foreign-agent packaging convention.
+
+    This runs only in the explicitly selected Terminus preparation profile.
+    The original Dockerfile is retained; arbitrary stages or task dependencies
+    on the foreign runtime require a separately reviewed adaptation.
+    """
+    instructions = dockerfile_instructions(original)
+    image = "terminalworld-openhands-sdk-cache:1.34.0-py312-musl-v3"
+    alias = "terminalworld_openhands_runtime_cache"
+    if not any("terminalworld-openhands-sdk-cache" in item.arguments.lower()
+               or alias in item.arguments.lower()
+               for item in instructions):
+        return original
+    message = "nebius-terminus: noncanonical OpenHands cache requires explicit adaptation"
+    if (len(instructions) < 2 or instructions[0].keyword != "FROM"
+            or instructions[0].arguments != f"{image} AS {alias}"
+            or instructions[1].keyword != "FROM"
+            or sum(item.keyword == "FROM" for item in instructions) != 2):
+        raise ValueError(message)
+    paths = ("/opt/openhands-python", "/opt/openhands-sdk-venv", "/opt/openhands-musl-loader")
+    expected = {f"--from={alias} {path} {path}" for path in paths}
+    # Match the scanner's physical LF boundaries; Unicode separators may be
+    # ordinary data in a retained shell command or heredoc.
+    physical = original.split("\n")
+    lines = [line + "\n" for line in physical[:-1]] + [physical[-1]]
+
+    def span(index: int) -> range:
+        start = instructions[index].line - 1
+        end = instructions[index + 1].line - 1 if index + 1 < len(instructions) else len(lines)
+        return range(start, end)
+
+    seen: set[str] = set()
+    removed = {0}
+    for index, item in enumerate(instructions[1:], 1):
+        if item.keyword == "COPY" and item.arguments in expected:
+            # Later instructions can depend implicitly on the copied contents,
+            # e.g. by copying all of /opt into a task input directory.
+            if item.arguments in seen or index < len(instructions) - len(expected):
+                raise ValueError(message)
+            seen.add(item.arguments)
+            removed.add(index)
+        else:
+            # Headers omit heredoc bodies. Inspect both the complete physical
+            # span and the joined header so neither form can hide a dependency.
+            source = item.arguments + "\n" + "".join(lines[line] for line in span(index))
+            references = re.findall(r'''\bfrom\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))''',
+                                    item.arguments, re.I)
+            if (alias in source.lower() or "terminalworld-openhands-sdk-cache" in source.lower()
+                    or any(path in source for path in paths)
+                    or any("".join(ref).isdigit() for ref in references)):
+                raise ValueError(message)
+    if seen != expected:
+        raise ValueError(message)
+    dropped: set[int] = set()
+    for index in removed:
+        dropped.update(span(index))
+    # A comment before a parser directive would disable that directive.
+    comment_line = instructions[0].line - 1
+    return "".join(
+        "# Loom Terminus preparation: omitted the packaged OpenHands runtime cache.\n"
+        if index == comment_line else line if index not in dropped else ""
+        for index, line in enumerate(lines)
+    )
+
+
 def _preparation_dockerfile(
     original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
 ) -> str:
     try:
+        original = _without_packaged_openhands_runtime(original)
         instructions = dockerfile_instructions(original)
     except DockerfileParseError as exc:
         raise ValueError(f"nebius-terminus: {exc}") from exc
