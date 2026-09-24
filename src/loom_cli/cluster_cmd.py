@@ -4868,9 +4868,10 @@ def dispatch(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="loom cluster",
         description=(
-            "Manage a Loom deployment on Kubernetes (cluster-deploy.md). "
-            "`loom service` remains the dev/demo path; cluster mode is "
-            "a sibling for production deployments."
+            "Inspect Loom Kubernetes deployments and manage disposable local "
+            "clusters (docs/architecture/cluster-deploy.md). Hosted deployments "
+            "use the Nebius deployment entrypoint; see "
+            "docs/runbooks/nebius-deployment.md."
         ),
     )
     sub = parser.add_subparsers(dest="cluster_cmd", required=True)
