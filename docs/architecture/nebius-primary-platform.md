@@ -313,6 +313,19 @@ The receipt contains namespace/Secret UIDs, not credential material. This stage
 does not install runtime authority, supplied cloud/publication/backup credentials,
 database workloads or public routes, and does not establish management readiness.
 
+The installer's fixed manifest staging primitive consumes only named management
+renderer phases. It records server-defaulted intent before a single create per
+resource, freezes returned UIDs and Service allocations, and rejects ambiguous
+absence, replacement or configuration drift. Resource quantities are compared
+exactly across equivalent Kubernetes spellings; generated Job labels must bind to
+that Job's own UID. Namespace and policy checks continue at write boundaries.
+Read-only workload readiness additionally requires the recorded workload identity,
+current controller generation and complete rollout or migration status. It never
+recreates a missing workload or retries a failed migration. Backup schedule and
+Ingress creation are not backup/restore or public authentication proof. Independent
+installer-start evidence, authority qualification, prerequisite delivery and phase
+ordering remain responsibilities of the protected installer, not this primitive.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

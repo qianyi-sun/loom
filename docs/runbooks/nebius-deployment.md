@@ -639,6 +639,15 @@ evidence must still detect loss of the entire state tree. Its receipt means only
 runtime authority, database/migration, backup, HTTPS readiness and protected
 workflow integration remain installer responsibilities.
 
+The internal `nebius_management_stage` primitive stages one fixed management render
+phase with create-only, UID-bound recovery. Preserve each phase's private journal;
+do not rerun with an empty state directory to recover a missing or failed workload.
+Its read-only readiness observation checks the database, migration or service
+against the original recorded identity and current controller state. A staged
+CronJob or Ingress is not evidence of an uploaded backup, restore or working public
+management API. This primitive also has no direct shared-cluster CLI; it does not
+add a management-install operation to the protected workflow on its own.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
