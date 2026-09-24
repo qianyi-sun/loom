@@ -41,6 +41,21 @@ from loom_execution_capacity_collector import kubernetes as accounting
 LIVE_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
 
 
+def _origin_snapshot(document: dict[str, Any]) -> dict[str, Any]:
+    """Preserve origin identity/configuration checks across ordinary kubectl apply."""
+    snapshot = staged_snapshot(document)
+    metadata = snapshot["metadata"]
+    annotations = metadata.get("annotations", {})
+    # The ordinary platform deployer also owns this Service's unchanged routing
+    # declaration. Its client-side apply adds/updates bookkeeping after initial
+    # create-only staging. Ignore only that inert annotation, never the stage
+    # operation/installation markers or any runtime fields. Do not edit journals.
+    annotations.pop("kubectl.kubernetes.io/last-applied-configuration", None)
+    if not annotations:
+        metadata.pop("annotations", None)
+    return snapshot
+
+
 class OperationError(RuntimeError):
     """Payload-free installation failure; never expose inventory or credentials."""
 
@@ -379,7 +394,7 @@ class LiveIngressAPI(KubectlCutoverAPI):
                 self.verify_identity(self.binding)
                 current = self._get(["get", "service", "loom-web-origin", "-n", self.binding.namespace])
                 if (current is None or current["metadata"]["uid"] != origin["uid"]
-                        or staged_snapshot(current) != origin["observed"]):
+                        or _origin_snapshot(current) != _origin_snapshot(origin["observed"])):
                     raise OperationError("original legacy origin differs from staged ownership")
             self._forward_legacy("service/loom-web-origin", 443, check_origin)
         except OperationError:
