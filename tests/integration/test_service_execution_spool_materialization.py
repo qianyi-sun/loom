@@ -20,7 +20,8 @@ from uuid import UUID, uuid4
 import pytest
 import urllib3
 from minio import Minio
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
@@ -48,6 +49,7 @@ from loom_control_plane.service_execution import (
     record_execution_event,
 )
 from loom_control_plane.service_execution_materializer import (
+    MaterializationIntegrityError,
     ServiceExecutionMaterializer,
     run_service_execution_materializer_loop,
 )
@@ -130,15 +132,22 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure",
-    [(False, False, False, False), (True, False, False, False), (True, True, False, False),
-     (True, True, True, False), (True, False, False, True)],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery",
+    [pytest.param(False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, id="verifier-archive-corrupt")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
     legacy_repair: bool,
     prepared_snapshot: bool,
     typed_failure: bool,
+    archival_recovery: bool,
+    corrupt_recovery: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -155,6 +164,14 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         plan = plan.model_copy(update={"output_declarations": (*plan.output_declarations,
             RuntimeOutputDeclarationV1(source_path=".loom/agent/exception.json",
                 relative_path="diagnostics/agent-exception.json", kind="agent_native", required=False))})
+
+    if archival_recovery:
+        exception = {"exception_type": "ServiceExecutionTaskError",
+                     "exception_message": "isolated verifier process failed", "occurred_at": now.isoformat()}
+        plan = plan.model_copy(update={"output_declarations": (
+            RuntimeOutputDeclarationV1(source_path=".loom/verifier/exception.json",
+                relative_path="diagnostics/verifier-exception.json", kind="verifier", required=False),
+            *plan.output_declarations)})
 
     def materializer() -> ServiceExecutionMaterializer:
         # Zero retention/claim TTL advances time locally without waiting a day.
@@ -352,6 +369,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             result["status"] = "task_error"
             result["partial_evidence"] = True
             result["phases"][0]["exit_code"] = 1
+        if archival_recovery:
+            payloads["diagnostics/verifier-exception.json"] = canonical_document(exception)
+            payloads["verifier/output.json"] = b'{"rewards":{"passed":0.0}}'
+            result["status"] = "verifier_error"
+            result["partial_evidence"] = True
+            result["phases"][-1]["exit_code"] = 1
         result.update(
             outputs=[
                 {
@@ -362,7 +385,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 }
                 for declaration in plan.output_declarations
             ],
-            verifier_rewards={"passed": 1.0},
+            verifier_rewards=None if archival_recovery else {"passed": 1.0},
         )
         payloads = {"result.json": canonical_document(result), **dict(sorted(payloads.items()))}
         repository = SqlArtifactCommitRepository(
@@ -477,7 +500,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert current.materialization_error_code == "transient_materialization_error"
                 assert current.cleanup_state == "complete"
                 assert current.deleted_at is not None
-                assert trial.state == ("failed" if typed_failure else "materializing")
+                assert trial.state == ("failed" if typed_failure or archival_recovery else "materializing")
             for key, expected in source_snapshot.items():
                 assert await source_store.get_object(bucket="artifacts", key=key) == expected
         finally:
@@ -486,6 +509,69 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         # Docker may allocate a new ephemeral host port on container restart;
         # reconnect the fresh worker to that same canonical container/storage.
         canonical_store = _store(canonical_container)
+
+        original_outcome = None
+        original_execution = None
+        if archival_recovery:
+            from loom_control_plane import service_execution_materializer as materializer_module
+
+            original_builder = materializer_module.build_canonical_events
+
+            def old_reward_projection(**kwargs):
+                raise MaterializationIntegrityError("verifier_reward_drift")
+
+            with monkeypatch.context() as legacy:
+                legacy.setattr(materializer_module, "build_canonical_events", old_reward_projection)
+                assert await materializer().run_once(lease_id=lease.id)
+            assert materializer_module.build_canonical_events is original_builder
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                trial = await session.get(Trial, trial_id)
+                assert current.materialization_state == "unavailable"
+                assert current.materialization_error_code == "verifier_reward_drift"
+                original_outcome = copy.deepcopy((trial.state, trial.result, trial.finished_at,
+                                                  trial.failure_reason, trial.failure_message, trial.attempt_count))
+                original_execution = (current.desired_state, current.observed_state, current.deleted_at,
+                                      current.finalized_at, current.output_manifest_sha256, current.output_marker_sha256)
+            # No general reopening: the database requires the one-use audited transition.
+            async with sessions() as session:
+                with pytest.raises(DBAPIError, match="terminal materialization state is immutable"):
+                    await session.execute(text("UPDATE execution_leases SET materialization_state='pending', "
+                        "materialization_next_attempt_at=now() WHERE id=:id"), {"id": lease.id})
+                await session.rollback()
+            assert not await materializer().run_once(lease_id=lease.id)
+            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=uuid4())
+            requeues = await asyncio.gather(*(
+                materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+                for _ in range(2)
+            ))
+            assert sorted(requeues) == [False, True]
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current.materialization_recovery_requested_at is not None
+                with pytest.raises(DBAPIError, match="archival recovery requires one diagnosed deleted verifier attempt"):
+                    await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
+                        "WHERE id=:id"), {"id": lease.id})
+                await session.rollback()
+            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+
+        if corrupt_recovery:
+            verifier_key = next(key for key in source_keys if key.endswith("/verifier/output.json"))
+            await source_store.put_object(bucket="artifacts", key=verifier_key,
+                                          body=payloads["verifier/output.json"].replace(b"0.0", b"1.0"))
+            assert await materializer().run_once(lease_id=lease.id)
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                trial = await session.get(Trial, trial_id)
+                assert current.materialization_state == "unavailable"
+                assert current.materialization_error_code == "source_object_digest_mismatch"
+                assert current.canonical_trajectory_sha256 is None
+                assert current.source_cleanup_state == "not_ready"
+                assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
+                        trial.failure_message, trial.attempt_count) == original_outcome
+            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+            assert not await materializer().cleanup_source_once()
+            return
 
         # Crash after object copies but before DB ACK. A fresh worker reclaims the
         # expired persisted claim, re-copies idempotently, and owns the only ACK.
@@ -508,9 +594,14 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
             assert current.materialization_state == "committed"
-            assert current.materialization_attempts == 3
+            assert current.materialization_attempts == 3 + archival_recovery
             assert current.source_cleanup_state == "retained"
-            assert trial.state == ("failed" if typed_failure else "succeeded")
+            assert trial.state == ("failed" if typed_failure or archival_recovery else "succeeded")
+            if archival_recovery:
+                assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
+                        trial.failure_message, trial.attempt_count) == original_outcome
+                assert (current.desired_state, current.observed_state, current.deleted_at,
+                        current.finalized_at, current.output_manifest_sha256, current.output_marker_sha256) == original_execution
             if typed_failure:
                 assert trial.result["exception_info"] == exception
                 assert trial.failure_reason == "task_error"
@@ -536,9 +627,13 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     )
                 )
             )
-            assert len(events) == (27 if legacy_repair else 28 if terminus else 7) + typed_failure
+            assert len(events) == (27 if legacy_repair else 28 if terminus else 7) + typed_failure + archival_recovery
             if typed_failure:
                 assert next(event.payload for event in events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
+            if archival_recovery:
+                assert next(event.payload for event in events if event.kind == "trial_end")["reward"] is None
+                assert next(event.payload for event in events if event.kind == "verifier_end")["result"]["rewards"] == {"passed": 0.0}
+                assert artifact.artifact_metadata["legacy_verifier_archival_recovery"]["error_code"] == "verifier_reward_drift"
             assert len({event.seq for event in events}) == len(events)
 
         if legacy_repair:
@@ -728,7 +823,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert artifact.storage["source_evidence"] == original_evidence
                 assert trial.trajectory_index != original_index
                 corrected_events = list((await session.scalars(select(TrialEvent).where(TrialEvent.trial_id == trial_id))).all())
-                assert len(corrected_events) == 29 + typed_failure
+                assert len(corrected_events) == 29 + typed_failure + archival_recovery
                 if typed_failure:
                     assert next(event.payload for event in corrected_events if event.kind == "trial_error")["error_type"] == "ContextLengthExceededError"
                 assert sum(event.kind == "llm_call" for event in corrected_events) == 7
