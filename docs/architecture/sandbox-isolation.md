@@ -44,7 +44,13 @@ when both the execution class and deployment runtime profile explicitly enable
 The Gateway also requires `LOOM_GW_TASK_EGRESS_CONFIG_FILE`, pointing to a mounted
 JSON object with `protected_cidrs` containing the deployment's actual platform
 and control-plane addresses, including public addresses. Optional
-`maximum_connections` and `maximum_connections_per_lease` default to 64 and 8.
+`maximum_connections` and `maximum_connections_per_lease` default to 64 and 32
+per Gateway process. The runtime proxy also permits at most 32 simultaneous
+tunnels, allowing package clients to retain metadata and redirect connections
+alongside parallel downloads. Explicit lower Gateway limits remain effective;
+an existing deployment configured for eight must update that setting through
+its guarded rollout to use the larger budget. Saturation still rejects new
+connections with `task_egress_capacity_exceeded`.
 No configured file means no task-egress listener authorization.
 The Nebius renderer takes this object from the protected environment's optional
 `task_egress` setting and mounts it into Gateway. It requires exact agreement

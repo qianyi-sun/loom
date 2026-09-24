@@ -137,4 +137,20 @@ func TestTaskEgressPackageConnectionBudgetAndRecovery(t *testing.T) {
 			t.Fatalf("phase completion did not close retained connection: %v", err)
 		}
 	}
+	// The next phase must regain the full budget after all old tunnels stop.
+	broker.setPhase("verifier", time.Now().Add(time.Minute))
+	for i := 0; i < 32; i++ {
+		until := time.Now().Add(5 * time.Second)
+		for {
+			connection, status := connect(hosts[i%len(hosts)])
+			if status == http.StatusOK {
+				connections = append(connections, connection)
+				break
+			}
+			if status != http.StatusTooManyRequests || time.Now().After(until) {
+				t.Fatalf("next phase lost connection %d: %d", i+1, status)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
