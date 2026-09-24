@@ -1,6 +1,6 @@
 /**
- * VersionInfo — the persistent "Nebius · env · commit" entry at the
- * bottom of the sidebar (#2009). Clicking it opens accessible details:
+ * VersionInfo — the persistent "Nebius · env" / "Build <commit>" entry at
+ * the bottom of the sidebar (#2009). Clicking it opens accessible details:
  * full frontend commit (copy + GitHub link), source ref, build time, and
  * the backend's own reported build — a clearly separate identity, since
  * one backend response is evidence for that responding instance only.
@@ -51,18 +51,32 @@ export default function VersionInfo({
         type="button"
         onClick={() => setOpen(true)}
         aria-label="Deployed version details"
-        className="flex w-full items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-left hover:bg-slate-100"
+        className="flex w-full flex-col gap-0.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-left hover:bg-slate-100"
       >
-        <span className="truncate font-mono text-[10px] text-slate-600">
-          Nebius · {environmentLabel} · {shortRevision(revision)}
-        </span>
-        {hasNewerBuild ? (
+        {/* The environment label may be long (e.g. "Nebius integration"),
+            so it alone truncates; the revision gets its own line and is
+            never clipped, keeping the build identifiable at a glance. */}
+        <span className="flex w-full min-w-0 items-center justify-between gap-2">
           <span
-            aria-hidden="true"
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
-            title="A newer build is available"
-          />
-        ) : null}
+            className="min-w-0 truncate font-mono text-[10px] text-slate-600"
+            title={`Nebius · ${environmentLabel}`}
+          >
+            Nebius · {environmentLabel}
+          </span>
+          {hasNewerBuild ? (
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+              title="A newer build is available"
+            />
+          ) : null}
+        </span>
+        <span
+          data-testid="sidebar-build-revision"
+          className="whitespace-nowrap font-mono text-[10px] font-medium text-slate-700"
+        >
+          Build {shortRevision(revision)}
+        </span>
       </button>
 
       <Modal

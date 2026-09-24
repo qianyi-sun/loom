@@ -64,9 +64,35 @@ describe("VersionInfo (#2009)", () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}));
     renderVersionInfo();
 
+    const entry = screen.getByRole("button", {
+      name: "Deployed version details",
+    });
+    expect(entry).toHaveTextContent("Nebius · Development");
+    expect(entry).toHaveTextContent(`Build ${LOADED_REVISION.slice(0, 12)}`);
+  });
+
+  it("keeps the revision on its own never-truncated line when the environment label is long", () => {
+    // Reopened #2009: "Nebius · Nebius integration · <sha>" was one
+    // truncated line, so the long label ellipsized the revision away.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <VersionInfo environmentLabel="Nebius integration with a very long source ref label" />
+      </QueryClientProvider>,
+    );
+
+    const revisionLine = screen.getByTestId("sidebar-build-revision");
+    expect(revisionLine).toHaveTextContent(
+      `Build ${LOADED_REVISION.slice(0, 12)}`,
+    );
+    expect(revisionLine.className).not.toMatch(/\btruncate\b/);
+    expect(revisionLine.className).toMatch(/\bwhitespace-nowrap\b/);
     expect(
-      screen.getByRole("button", { name: "Deployed version details" }),
-    ).toHaveTextContent(`Nebius · Development · ${LOADED_REVISION.slice(0, 12)}`);
+      screen.getByText(/Nebius integration with a very long/).className,
+    ).toMatch(/\btruncate\b/);
   });
 
   it("opens accessible details with the full commit, copy action and a commit link", async () => {
