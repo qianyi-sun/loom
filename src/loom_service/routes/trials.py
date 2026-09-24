@@ -357,6 +357,7 @@ async def list_trials(
     request: Request,
     sc: SessionAndCtx,
     team_id: Annotated[UUID | None, Query()] = None,
+    q: Annotated[str | None, Query(description="Search trial ID, task ID, or owner")] = None,
     task_id: Annotated[str | None, Query()] = None,
     batch_id: Annotated[UUID | None, Query()] = None,
     benchmark_id: Annotated[str | None, Query()] = None,
@@ -386,6 +387,7 @@ async def list_trials(
     stmt = apply_trial_monitor_filters(
         stmt,
         target_team=target_team,
+        trial_q=q,
         task_id=task_id,
         batch_id=batch_id,
         benchmark_id=benchmark_id,

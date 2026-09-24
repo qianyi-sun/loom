@@ -15,7 +15,8 @@ import { queryKeys } from "../api/queryKeys";
  * mental model in both places.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api";
 import { Card } from "../components/Card";
@@ -23,12 +24,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import Pagination from "../components/Pagination";
-import {
-  initialPage,
-  nextPage,
-  prevPage,
-  type PageState,
-} from "../components/paginationState";
+import { useUrlCursorPage } from "../hooks/useUrlCursorPage";
 import { cn } from "../lib/cn";
 
 interface BenchmarkRow {
@@ -93,12 +89,12 @@ function readinessBadgeClasses(row: BenchmarkRow): string {
 }
 
 export default function Benchmarks(): JSX.Element {
-  const [page, setPage] = useState<PageState>(initialPage);
+  const page = useUrlCursorPage();
   const query = useQuery({
-    queryKey: queryKeys["benchmarks"](page.current),
+    queryKey: queryKeys["benchmarks"](page.cursor),
     queryFn: () =>
       api.listBenchmarks({
-        cursor: page.current ?? undefined,
+        cursor: page.cursor ?? undefined,
         limit: "50",
         // The /benchmarks listing defaults to hiding rows with zero
         // imported tasks (so the NewBatch picker doesn't dangle empty
@@ -146,7 +142,7 @@ export default function Benchmarks(): JSX.Element {
       return (
         <EmptyState
           label="No benchmarks registered."
-          hint="Run `loom service up` to populate the slate from the entry-points registry."
+          hint="No benchmarks are available in this deployment. Ask an administrator to import or enable a task source."
         />
       );
     }
@@ -230,7 +226,7 @@ export default function Benchmarks(): JSX.Element {
                     </td>
                     <td className="px-4 py-3 text-slate-700">{b.license_spdx}</td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                      {b.upstream_kind}: {b.upstream_locator}
+                      <details><summary className="cursor-pointer font-sans">{b.upstream_kind} source</summary><p className="mt-1 break-all">{b.upstream_locator}</p></details>
                     </td>
                     <td className="px-4 py-3 text-xs text-slate-500">
                       {b.imported_at.slice(0, 10)}
@@ -251,10 +247,11 @@ export default function Benchmarks(): JSX.Element {
         <h1 className="text-2xl font-bold text-slate-900">Benchmarks</h1>
         <p className="mt-1 text-sm text-slate-500">
           Registered benchmark suites grouped by series. Each row corresponds
-          to one `BenchmarkAdapter` discovered via entry-points.
+          to a collection of tasks available for evaluation in this deployment.
         </p>
       </header>
 
+      <nav aria-label="Task sources" className="flex flex-wrap gap-4 text-sm text-accent"><Link to="/task-sets">Task sets</Link><Link to="/tasks">Tasks</Link></nav>
       <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
         <p>Ready benchmarks have runnable tasks. Missing or stale task configurations require operator attention.</p>
         <HelpButton topic="tasks">Benchmark readiness guide</HelpButton>
@@ -265,14 +262,14 @@ export default function Benchmarks(): JSX.Element {
         {query.data && query.data.items.length > 0 ? (
           <Card.Footer>
             <Pagination
-              state={page}
+              state={page.state}
               hasNext={query.data.next_cursor !== null}
               onNext={() => {
                 if (query.data?.next_cursor) {
-                  setPage((p) => nextPage(p, query.data!.next_cursor!));
+                  page.next(query.data.next_cursor);
                 }
               }}
-              onPrev={() => setPage((p) => prevPage(p))}
+              onPrev={page.prev}
             />
           </Card.Footer>
         ) : null}

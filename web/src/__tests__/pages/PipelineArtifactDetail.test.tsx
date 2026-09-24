@@ -3,6 +3,8 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import userEvent from "@testing-library/user-event";
+import * as pipelineApi from "../../api/pipeline";
 import { api, type PipelineArtifactDetail as ArtifactDetail } from "../../api";
 import PipelineArtifactDetail from "../../pages/PipelineArtifactDetail";
 
@@ -53,6 +55,7 @@ function renderPage(path = "/pipelines/run-1/stages/stage-1/artifacts/artifact-1
             path="/pipelines/:runId/stages/:stageRunId/artifacts/:artifactId"
             element={<PipelineArtifactDetail />}
           />
+          <Route path="/pipeline-artifacts/:artifactId" element={<PipelineArtifactDetail />} />
           <Route path="/pipelines" element={<PipelineArtifactDetail />} />
         </Routes>
       </MemoryRouter>
@@ -77,10 +80,10 @@ describe("PipelineArtifactDetail", () => {
     );
     expect(screen.getByText("custom.opaque.v1 · 3 bytes")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Artifact files" })).toBeInTheDocument();
-    expect(screen.getByText("input-artifact-1", { exact: false })).toHaveTextContent(
+    expect(screen.getByRole("link", { name: "input-artifact-1" }).closest("li")).toHaveTextContent(
       `input-artifact-1 · sha256:${"3".repeat(64)}`,
     );
-    expect(screen.getByRole("link", { name: "Back to pipeline run" })).toHaveAttribute("href", "/pipelines/run-1");
+    expect(screen.getByRole("link", { name: "Back to results" })).toHaveAttribute("href", "/pipelines/run-1");
   });
 
   it("renders null storage metadata and empty lineage explicitly", async () => {
@@ -93,7 +96,7 @@ describe("PipelineArtifactDetail", () => {
     });
     renderPage();
 
-    expect(await screen.findByText("custom.opaque.v1 · 0 bytes")).toBeInTheDocument();
+    expect(await screen.findByText("custom.opaque.v1 · Size unknown")).toBeInTheDocument();
     expect(screen.getByText("None")).toBeInTheDocument();
   });
 
@@ -104,6 +107,44 @@ describe("PipelineArtifactDetail", () => {
     expect(await screen.findByText("Something went wrong")).toBeInTheDocument();
     expect(screen.getByText("artifact unavailable")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: artifact.name })).not.toBeInTheDocument();
+  });
+
+  it("explains unavailable input lineage and returns to the downstream result", async () => {
+    vi.spyOn(api, "getPipelineArtifact").mockResolvedValue({ ...artifact, lineage_artifact_ids: ["input-import-artifact"] });
+    const lookup = vi.spyOn(pipelineApi, "getPipelineArtifactById").mockRejectedValue({ status: 404, detail: "artifact_not_found" });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("link", { name: "input-import-artifact" }));
+    expect(await screen.findByRole("heading", { name: "Source details unavailable" })).toBeInTheDocument();
+    expect(screen.getByText(/This source may be restricted/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Download primary artifact file" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Error 404")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Back to results" })).toHaveAttribute("href", artifact.detail_path);
+    expect(lookup).toHaveBeenCalledWith("input-import-artifact", expect.any(AbortSignal));
+    await user.click(screen.getByRole("link", { name: "Back to results" }));
+    expect(await screen.findByRole("heading", { name: artifact.name })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "input-import-artifact" })).toBeInTheDocument();
+  });
+
+  it("opens imported input metadata from lineage and preserves downstream navigation", async () => {
+    vi.spyOn(api, "getPipelineArtifact").mockResolvedValue({ ...artifact, lineage_artifact_ids: ["input-import-artifact"] });
+    vi.spyOn(pipelineApi, "getPipelineArtifactById").mockResolvedValue({
+      id: "input-import-artifact", name: "Research dataset", artifact_type: "behavior.dataset.v1",
+      source_kind: "input_import", source_id: "import-record", state: "committed",
+      recipe_name: "behavior-recovery", recipe_version: 1, content_sha256: "sha256:input-content",
+      manifest_sha256: "sha256:input-manifest", stored_size_bytes: 1024, file_count: 2,
+      safety_state: "unknown", created_at: "2026-09-23T00:00:00Z",
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("link", { name: "input-import-artifact" }));
+    expect(await screen.findByRole("heading", { name: "Research dataset" })).toBeInTheDocument();
+    expect(screen.getByText("Imported input · behavior.dataset.v1")).toBeInTheDocument();
+    expect(screen.getByText("import-record")).toBeInTheDocument();
+    expect(screen.getByText("behavior-recovery@1")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Download primary artifact file" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "Back to results" }));
+    expect(await screen.findByRole("heading", { name: artifact.name })).toBeInTheDocument();
   });
 
   it("does not issue an artifact request when route identifiers are missing", () => {

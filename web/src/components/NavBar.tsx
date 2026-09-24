@@ -8,7 +8,8 @@
  * The `loom` wordmark is intentionally typographic, not an image —
  * keeps the bundle small and matches the rest of the type discipline.
  */
-import { NavLink } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 
 import { cn } from "../lib/cn";
 import { getFrontendConfig } from "../lib/frontendConfig";
@@ -52,6 +53,10 @@ export default function NavBar({
   currentTeamName = null,
   currentTeamRole = null,
 }: NavBarProps): JSX.Element {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const location = useLocation();
+  useEffect(() => { setMenuOpen(false); }, [location.pathname, location.search]);
   const canManageTeam = isAdmin || currentTeamRole === "owner";
   const displayRole = formatRole(currentTeamRole);
   const frontendConfig = getFrontendConfig();
@@ -64,25 +69,32 @@ export default function NavBar({
       aria-label="Primary"
       className="flex w-full shrink-0 flex-col gap-3 border-b border-slate-200 bg-white px-3 py-3 lg:h-full lg:w-56 lg:flex-col lg:border-b-0 lg:border-r lg:py-5"
     >
-      <div className="px-3 lg:mb-3">
+      <div className="flex items-center justify-between gap-3 px-3 lg:mb-3 lg:block">
+        <div>
         <p className="text-lg font-bold tracking-tight text-slate-900">loom</p>
-        <p className="text-xs uppercase tracking-wider text-slate-600">
+        <p className="hidden text-xs uppercase tracking-wider lg:block text-slate-600">
           benchmark platform
         </p>
         <div
           aria-label="Frontend environment"
-          className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5"
+          className="lg:mt-2 lg:rounded-md lg:border lg:border-slate-200 lg:bg-slate-50 lg:px-2 lg:py-1.5"
         >
           <p className="truncate text-xs font-semibold text-slate-700">
             {frontendConfig.environmentLabel}
           </p>
-          <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500">
+          <p className="mt-0.5 hidden truncate font-mono lg:block text-[10px] text-slate-500">
             {frontendConfig.apiRouteBase}
           </p>
         </div>
+        </div>
+        <button ref={menuButton} type="button" className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium lg:hidden"
+          aria-expanded={menuOpen} aria-controls="primary-menu" onClick={() => setMenuOpen((open) => !open)}>
+          {menuOpen ? "Close menu" : "Menu"}
+        </button>
       </div>
-
-      <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-x-visible lg:pb-0">
+      <div id="primary-menu" className={cn(menuOpen ? "flex" : "hidden", "min-h-0 flex-1 flex-col gap-3 lg:flex")}
+        onKeyDown={(event) => { if (event.key === "Escape") { setMenuOpen(false); menuButton.current?.focus(); } }}>
+      <div className="flex min-w-0 flex-1 flex-col gap-1 overflow-y-auto pb-1 lg:pb-0">
         {NAV_ITEMS.map((item) => (
           <NavLink
             key={item.to}
@@ -155,6 +167,7 @@ export default function NavBar({
       </NavLink>
 
       <VersionInfo environmentLabel={frontendConfig.environmentLabel} />
+      </div>
     </nav>
   );
 }

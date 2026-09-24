@@ -53,6 +53,22 @@ materialization, retry, source-retention, and complete-bundle states remain
 visible without exposing provider target ids or raw internal errors to ordinary
 users.
 
+Monitor exposes Batches, Trials and Capacity modes. The list toolbar keeps search,
+state and team visible; Advanced filters contains benchmark, agent and model
+selectors, with removable chips for active values. Trial search is applied to all
+authorized records before cursor pagination, including trial/task IDs and owner
+names. The URL stores the cursor and previous-page history; changing a filter
+resets to page one. Detail return links preserve that URL. Capacity diagnostics
+remain available in a disclosure and through `?view=capacity`; unknown observations
+are never converted to zero.
+
+Trial details provide Overview, Trajectory, Artifacts and Diagnostics anchors,
+with the complete bundle action next to the outcome. Terminal trials with no
+trajectory explain the final absence and link to diagnostics. Compare provides
+server-side trial search, task mismatch warnings, numeric metric differences,
+replace/remove controls, full-detail links and continuation past 200 events.
+Batch run plans recognize TaskSet sources and display the recorded purpose.
+
 ### Providers and operator pages
 
 Provider states are presented as readiness (`Ready`, `Needs attention`, or

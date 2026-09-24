@@ -7,6 +7,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import TaskSetSubmit from "../../pages/TaskSetSubmit";
 import { jsonResponse } from "../../test-utils/fetchMock";
 
+const VALID_MANIFEST = `apiVersion: loom.taskset/v1
+kind: UserTaskSet
+metadata:
+  name: research
+  display_name: Research tasks
+source:
+  type: https
+  locator: https://example.test/tasks.jsonl
+intents: [trajectory_generation]
+task_template:
+  task:
+    name: Example task
+limits:
+  max_instances: 10
+`;
+
 function DetailLocation(): JSX.Element {
   const location = useLocation();
   return <p>Task set detail <span data-testid="detail-url">{location.pathname}{location.search}</span></p>;
@@ -38,10 +54,45 @@ describe("TaskSetSubmit", () => {
   it("requires a manifest and supports cancel", async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
     expect(screen.getByText("A manifest file is required.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByText("Task set list")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["manifest.yaml", VALID_MANIFEST, "application/yaml"],
+    ["manifest.json", JSON.stringify({ apiVersion: "loom.taskset/v1", kind: "UserTaskSet", metadata: { name: "research", display_name: "Research tasks" }, source: { type: "https", locator: "https://example.test/tasks.jsonl" }, intents: ["trajectory_generation"], limits: { max_instances: 10 } }), "application/json"],
+  ])("summarizes %s content and invalidates review after files change", async (name, content, type) => {
+    const user = userEvent.setup();
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    renderPage();
+    await user.upload(screen.getByLabelText("Manifest (required)"), new File([content], name, { type }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    const summary = await screen.findByRole("region", { name: "Submission review" });
+    expect(summary).toHaveTextContent("Research tasks (research)");
+    expect(summary).toHaveTextContent("Trajectory generation");
+    expect(summary).toHaveTextContent("https");
+    expect(summary).toHaveTextContent("At most 10 configured instances");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await user.upload(screen.getByLabelText("Manifest (required)"), new File(["{"], "broken.json", { type: "application/json" }));
+    expect(screen.queryByRole("button", { name: "Confirm upload" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Manifest syntax");
+    expect(screen.queryByRole("button", { name: "Confirm upload" })).not.toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing identity and duplicate YAML fields before upload", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.upload(screen.getByLabelText("Manifest (required)"), new File(["{}"], "manifest.json"));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("apiVersion");
+    await user.upload(screen.getByLabelText("Manifest (required)"), new File([`${VALID_MANIFEST}kind: UserTaskSet`], "duplicate.yaml"));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Manifest syntax");
+    expect(screen.queryByRole("button", { name: "Confirm upload" })).not.toBeInTheDocument();
   });
 
   it("uploads required and optional files then navigates", async () => {
@@ -50,9 +101,10 @@ describe("TaskSetSubmit", () => {
       jsonResponse({ task_set_id: "uploaded/set", status: "ready" }, 201),
     );
     renderPage();
+    expect(screen.getByRole("link", { name: "Manifest template and schema" }).compareDocumentPosition(screen.getByLabelText("Manifest (required)")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     await user.upload(
       screen.getByLabelText("Manifest (required)"),
-      new File(["kind: UserTaskSet"], "manifest.yaml", { type: "text/yaml" }),
+      new File([VALID_MANIFEST], "manifest.yaml", { type: "text/yaml" }),
     );
     await user.upload(
       screen.getByLabelText("Verifier (optional)"),
@@ -62,7 +114,10 @@ describe("TaskSetSubmit", () => {
       screen.getByLabelText("Transform (optional)"),
       new File(["pass"], "transform.py", { type: "text/x-python" }),
     );
-    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("region", { name: "Submission review" })).toHaveTextContent("manifest.yaml");
+    await user.click(screen.getByRole("button", { name: "Confirm upload" }));
 
     expect(await screen.findByText("Task set detail")).toBeInTheDocument();
     expect(screen.getByTestId("detail-url")).toHaveTextContent("/task-sets/detail?id=uploaded%2Fset");
@@ -81,13 +136,14 @@ describe("TaskSetSubmit", () => {
     );
     renderPage();
     const manifest = new File(
-      ["source:\n  type: bundle-upload\n  locator: bundle.tar.gz\nintents: [evaluation]"],
+      ["apiVersion: loom.taskset/v1\nkind: UserTaskSet\nmetadata:\n  name: research\n  display_name: Research tasks\nsource:\n  type: bundle-upload\n  locator: bundle.tar.gz\nintents: [evaluation]"],
       "manifest.yaml", { type: "application/x-yaml" },
     );
     const bundle = new File(["task archive"], "bundle.tar.gz", { type: "application/gzip" });
     await user.upload(screen.getByLabelText("Manifest (required)"), manifest);
     await user.upload(screen.getByLabelText("Task bundle (optional)"), bundle);
-    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    await user.click(screen.getByRole("button", { name: "Confirm upload" }));
 
     expect(await screen.findByText("Task set detail")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -108,11 +164,13 @@ describe("TaskSetSubmit", () => {
       .mockRejectedValueOnce(new Error("offline"));
     renderPage();
     const manifest = screen.getByLabelText("Manifest (required)");
-    await user.upload(manifest, new File(["bad"], "bad.yaml"));
-    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+    await user.upload(manifest, new File([VALID_MANIFEST], "bad.yaml"));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    await user.click(screen.getByRole("button", { name: "Confirm upload" }));
     expect(await screen.findByText("Manifest is invalid")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Submit Task Set" }));
+    await user.click(screen.getByRole("button", { name: "Review submission" }));
+    await user.click(screen.getByRole("button", { name: "Confirm upload" }));
     await waitFor(() => {
       expect(screen.getByText("Submission failed. Please try again.")).toBeInTheDocument();
     });

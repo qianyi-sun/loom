@@ -1,8 +1,9 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { api, type RunLibraryArtifact, type RunLibraryBatch } from "../../api";
 import RunLibrary from "../../pages/RunLibrary";
 import RunLibraryBatchDetail from "../../pages/RunLibraryBatchDetail";
 import type { FetchMock } from "../../test-utils/fetchMock";
@@ -545,8 +546,8 @@ describe("RunLibrary", () => {
     expect(screen.getByText("Reuse guide")).toBeInTheDocument();
     expect(screen.getByText(/credentials are not copied/i)).toBeInTheDocument();
     expect(screen.getAllByText("Ada / Dev").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("unknown/unpriced").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("org / shared").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("columnheader", { name: "Token" })).not.toBeInTheDocument();
+    expect(screen.getAllByText("Score 1.000 · 1 trials").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Reports 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Raw/internal 1").length).toBeGreaterThan(0);
     expect(screen.getByRole("option", { name: "Metric table" })).toBeInTheDocument();
@@ -701,7 +702,7 @@ describe("RunLibrary", () => {
     );
     expect(nextButton).toHaveFocus();
     expect(screen.getByTestId("location-search")).toHaveTextContent("scope=all");
-    expect(screen.getByTestId("location-search")).not.toHaveTextContent("cursor");
+    expect(screen.getByTestId("location-search")).toHaveTextContent("cursor=run-library-page-2");
 
     await user.click(screen.getByRole("button", { name: /previous page/i }));
     expect(await screen.findByText("cursor page one run")).toBeInTheDocument();
@@ -887,21 +888,21 @@ describe("RunLibraryBatchDetail", () => {
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText("Reports")).toBeInTheDocument();
     expect(screen.getByText("Metric table")).toBeInTheDocument();
-    expect(screen.getByText("safe / redacted")).toBeInTheDocument();
+    expect(screen.getByText("Approved for sharing")).toBeInTheDocument();
     expect(screen.getAllByText("Source trial trial-alpha").length).toBeGreaterThan(0);
     expect(screen.getByText(/sha256:aaaaaaaaaaaa/)).toBeInTheDocument();
     expect(screen.getByText("Raw/internal diagnostics")).toBeInTheDocument();
     expect(screen.getByText("Debug bundle")).toBeInTheDocument();
-    expect(screen.getByText("unsafe / blocked")).toBeInTheDocument();
+    expect(screen.getByText("Safety: unsafe · Redaction: blocked")).toBeInTheDocument();
     expect(screen.getByText("secret-like content detected")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
-        name: /Download team-alpha\/trial-alpha\/main\/debug\.log/i,
+        name: /Download debug\.log/i,
       }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
-        name: /Reuse team-alpha\/trial-alpha\/main\/debug\.log/i,
+        name: /Reuse debug\.log/i,
       }),
     ).not.toBeInTheDocument();
 
@@ -912,12 +913,12 @@ describe("RunLibraryBatchDetail", () => {
     await user.click(screen.getByRole("button", { name: "Clone config" }));
     await user.click(
       screen.getByRole("button", {
-        name: /Download team-alpha\/trial-alpha\/main\/report\.json/i,
+        name: /Download report\.json/i,
       }),
     );
     await user.click(
       screen.getByRole("button", {
-        name: /Reuse team-alpha\/trial-alpha\/main\/report\.json/i,
+        name: /Reuse report\.json/i,
       }),
     );
     await user.click(
@@ -1268,4 +1269,129 @@ describe("RunLibraryBatchDetail", () => {
     expect(screen.getByText(/Score failed/i)).toBeInTheDocument();
     expect(screen.getByText(/No supplemental rerun recommended/i)).toBeInTheDocument();
   });
+});
+
+
+test("Pipeline artifact mode reaches records after 200 and resets on a filter change", async () => {
+  mockRunLibrary();
+  const list = vi.spyOn(api, "listRunLibraryArtifacts").mockImplementation(async (params = {}) => {
+    const start = Number(params.cursor ?? 0);
+    return { items: Array.from({ length: Math.min(50, 205 - start) }, (_, index) => ({
+      id: `artifact-${start + index}`, key: `result-${start + index}`, relative_path: `result-${start + index}`,
+      artifact_type: "metric_table", share_status: "pending_scan", owner_team: { id: "team-beta", name: "Beta" },
+      pipeline: { run_id: "pipeline-1", stage_run_id: "stage-1", recipe: "example@1", result: "succeeded" },
+    } as RunLibraryArtifact)), next_cursor: start + 50 < 205 ? String(start + 50) : null };
+  });
+  const user = userEvent.setup();
+  renderWithProviders(<><RunLibrary /><LocationProbe /></>, { route: "/library?producer_kind=pipeline" });
+  expect(await screen.findByRole("link", { name: "result-0" })).toHaveAttribute("href", "/pipelines/pipeline-1/stages/stage-1/artifacts/artifact-0");
+  for (let page = 1; page <= 4; page++) {
+    await user.click(screen.getByRole("button", { name: /next page/i }));
+    await screen.findByRole("link", { name: `result-${page * 50}` });
+  }
+  expect(screen.getByRole("link", { name: "result-204" })).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("Page 5, end of results");
+  await user.click(screen.getByRole("button", { name: /previous page/i }));
+  await screen.findByRole("link", { name: "result-150" });
+  await user.click(screen.getByText("Advanced filters"));
+  await user.selectOptions(screen.getByRole("combobox", { name: "Pipeline result" }), "failed");
+  await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ pipeline_result: "failed", cursor: undefined })));
+  expect(screen.getByRole("status")).toHaveTextContent("Page 1");
+  list.mockRestore();
+});
+
+test("Library mode tabs connect real results panels, support keyboard activation, and restore URL state", async () => {
+  mockRunLibrary();
+  const artifacts = vi.spyOn(api, "listRunLibraryArtifacts").mockResolvedValue({ items: [], next_cursor: null });
+  const user = userEvent.setup();
+  function HistoryControls() {
+    const navigate = useNavigate();
+    return <><button onClick={() => navigate(-1)}>History back</button><button onClick={() => navigate(1)}>History forward</button></>;
+  }
+  renderWithProviders(<><RunLibrary /><LocationProbe /><HistoryControls /></>, {
+    route: "/library?q=alpha&cursor=second-page&cursor_history=%5Bnull%5D",
+  });
+  const runs = screen.getByRole("tab", { name: "Runs" });
+  const pipeline = screen.getByRole("tab", { name: "Pipeline artifacts" });
+  let panel = screen.getByRole("tabpanel", { name: "Runs" });
+  expect(runs).toHaveAttribute("aria-controls", panel.id);
+  expect(panel).toHaveAttribute("aria-labelledby", runs.id);
+  expect(await within(panel).findByRole("table", { name: "Runs" })).toBeInTheDocument();
+  expect(within(panel).getByLabelText("Search")).toHaveValue("alpha");
+  expect(pipeline).toHaveAttribute("tabindex", "-1");
+
+  runs.focus();
+  await user.keyboard("{ArrowRight}");
+  expect(pipeline).toHaveFocus();
+  expect(pipeline).toHaveAttribute("aria-selected", "true");
+  panel = screen.getByRole("tabpanel", { name: "Pipeline artifacts" });
+  expect(pipeline).toHaveAttribute("aria-controls", panel.id);
+  expect(panel).toHaveAttribute("aria-labelledby", pipeline.id);
+  expect(await within(panel).findByText("No Pipeline artifacts match this view.")).toBeInTheDocument();
+  expect(within(panel).getByLabelText("Search")).toBeDisabled();
+  expect(screen.getByTestId("location-search")).toHaveTextContent("q=alpha&producer_kind=pipeline");
+  expect(screen.getByTestId("location-search")).not.toHaveTextContent("cursor");
+  expect(artifacts).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: undefined }));
+
+  await user.click(screen.getByRole("button", { name: "History back" }));
+  expect(runs).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("tabpanel", { name: "Runs" })).toBeVisible();
+  expect(screen.getByTestId("location-search")).toHaveTextContent("cursor=second-page");
+  expect(screen.getByRole("status")).toHaveTextContent("Page 2");
+  await user.click(screen.getByRole("button", { name: "History forward" }));
+  expect(pipeline).toHaveAttribute("aria-selected", "true");
+  pipeline.focus();
+  await user.keyboard("{Home}");
+  expect(runs).toHaveFocus();
+  expect(runs).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByLabelText("Search")).toHaveValue("alpha");
+  expect(screen.getByTestId("location-search")).toHaveTextContent("?q=alpha");
+  artifacts.mockRestore();
+});
+
+
+test("Library detail returns to the filtered cursor URL", async () => {
+  mockRunLibrary();
+  const list = vi.spyOn(api, "listRunLibraryBatches").mockResolvedValue({ items: [sharedBatch as RunLibraryBatch], next_cursor: null });
+  const user = userEvent.setup();
+  renderWithProviders(<><Routes><Route path="/library" element={<RunLibrary />} /><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes><LocationProbe /></>, { route: "/library?scope=all&q=alpha&cursor=page-two&cursor_history=%5Bnull%5D" });
+  await user.click(await screen.findByRole("link", { name: "shared alpha run" }));
+  await user.click(await screen.findByRole("link", { name: "← Run Library" }));
+  expect(await screen.findByRole("table", { name: "Runs" })).toBeInTheDocument();
+  expect(screen.getByTestId("location-search")).toHaveTextContent("scope=all&q=alpha&cursor=page-two");
+  expect(screen.getByRole("status")).toHaveTextContent("Page 2");
+  expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ q: "alpha", cursor: "page-two" }));
+  list.mockRestore();
+});
+
+
+test("All teams Pipeline metadata explains current-team inspection without dead links", async () => {
+  mockRunLibrary({ platformAdmin: true });
+  const list = vi.spyOn(api, "listRunLibraryArtifacts").mockResolvedValue({ items: [{
+    id: "other-artifact", key: "other-result", artifact_type: "metric_table", share_status: "pending_scan",
+    owner_team: { id: "team-alpha", name: "Alpha" }, pipeline: { run_id: "other-run", stage_run_id: "other-stage", recipe: "example@1", result: "succeeded" },
+  } as RunLibraryArtifact], next_cursor: null });
+  renderWithProviders(<RunLibrary />, { route: "/library?scope=all&producer_kind=pipeline" });
+  expect(await screen.findByText("other-result")).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "other-result" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "other-run" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "other-stage" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Select the owning team to inspect details" })).toHaveAttribute("href", "/settings");
+  list.mockRestore();
+});
+
+test("empty stdout and stderr stay in diagnostics without reuse actions", async () => {
+  mockRunLibrary({ detailOverride: {
+    ...detailBatch,
+    artifact_inventory: { ...detailBatch.artifact_inventory, reusable_outputs: [
+      { ...detailBatch.artifact_inventory.reports[0], key: "trial/stdout.txt", relative_path: "stdout.txt", role: "reusable_outputs", size: 0, can_reuse: true },
+      { ...detailBatch.artifact_inventory.reports[0], key: "trial/stderr.txt", relative_path: "stderr.txt", role: "reusable_outputs", size: 42, can_reuse: true },
+    ] },
+  } });
+  renderWithProviders(<Routes><Route path="/library/batches/:batchId" element={<RunLibraryBatchDetail />} /></Routes>, { route: "/library/batches/batch-alpha" });
+  const diagnostics = (await screen.findByRole("heading", { name: "Logs/diagnostics" })).closest("section");
+  expect(diagnostics).toHaveTextContent("stdout.txt");
+  expect(diagnostics).toHaveTextContent("stderr.txt");
+  expect(screen.queryByRole("button", { name: "Reuse stdout.txt" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Reuse stderr.txt" })).not.toBeInTheDocument();
 });

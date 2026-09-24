@@ -23,8 +23,8 @@ describe("Getting started", () => {
     expect(screen.getByText(/loom auth login --server/)).toHaveTextContent(`${window.location.origin}${routePath}`);
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "API" }));
-    expect(screen.getByText((text) => text.startsWith("curl --fail-with-body") && text.includes("/v1/batches'"))).toHaveTextContent(`${routePath}/api/v1/batches`);
-    expect(screen.getByText((text) => text.startsWith("curl --fail-with-body") && text.includes("/v1/batches'"))).toHaveTextContent("$LOOM_TOKEN");
+    expect(screen.getByText((text) => text.startsWith("curl --fail-with-body") && !text.includes("--request POST") && text.includes("/v1/batches'"))).toHaveTextContent(`${routePath}/api/v1/batches`);
+    expect(screen.getByText((text) => text.startsWith("curl --fail-with-body") && !text.includes("--request POST") && text.includes("/v1/batches'"))).toHaveTextContent("$LOOM_TOKEN");
     expect(screen.queryByText(/smoke-openai|gpt-4o-mini/)).not.toBeInTheDocument();
   });
   it("normalizes unknown query values and opens topic references", async () => {

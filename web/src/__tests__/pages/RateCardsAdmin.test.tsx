@@ -102,7 +102,7 @@ describe("RateCardsAdmin", () => {
 
   it("validates JSON and publishes an object", async () => {
     const user = userEvent.setup();
-    vi.spyOn(globalThis, "fetch").mockImplementation(
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/auth/me")) return jsonResponse(adminMe);
@@ -111,18 +111,25 @@ describe("RateCardsAdmin", () => {
       },
     );
     renderWithProviders(<RateCardsAdmin />);
+    expect(screen.queryByLabelText("Rate card JSON payload")).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Publish a new rate card" }));
     const editor = await screen.findByLabelText("Rate card JSON payload");
 
     fireEvent.change(editor, { target: { value: "[]" } });
-    await user.click(screen.getByRole("button", { name: "Publish" }));
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
     expect(screen.getByText("expected a JSON object")).toBeInTheDocument();
 
     fireEvent.change(editor, { target: { value: "{" } });
-    await user.click(screen.getByRole("button", { name: "Publish" }));
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
     expect(screen.getByText(/^Expected property name/u)).toBeInTheDocument();
 
-    fireEvent.change(editor, { target: { value: '{"id":"created"}' } });
-    await user.click(screen.getByRole("button", { name: "Publish" }));
+    fireEvent.change(editor, { target: { value: '{"id":"created","entries":[{"provider":"test","model":"test","input_per_mtok":1,"output_per_mtok":2,"cache_read_per_mtok":0,"cache_write_per_mtok":0}]}' } });
+    await user.click(screen.getByRole("button", { name: "Preview changes" }));
+    expect(screen.getByRole("region", { name: "Publication preview" })).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    expect(screen.getByRole("table", { name: "Price changes" })).toHaveTextContent("Proposed");
+    expect(screen.getByText(/Sample prices are illustrative/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Confirm publish" }));
     expect(await screen.findByText("Rate card published.")).toBeInTheDocument();
   });
 
@@ -143,6 +150,6 @@ describe("RateCardsAdmin", () => {
     );
     renderWithProviders(<RateCardsAdmin />);
     expect(await screen.findByText("rate cards unavailable")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Publish" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Preview changes" })).not.toBeInTheDocument();
   });
 });

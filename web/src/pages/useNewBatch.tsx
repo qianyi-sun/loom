@@ -1,7 +1,7 @@
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   api,
   type Combination,
@@ -43,12 +43,14 @@ import {
 
 export function useNewBatch() {
   const { currentTeamId } = useAuth();
+  const [searchParams] = useSearchParams();
+  const initialTaskSet = searchParams.get("taskSet");
 
   const [nameSuffix, setNameSuffix] = useState("");
 
-  const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>("evaluation");
+  const [batchPurpose, setBatchPurpose] = useState<BatchPurpose>(() => initialTaskSet && isTaskSetId(initialTaskSet) ? "trajectory_generation" : "evaluation");
 
-  const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(() => new Set());
+  const [selectedBenchmarks, setSelectedBenchmarks] = useState<Set<string>>(() => new Set(initialTaskSet && isTaskSetId(initialTaskSet) ? [initialTaskSet] : []));
 
   const [tagFilters, setTagFilters] = useState<Record<string, Set<string>>>({});
 
@@ -362,7 +364,7 @@ export function useNewBatch() {
       const label = r.label.trim();
       if (label) {
         if (labels.has(label)) {
-          return { ok: false, error: `Combination labels must be unique — "${label}" is repeated.` };
+          return { ok: false, error: `Combination ${i + 1}: labels must be unique — "${label}" is repeated.` };
         }
         labels.add(label);
       }
@@ -663,7 +665,11 @@ export function useNewBatch() {
         : `Subset run: ${matchedTaskCount ?? 0} tasks selected.`;
 
   const releaseTrialText =
-    totalTrials === undefined ? "Trial count is still being calculated." : `${totalTrials} trials planned.`;
+    totalTrials === undefined
+      ? (subsetKind === "explicit" ? "Enter valid task IDs to plan trials."
+        : selectedBenchmarks.size === 0 ? "Choose a task source to plan trials."
+        : "Trial count is still being calculated.")
+      : `${totalTrials} trials planned.`;
 
   const releaseBackendText =
     nebiusStatus === undefined

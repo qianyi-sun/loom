@@ -77,7 +77,7 @@ export function RouteRecoveryBoundary({
     >
       <BrowserTestRouteFault>
         <React.Suspense fallback={<RouteLoadingStatus />}>
-          {children ?? <Outlet />}
+          <React.Fragment key={location.pathname}>{children ?? <Outlet />}</React.Fragment>
         </React.Suspense>
       </BrowserTestRouteFault>
     </BrowserErrorBoundary>

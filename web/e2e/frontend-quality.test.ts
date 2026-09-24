@@ -81,7 +81,7 @@ for (const scenario of ["runs", "run-detail", "provider-detail", "pipeline-artif
       : detail
         ? "/api/v1/run-library/batches/quality-batch"
         : pipeline
-          ? "/api/v1/run-library/artifacts?producer_kind=pipeline"
+          ? "/api/v1/run-library/artifacts?producer_kind=pipeline&limit=50"
           : "/api/v1/run-library/batches?limit=50";
     const body = provider
       ? {
@@ -105,6 +105,7 @@ for (const scenario of ["runs", "run-detail", "provider-detail", "pipeline-artif
                     artifact_type: "metric_table",
                     size: 24,
                     producer_kind: "pipeline",
+                    pipeline: { run_id: "quality-run", stage_run_id: "quality-stage", recipe: "research@1", result: "succeeded" },
                     pipeline_recipe: "research@1",
                     pipeline_result: "succeeded",
                     share_status: "shared",

@@ -404,7 +404,7 @@ async def test_artifact_rows_for_library_redacts_and_limits_after_filtering() ->
         edges=[edge],
     )
 
-    items = await _artifact_rows_for_library(
+    items, _next_cursor = await _artifact_rows_for_library(
         session,
         _ctx(other_team_id),
         request=_FakeRequest(),

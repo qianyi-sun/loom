@@ -287,10 +287,11 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
               modelName: e.target.value,
             })
           }
+          aria-label="HuggingFace model"
           placeholder="meta-llama/Llama-3-8B-Instruct"
           disabled={disabled}
         />
-        <p className="mt-1 text-xs text-slate-500">Any model id on HuggingFace Hub.</p>
+        <p className="mt-1 text-xs text-slate-500">Enter a compatible HuggingFace model ID. Availability depends on model access, the selected agent, and this deployment’s execution support.</p>
       </label>
       <fieldset className="space-y-2">
         <legend className="text-xs font-medium uppercase tracking-wider text-slate-500">Execution</legend>
@@ -303,8 +304,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
             className="mt-1"
           />
           <span>
-            <strong>Run via local vLLM</strong> (default) — worker spawns vLLM on a GPU box and serves the
-            model locally.
+            <strong>Run via local vLLM</strong> (default) — requires a deployment with compatible GPU workers, vLLM, and access to the model. Ask your operator to confirm these prerequisites before submitting.
           </span>
         </label>
         <label className="flex items-start gap-2 text-sm text-slate-700">
@@ -350,11 +350,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
           </select>
           {items.length === 0 && !localServers.isPending ? (
             <p className="mt-1 text-xs text-amber-700">
-              No local servers are configured. Operator sets{" "}
-              <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">
-                LOOM_SVC_LOCAL_SERVERS_JSON
-              </code>{" "}
-              to populate this list.
+              No local servers are available in this deployment. Ask your operator to configure a server, or choose an available API provider connection.
             </p>
           ) : null}
         </label>
@@ -363,6 +359,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
             Model id
           </span>
           <Input
+            aria-label="Local model"
             value={value.modelName}
             onChange={(e) =>
               onChange({
@@ -563,9 +560,9 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
             ariaLabel="Model source"
             hideTabList={availableSources.length <= 1}
             className="space-y-3"
-            tabListClassName="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5"
+            tabListClassName="inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5"
             tabClassName={({ selected }) =>
-              "rounded-md px-3 py-1 text-xs font-medium transition-colors " +
+              "shrink-0 whitespace-nowrap rounded-md px-3 py-1 text-xs font-medium transition-colors " +
               (selected ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")
             }
             renderPanel={renderSourcePanel}

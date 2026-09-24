@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from loom.auth import AuthContext
-from loom.db.schema import TaskSet, TaskSetManifest, TaskSetMaterializationJob
+from loom.db.schema import Task, TaskSet, TaskSetManifest, TaskSetMaterializationJob
 from loom.db.task_set_visibility import visible_task_sets
 from loom.models.taskset import UserTaskSetManifest
 from loom.taskset.intents import normalize_intents
@@ -65,6 +65,8 @@ class TaskSetSubmitResponse(BaseModel):
 class TaskSetDetailResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    display_name: str | None = None
+    task_preview: list[str] = Field(default_factory=list)
     task_set_id: str
     status: str
     status_reason: str | None
@@ -238,7 +240,12 @@ async def get_task_set(
         verifier_file_present=manifest_db.verifier_blob_uri is not None,
     )
 
+    task_preview = (await session.scalars(
+        select(Task.id).where(Task.task_set_id == task_set_id).order_by(Task.id).limit(5),
+    )).all()
     return TaskSetDetailResponse(
+        display_name=task_set.display_name,
+        task_preview=list(task_preview),
         task_set_id=task_set.id,
         status=task_set.status,
         status_reason=task_set.status_reason,

@@ -14,15 +14,77 @@ import { MAX_COMBINATIONS } from "./newBatchState";
 import { NewBatchAdvancedSettings } from "./NewBatchAdvancedSettings";
 import { NewBatchTaskSelection } from "./NewBatchTaskSelection";
 import { useNewBatch } from "./useNewBatch";
+
+const ADVANCED_ERROR_FIELDS: Record<string, string> = {
+  "Override agent timeout": "Agent timeout override (s)",
+  "Agent timeout multiplier": "Agent timeout multiplier",
+  "Override verifier timeout": "Verifier timeout override (s)",
+  "Verifier timeout multiplier": "Verifier timeout multiplier",
+  "Override env-build timeout": "Env build timeout override (s)",
+  "Env-build timeout multiplier": "Env build timeout multiplier",
+  "Max attempts": "Max attempts",
+  "Backoff base seconds": "Backoff base (s)",
+  "Backoff max seconds": "Backoff max (s)",
+  "Backoff multiplier": "Backoff multiplier",
+  "Backoff jitter": "Backoff jitter",
+  "Submit priority": "Submit priority",
+  "Teacher model name": "Teacher model name",
+  "Beta": "Beta (P teacher)",
+  "Step start": "Step start (call ordinal)",
+  "Step end": "Step end (force teacher)",
+  "Teacher episodes": "Teacher episodes",
+};
+
 export default function NewBatch(): JSX.Element {
   const state = useNewBatch();
   const [exportResult, setExportResult] = useState<BatchExportResult | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const showExportError = (message: string) => {
+    setExportError(message);
+    requestAnimationFrame(() => {
+      const combination = message.match(/Combination (\d+):/);
+      const row = combination ? document.getElementById(`batch-combination-${combination[1]}`) : null;
+      const selector = /samples per task/i.test(message) ? '[aria-label^="Samples per task"]'
+        : /label.*unique/i.test(message) ? '[aria-label^="Label (combination"]'
+        : /agent version/i.test(message) ? '[aria-label="Agent version"]'
+        : /pick an agent|executable|not ready/i.test(message) ? '[aria-label="Agent"]'
+        : /provider connection|manually entered models/i.test(message) ? '[aria-label="Provider connection"]'
+        : /needs a model/i.test(message) ? '[aria-label="Model"], [aria-label="HuggingFace model"], [aria-label="Local model"]'
+        : /task id/i.test(message) ? '[aria-label="Explicit task ids"]'
+        : /Subset N/.test(message) ? '[aria-label="Subset N"]'
+        : /Seed/.test(message) ? '[aria-label="Seed"]'
+        : /Budget/.test(message) ? '[aria-label="Budget USD"]'
+        : /confirm box/i.test(message) ? '#fan-out-confirm'
+        : /Advanced options/i.test(message) ? '#batch-advanced'
+        : '#batch-task-selection';
+      const advancedLabel = Object.entries(ADVANCED_ERROR_FIELDS).find(([prefix]) =>
+        message.startsWith(`Advanced options: ${prefix}`),
+      )?.[1];
+      const advancedField = advancedLabel
+        ? Array.from(document.querySelectorAll<HTMLLabelElement>("#batch-advanced label"))
+          .find((label) => label.textContent?.trim().startsWith(advancedLabel))
+          ?.querySelector<HTMLElement>("input, select, textarea")
+        : null;
+      const candidate = advancedField ?? (row ?? document).querySelector<HTMLElement>(selector);
+      const field = candidate && !candidate.matches(":disabled") ? candidate
+        : row?.querySelector<HTMLElement>('select:not(:disabled), input:not(:disabled)')
+        ?? row ?? document.getElementById("batch-export-error");
+      for (let details = field?.closest("details"); details; details = details.parentElement?.closest("details") ?? null) {
+        details.open = true;
+      }
+      field?.focus();
+      field?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    });
+  };
   const exportConfiguration = () => {
+    setExportError(null);
     const result = state.buildSubmission();
     if (!result.ok) {
-      setExportResult({ error: result.error });
+      showExportError(result.error);
     } else if (result.providerOverrides.some((override) => override.manual_model)) {
-      setExportResult({ error: "Save manually entered models in Providers first, then select the saved model before exporting. Export does not save models or change provider connections." });
+      const manual = result.providerOverrides.find((override) => override.manual_model)!;
+      const index = state.rows.findIndex(({ picker }) => picker.manualModel && picker.providerConnectionId === manual.provider_connection_id && picker.modelName.trim() === manual.provider_model_id);
+      showExportError(`Combination ${index + 1}: Save manually entered models in Providers first, then select the saved model before exporting. Export does not save models or change provider connections.`);
     } else {
       setExportResult({ payload: result.payload });
     }
@@ -70,20 +132,21 @@ export default function NewBatch(): JSX.Element {
         </p>
       </header>
 
+      {exportError ? <p id="batch-export-error" tabIndex={-1} role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{exportError}</p> : null}
       {exportResult ? <BatchExportDialog result={exportResult} onClose={() => setExportResult(null)} /> : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}
         <div className="min-w-0 space-y-6">
-          <NewBatchTaskSelection {...state} />
+          <section id="batch-task-selection" tabIndex={-1} aria-label="Task selection"><NewBatchTaskSelection {...state} /></section>
 
-          <NewBatchAdvancedSettings {...state} />
+          <section id="batch-advanced" tabIndex={-1} aria-label="Advanced settings"><NewBatchAdvancedSettings {...state} /></section>
         </div>
 
         {/* RIGHT column */}
         <div className="space-y-6">
           <div className="rounded-2xl bg-slate-50 p-5">
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-800">Agent/model combinations</h2>
                 <p className="mt-0.5 text-xs text-slate-500">
@@ -95,6 +158,7 @@ export default function NewBatch(): JSX.Element {
                 size="sm"
                 onClick={addRow}
                 disabled={rows.length >= MAX_COMBINATIONS}
+                className="shrink-0 whitespace-nowrap"
                 title="Add another agent/model combination to run on the same task slate."
               >
                 + Add combination
@@ -102,7 +166,7 @@ export default function NewBatch(): JSX.Element {
             </div>
             <div className="space-y-4">
               {rows.map((r, i) => (
-                <div key={i} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div key={i} id={`batch-combination-${i + 1}`} tabIndex={-1} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                       Combination {i + 1}
@@ -303,6 +367,7 @@ export default function NewBatch(): JSX.Element {
         <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           <input
             type="checkbox"
+            id="fan-out-confirm"
             checked={confirmedLargeFanOut}
             onChange={(e) => setConfirmedLargeFanOut(e.target.checked)}
             className="mt-0.5 h-4 w-4 rounded border-amber-300"
@@ -326,8 +391,8 @@ export default function NewBatch(): JSX.Element {
           }}
           disabled={create.isPending || totalTrials === 0 || tagSelectionPending}
           title={
-            totalTrials === 0
-              ? "Pick benchmarks and a valid agent/model combination before submitting."
+            totalTrials === undefined || totalTrials === 0
+              ? "Choose a task source and complete the configuration before submitting."
               : `Create this batch with ${totalTrials} planned trial${totalTrials === 1 ? "" : "s"}.`
           }
         >

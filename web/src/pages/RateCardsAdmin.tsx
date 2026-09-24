@@ -27,31 +27,10 @@ import { Textarea } from "../components/Input";
 import LoadingState from "../components/LoadingState";
 import { rateCardExampleJson } from "../lib/quickstartSnippets";
 
-const DEFAULT_BODY = `{
-  "id": "default-2026Q3",
-  "captured_at": "${new Date().toISOString()}",
-  "table": {
-    "id": "default-2026Q3",
-    "entries": [
-      {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "input_per_mtok": 5.0,
-        "output_per_mtok": 15.0,
-        "cache_read_per_mtok": 0.0,
-        "cache_write_per_mtok": 0.0
-      },
-      {
-        "provider": "anthropic",
-        "model": "claude-opus-4-7",
-        "input_per_mtok": 15.0,
-        "output_per_mtok": 75.0,
-        "cache_read_per_mtok": 1.5,
-        "cache_write_per_mtok": 18.75
-      }
-    ]
-  }
-}`;
+const DEFAULT_BODY = JSON.stringify({ id: "illustrative-example", entries: [
+  { provider: "example-provider", model: "example-model", input_per_mtok: 1,
+    output_per_mtok: 2, cache_read_per_mtok: 0, cache_write_per_mtok: 0 },
+] }, null, 2);
 
 type RateCardEntry = {
   cache_read_per_mtok?: number | null;
@@ -60,6 +39,8 @@ type RateCardEntry = {
   model?: string | null;
   output_per_mtok?: number | null;
   provider?: string | null;
+  tier?: string | null;
+  region?: string | null;
 };
 
 type RateCard = {
@@ -145,9 +126,25 @@ function RateCardSummary({ items }: { items: RateCard[] }): JSX.Element {
   );
 }
 
+function PriceChanges({ before, after }: { before: RateCardEntry[]; after: RateCardEntry[] }): JSX.Element {
+  const key = (entry: RateCardEntry): string => [entry.provider, entry.model, entry.tier, entry.region].join(" / ");
+  const previous = new Map(before.map((entry) => [key(entry), entry]));
+  const proposed = new Map(after.map((entry) => [key(entry), entry]));
+  const fields = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok"] as const;
+  const changes = [...new Set([...previous.keys(), ...proposed.keys()])].flatMap((name) => {
+    const old = previous.get(name);
+    const next = proposed.get(name);
+    return fields.filter((field) => old?.[field] !== next?.[field]).map((field) => ({ name, field, before: old?.[field], after: next?.[field] }));
+  });
+  if (!changes.length) return <p className="text-sm">No model price changes from the current card.</p>;
+  return <div className="overflow-x-auto"><table aria-label="Price changes" className="min-w-full text-sm"><thead><tr><th className="p-2 text-left">Model / tier / region</th><th className="p-2 text-left">Price</th><th className="p-2 text-left">Current</th><th className="p-2 text-left">Proposed</th></tr></thead><tbody>{changes.map((change) => <tr key={`${change.name}-${change.field}`}><td className="p-2">{change.name}</td><td className="p-2">{change.field.replaceAll("_", " ")}</td><td className="p-2">{moneyPerMtok(change.before)}</td><td className="p-2">{moneyPerMtok(change.after)}</td></tr>)}</tbody></table></div>;
+}
+
 export default function RateCardsAdmin(): JSX.Element {
   const { isAdmin } = useAuth();
   const [bodyText, setBodyText] = useState(DEFAULT_BODY);
+  const [publishing, setPublishing] = useState(false);
+  const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
 
   const queryClient = useQueryClient();
@@ -173,7 +170,22 @@ export default function RateCardsAdmin(): JSX.Element {
         setLocalError("expected a JSON object");
         return;
       }
-      create.mutate(parsed as Record<string, unknown>);
+      const candidate = parsed as Record<string, unknown>;
+      if (typeof candidate.id !== "string" || !candidate.id.trim() || !Array.isArray(candidate.entries) || candidate.entries.length === 0) {
+        setLocalError("Provide an id and a non-empty entries array. Use the publish shape, not the read-only table envelope.");
+        return;
+      }
+      const fields = ["input_per_mtok", "output_per_mtok", "cache_read_per_mtok", "cache_write_per_mtok"];
+      if (!candidate.entries.every((entry: unknown) => {
+        if (!entry || typeof entry !== "object") return false;
+        const row = entry as Record<string, unknown>;
+        return typeof row.provider === "string" && row.provider.trim() && typeof row.model === "string" && row.model.trim()
+          && fields.every((field) => typeof row[field] === "number" && Number.isFinite(row[field]) && (row[field] as number) >= 0);
+      })) {
+        setLocalError("Each entry needs provider, model, and four non-negative token prices.");
+        return;
+      }
+      setPreview(candidate);
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e));
     }
@@ -201,7 +213,7 @@ export default function RateCardsAdmin(): JSX.Element {
         data-loom-query="rate-cards"
         data-loom-query-status={list.status}
       >
-        <Card.Header title="Published" />
+        <Card.Header title="Published" description="The gateway uses the card with the latest captured time. Publishing updates that time and changes the effective card; reusing an ID replaces that version. Stored call costs retain their recorded snapshots." />
         <Card.Body>
           {list.isPending ? <LoadingState /> : null}
           {list.isError ? <ErrorState error={list.error} /> : null}
@@ -228,19 +240,23 @@ export default function RateCardsAdmin(): JSX.Element {
         </Card.Body>
       </Card>
 
-      {isAdmin ? (
+      {isAdmin && !publishing ? <Button onClick={() => setPublishing(true)}>Publish a new rate card</Button> : null}
+      {isAdmin && publishing ? (
         <Card>
           <Card.Header
             title="Publish a new rate card"
-            description="POSTs to the Gateway via the service-layer proxy."
+            description="Review prices before publishing. Sample prices are illustrative, not current provider pricing. Publishing changes the shared card for all teams."
           />
           <Card.Body className="space-y-3">
+            <details open><summary className="cursor-pointer text-sm">Advanced JSON input</summary>
             <Textarea
               aria-label="Rate card JSON payload"
               value={bodyText}
-              onChange={(e) => setBodyText(e.target.value)}
+              onChange={(e) => { setBodyText(e.target.value); setPreview(null); }}
               rows={14}
             />
+            </details>
+            {preview ? <section aria-label="Publication preview" className="space-y-3"><h3 className="font-semibold">Review publication: {String(preview.id)}</h3><RateCardSummary items={[{ id: String(preview.id), table: { entries: preview.entries as RateCardEntry[] } }]} /><p className="text-sm">{(list.data?.items as RateCard[] | undefined)?.some((card) => card.id === preview.id) ? "Replaces the published version with this ID." : "Creates a new published version."} Compare against the current prices above. The new card becomes effective after publication.</p><PriceChanges before={(list.data?.items as RateCard[] | undefined)?.[0]?.table?.entries ?? []} after={preview.entries as RateCardEntry[]} /></section> : null}
             {localError ? (
               <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {localError}
@@ -257,10 +273,10 @@ export default function RateCardsAdmin(): JSX.Element {
             <div className="flex justify-end">
               <Button
                 variant="primary"
-                onClick={submit}
+                onClick={() => preview ? create.mutate(preview) : submit()}
                 disabled={create.isPending}
               >
-                {create.isPending ? "Publishing…" : "Publish"}
+                {create.isPending ? "Publishing…" : preview ? "Confirm publish" : "Preview changes"}
               </Button>
             </div>
           </Card.Footer>

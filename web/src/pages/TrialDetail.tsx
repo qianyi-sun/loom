@@ -9,7 +9,7 @@ import { TrialProgressPill, TrialProgressTimeline } from "../components/TrialPro
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
 import type { components } from "../api/schema";
@@ -51,8 +51,21 @@ const ACTIVE_TRIAL_STATES = new Set([
   "materializing",
 ]);
 
+function TrialSectionLink({ section, children, className }: { section: string; children: string; className?: string }): JSX.Element {
+  const location = useLocation();
+  return <Link
+    to={{ pathname: location.pathname, search: location.search, hash: `#${section}` }}
+    state={location.state}
+    className={className}
+    onClick={() => document.getElementById(section)?.scrollIntoView()}
+  >{children}</Link>;
+}
+
 function artifactLabel(artifact: TrialArtifact): string {
-  return artifact.key || artifact.step_name || "artifact";
+  const key = artifact.key || artifact.step_name || "artifact";
+  const marker = key.lastIndexOf("/artifacts/");
+  if (marker >= 0) return key.slice(marker + "/artifacts/".length);
+  return key.startsWith("s3://") || key.split("/").length > 4 ? key.split("/").slice(-2).join("/") : key;
 }
 
 function artifactDownloadName(artifact: TrialArtifact): string {
@@ -239,12 +252,7 @@ function MaterializationCard({
                   {bundle.file_count} files · {formatBytes(bundle.size_bytes)} · manifest {bundle.manifest_sha256.slice(0, 20)}…
                 </p>
               </div>
-              <Button
-                title="Download the complete canonical Trial bundle with trajectory, ATIF, artifacts, evidence, manifest, and checksums."
-                onClick={() => void api.downloadTrialBundle(trial.id)}
-              >
-                Download complete Trial bundle
-              </Button>
+
             </div>
           </div>
         ) : (
@@ -269,7 +277,6 @@ function TrialHeader({
   const provenance = Array.isArray(trial.source_provenance)
     ? trial.source_provenance
     : [];
-  const firstArtifactKey = trial.artifacts[0]?.key ?? null;
   const hasCostProjection =
     "estimated_cost_usd" in trial ||
     "cost_status" in trial ||
@@ -306,6 +313,25 @@ function TrialHeader({
           <p className="mt-1 text-xs text-slate-600">{outcome.description}</p>
         </div>
 
+        {failure ? (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-red-800">
+              Failure reason
+            </p>
+            <p className="mt-1 text-sm font-semibold text-red-950">
+              {failure.label}
+            </p>
+            <p className="mt-1 text-xs text-red-800">
+              {typeof trial.failure_message === "string" && trial.failure_message ? trial.failure_message : failure.description}
+            </p>
+            <details className="mt-2 text-xs text-red-700"><summary className="cursor-pointer">Technical details</summary><p>
+              Raw code:{" "}
+              <code className="font-mono">{failure.code}</code>
+            </p></details>
+          </div>
+        ) : null}
+
+        {trial.materialization?.canonical_ready && trial.materialization.bundle ? <Button variant="primary" onClick={() => void api.downloadTrialBundle(trial.id)}>Download complete Trial bundle</Button> : null}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
           <StatCard
             label="Owner"
@@ -313,7 +339,7 @@ function TrialHeader({
           />
           <StatCard
             label="Visibility"
-            value={`${trial.visibility ?? "team"} / ${trial.share_status ?? "pending_scan"}`}
+            value={`${trial.visibility === "org" ? "Organization access" : trial.visibility === "private" ? "Private access" : "Team access"} / ${trial.share_status === "shared" ? "sharing approved" : trial.share_status === "blocked" ? "sharing blocked" : "sharing scan pending"}`}
           />
           <StatCard label="Agent" value={agentLabel(trial.agent_name, trial.agent_version)} />
           <StatCard label="Model" value={modelLabel(trial.model)} />
@@ -387,24 +413,14 @@ function TrialHeader({
           </div>
         ) : null}
 
-        {failure ? (
-          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
-            <p className="text-xs font-semibold uppercase tracking-wider text-red-800">
-              Failure reason
-            </p>
-            <p className="mt-1 text-sm font-semibold text-red-950">
-              {failure.label}
-            </p>
-            <p className="mt-1 text-xs text-red-800">
-              {failure.description}
-            </p>
-            <p className="mt-2 text-xs text-red-700">
-              Raw code:{" "}
-              <code className="font-mono">{failure.code}</code>
-            </p>
-          </div>
-        ) : null}
+      </Card.Body>
+    </Card>
+  );
+}
 
+function TrialArtifacts({ trial }: { trial: components["schemas"]["TrialDetail"] }): JSX.Element {
+  const firstArtifactKey = trial.artifacts[0]?.key ?? null;
+  return <Card><Card.Header title="Artifacts" description="Complete bundle is the primary delivery. Individual files and reports are available below." /><Card.Body className="space-y-4">
         <div className="flex flex-wrap gap-2">
           {trial.atif_ready ? (
             <Button
@@ -437,13 +453,14 @@ function TrialHeader({
               disabled
               title="Trajectory is written once the worker starts the trial."
             >
-              Trajectory pending
+              {ACTIVE_TRIAL_STATES.has(trial.state) ? "Trajectory pending" : "No trajectory recorded"}
             </Button>
           )}
         </div>
 
         <CommandActions title="Trial download commands" label="Download with CLI" commands={trialDownloadCommands(trial.id, firstArtifactKey)} />
 
+        <p className="text-xs text-slate-600">Sharing review controls reuse outside the owning team. Available downloads follow your current access; a pending sharing scan does not mean the file is missing.</p>
         {trial.artifacts.length > 0 ? (
           <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -477,6 +494,8 @@ function TrialHeader({
                         {artifact.size == null ? "Size unknown" : formatBytes(artifact.size)}
                       </span>
                     </button>
+                    <p className="mt-1 text-xs text-slate-500">{artifact.step_name || "Trial output"}{/stderr|stdout|debug|\.log$/i.test(label) ? " · Execution diagnostic" : artifact.size === 0 ? " · Empty file" : " · Output file"}</p>
+                    <details className="mt-2 text-xs text-slate-500"><summary className="cursor-pointer">Storage and sharing details</summary><code className="break-all">{artifact.key}</code></details>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
                       <span
                         className={`rounded-md border px-1.5 py-0.5 font-medium ${share.className}`}
@@ -495,12 +514,11 @@ function TrialHeader({
             </div>
           </div>
         ) : null}
-      </Card.Body>
-    </Card>
-  );
+  {trial.artifacts.length === 0 ? <p className="text-sm text-slate-500">No individual artifacts are available for this trial.</p> : null}
+  </Card.Body></Card>;
 }
 
-function Trajectory({ trialId }: { trialId: string }): JSX.Element {
+function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; terminal: boolean; trajectoryReady: boolean }): JSX.Element {
   // #5 Slice 6: switch the trajectory viewer from manual-paginate
   // `/trajectory?cursor=N` to SSE `/stream`. Events stream in live
   // while the trial is non-terminal; the connection closes itself
@@ -560,7 +578,9 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
         {useFallback && fallback.isError ? (
           <ErrorState error={fallback.error} />
         ) : null}
-        <EventTimeline events={renderedEvents} />
+        {terminal && renderedEvents.length === 0 && (!trajectoryReady || stream.status === "complete" || (useFallback && fallbackDone)) ? (
+          <p className="text-sm text-slate-600">This trial ended without recorded trajectory events. <TrialSectionLink section="diagnostics" className="text-accent underline">Open build and execution diagnostics</TrialSectionLink> for the final reason and available evidence.</p>
+        ) : <EventTimeline events={renderedEvents} />}
         {useFallback && fallback.isError ? (
           <Button
             onClick={() => fallback.refetch()}
@@ -588,6 +608,8 @@ function Trajectory({ trialId }: { trialId: string }): JSX.Element {
 }
 
 export default function TrialDetail(): JSX.Element {
+  const location = useLocation();
+  const monitorReturn = location.state?.monitorReturn || "/monitor?view=trials";
   const { trialId } = useParams<{ trialId: string }>();
 
   const polling = useAdaptivePolling({
@@ -609,6 +631,13 @@ export default function TrialDetail(): JSX.Element {
     },
   });
 
+  const parentBatchId = typeof trial.data?.batch_id === "string" ? trial.data.batch_id : undefined;
+  const parentBatch = useQuery({
+    queryKey: queryKeys["batch"](parentBatchId ?? undefined),
+    queryFn: () => api.getBatch(parentBatchId!),
+    enabled: !!parentBatchId,
+  });
+
   if (!trialId) {
     return <ErrorState error={new Error("missing trialId")} />;
   }
@@ -620,7 +649,7 @@ export default function TrialDetail(): JSX.Element {
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-4">
         <Link
-          to="/trials"
+          to={monitorReturn}
           title="Return to the trial monitor table."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
@@ -628,19 +657,31 @@ export default function TrialDetail(): JSX.Element {
         </Link>
         <Link
           to={`/trials/compare?a=${trialId}`}
+          state={{ monitorReturn }}
           title="Start a side-by-side comparison using this trial."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
           Compare with another trial →
         </Link>
       </div>
-      <TrialHeader trial={trial.data} />
+      <nav aria-label="Trial context" className="flex flex-wrap gap-2 text-sm">
+        <Link to={monitorReturn} className="text-accent">Monitor</Link>
+        {parentBatchId ? <><span>→</span><Link to={`/batches/${parentBatchId}`} state={{ monitorReturn }} className="text-accent">{parentBatch.data?.name || `Batch ${parentBatchId.slice(0, 8)}`}</Link></> : null}
+        <span>→ {trial.data.task_id}</span>
+      </nav>
+      <nav aria-label="Trial sections" className="flex flex-wrap gap-4 text-sm text-accent">
+        <TrialSectionLink section="overview">Overview</TrialSectionLink><TrialSectionLink section="trajectory">Trajectory</TrialSectionLink><TrialSectionLink section="artifacts">Artifacts</TrialSectionLink><TrialSectionLink section="diagnostics">Diagnostics</TrialSectionLink>
+      </nav>
+      <section id="overview"><TrialHeader trial={trial.data} /></section>
+      <section id="trajectory"><Trajectory key={trialId} trialId={trialId} terminal={!ACTIVE_TRIAL_STATES.has(trial.data.state)} trajectoryReady={trial.data.trajectory_ready} /></section>
+      <section id="artifacts"><TrialArtifacts trial={trial.data} /></section>
+      <section id="diagnostics" className="space-y-4"><h2 className="text-lg font-semibold">Diagnostics</h2>
       <TrialProgressTimeline progress={trial.data.progress} />
       <TaskImagePreparationCard preparations={trial.data.task_environment_preparation} />
       <MaterializationCard trial={trial.data} />
       <DiagnosisCard diagnosis={trial.data.diagnosis} />
-      <DebugEvidenceCard evidence={trial.data.debug_evidence} />
-      <Trajectory trialId={trialId} />
+      <details><summary className="cursor-pointer text-sm font-medium">Raw debug evidence</summary><DebugEvidenceCard evidence={trial.data.debug_evidence} /></details>
+      </section>
     </div>
   );
 }

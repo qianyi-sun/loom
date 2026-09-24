@@ -17,7 +17,7 @@ export function providerStatusSummary(
   if (status === "valid") {
     return {
       description:
-        "Last provider test passed. Loom can use this connection for model requests.",
+        "Last provider test passed. Ready reflects that test, not a live availability check; individual models may still need preflight.",
       label: "Ready",
       variant: "success",
     };
@@ -60,4 +60,10 @@ export function allowedModelsSummary(
       allowedModels.length === 1 ? "model" : "models"
     }`,
   };
+}
+
+export function providerTestAge(value?: string | null): string {
+  if (!value || !Number.isFinite(Date.parse(value))) return "Test time unavailable";
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(value)) / 60000));
+  return minutes < 60 ? `Tested ${minutes} minutes ago` : minutes < 1440 ? `Tested ${Math.floor(minutes / 60)} hours ago` : `Tested ${Math.floor(minutes / 1440)} days ago`;
 }

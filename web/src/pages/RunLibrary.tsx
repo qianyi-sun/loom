@@ -1,7 +1,7 @@
 import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 
 import { api, type ArtifactSummary, type RunLibraryBatch } from "../api";
 import { useAuth } from "../auth/useAuth";
@@ -13,15 +13,20 @@ import { RunLibraryFilters } from "./RunLibraryFilters";
 import LoadingState from "../components/LoadingState";
 import Pagination from "../components/Pagination";
 import { StatusPill } from "../components/StatusPill";
-import { useCursorPage } from "../hooks/useCursorPage";
+import { Tabs } from "../components/Tabs";
+import { clearCursorParams, useUrlCursorPage } from "../hooks/useUrlCursorPage";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { modelLabel } from "../lib/modelLabel";
 import { ownershipLabel } from "../lib/ownership";
 import { batchResultPresentation, batchStateVariant } from "../lib/statusVariant";
-import { formatUsageCost } from "../lib/usageCost";
+
 
 const TERMINAL_STATES = new Set(["finished", "cancelled"]);
+const LIBRARY_MODES = [
+  { value: "runs", label: "Runs" },
+  { value: "pipeline", label: "Pipeline artifacts" },
+] as const;
 
 function scopeFromParams(params: URLSearchParams): "my" | "all" {
   return params.get("scope") === "all" ? "all" : "my";
@@ -40,20 +45,6 @@ function primaryModel(batch: RunLibraryBatch): string {
 
 function formatDate(value: string | null): string {
   return formatLocalDateTime(value, { fallback: "--" });
-}
-
-function costStatusLabel(batch: RunLibraryBatch): string {
-  const raw = batch as unknown as Record<string, unknown>;
-  const costStatus =
-    typeof raw.cost_status === "string" && raw.cost_status
-      ? raw.cost_status
-      : "unknown";
-  const source =
-    typeof raw.cost_estimate_source === "string" && raw.cost_estimate_source
-      ? raw.cost_estimate_source
-      : "unknown";
-  const status = costStatus === "price_unknown" ? "unknown" : costStatus;
-  return `${status}/${source}`;
 }
 
 function ArtifactBadges({
@@ -109,6 +100,8 @@ function ScopeButton({
 export default function RunLibrary(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
   const auth = useAuth();
+  const location = useLocation();
+  const returnContext = { returnTo: location.pathname + location.search, returnState: location.state };
   const scope = scopeFromParams(searchParams);
   const teamId = searchParams.get("team_id") ?? "";
   const state = searchParams.get("state") ?? "";
@@ -123,24 +116,7 @@ export default function RunLibrary(): JSX.Element {
   const pipelineOnly = searchParams.get("producer_kind") === "pipeline";
   const pipelineRecipe = searchParams.get("pipeline_recipe") ?? "";
   const pipelineResult = searchParams.get("pipeline_result") ?? "";
-  const page = useCursorPage(
-    JSON.stringify([
-      scope,
-      teamId,
-      state,
-      artifactType,
-      search,
-      benchmarkId,
-      agentName,
-      modelProvider,
-      modelName,
-      providerConnectionId,
-      providerModelId,
-      pipelineOnly,
-      pipelineRecipe,
-      pipelineResult,
-    ]),
-  );
+  const page = useUrlCursorPage();
 
   const teamsQuery = useQuery({
     queryKey: queryKeys["admin-teams"](auth.isAdmin),
@@ -171,13 +147,14 @@ export default function RunLibrary(): JSX.Element {
   });
 
   const pipelineArtifactsQuery = useQuery({
-    queryKey: queryKeys["run-library-pipeline-artifacts"](scope, teamId, artifactType, pipelineRecipe, pipelineResult),
-    queryFn: () => api.listRunLibraryArtifacts({ producer_kind: "pipeline", pipeline_recipe: pipelineRecipe || undefined, pipeline_result: pipelineResult || undefined, team_id: teamId || undefined, artifact_type: artifactType || undefined, scope: scope === "all" ? "all" : undefined }),
+    queryKey: queryKeys["run-library-pipeline-artifacts"](scope, teamId, artifactType, pipelineRecipe, pipelineResult, page.cursor),
+    queryFn: () => api.listRunLibraryArtifacts({ producer_kind: "pipeline", pipeline_recipe: pipelineRecipe || undefined, pipeline_result: pipelineResult || undefined, team_id: teamId || undefined, artifact_type: artifactType || undefined, scope: scope === "all" ? "all" : undefined, cursor: page.cursor ?? undefined, limit: "50" }),
     enabled: pipelineOnly,
   });
 
   function setScope(nextScope: "my" | "all"): void {
     const next = new URLSearchParams(searchParams);
+    clearCursorParams(next);
     if (nextScope === "all") next.set("scope", "all");
     else next.delete("scope");
     next.delete("team_id");
@@ -209,146 +186,160 @@ export default function RunLibrary(): JSX.Element {
         <HelpButton topic="reuse">Reuse guide</HelpButton>
       </div>
 
-      <RunLibraryFilters teamOptions={teamOptions} />
+      <Tabs
+        items={LIBRARY_MODES}
+        value={pipelineOnly ? "pipeline" : "runs"}
+        onValueChange={(mode) => {
+          const next = new URLSearchParams(searchParams);
+          clearCursorParams(next);
+          if (mode === "pipeline") next.set("producer_kind", "pipeline");
+          else next.delete("producer_kind");
+          setSearchParams(next);
+        }}
+        ariaLabel="Library mode"
+        tabListClassName="mb-4 flex gap-2"
+        tabClassName={({ selected }) => `rounded border px-3 py-2 text-sm ${selected ? "border-accent bg-accent text-white" : "border-slate-300 text-slate-700"}`}
+        panelClassName="space-y-6"
+        renderPanel={() => <>
+          <RunLibraryFilters teamOptions={teamOptions} />
 
-      <Card>
-        <Card.Body className="p-0">
-          {pipelineOnly ? pipelineArtifactsQuery.isPending ? (
-            <div className="p-5"><LoadingState /></div>
-          ) : pipelineArtifactsQuery.isError ? (
-            <div className="p-5"><ErrorState error={pipelineArtifactsQuery.error} /></div>
-          ) : pipelineArtifactsQuery.data.items.length === 0 ? (
-            <EmptyState label="No Pipeline artifacts match this view." hint="Clear a Pipeline filter or select another team." />
-          ) : (
-            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Pipeline artifacts scroll area"><table aria-label="Pipeline artifacts" className="min-w-full text-sm"><thead><tr>{["Artifact", "Type", "Producer Pipeline", "Producer Stage", "Recipe", "Result", "Team", "Scan status"].map((header) => <th scope="col" key={header} className="px-4 py-3 text-left text-xs uppercase text-slate-500">{header}</th>)}</tr></thead><tbody>{pipelineArtifactsQuery.data.items.map((artifact) => <tr key={artifact.id ?? artifact.key} className="border-t"><td className="px-4 py-3"><span className="block min-w-64 max-w-sm break-words">{artifact.key}</span></td><td className="px-4 py-3">{artifact.artifact_type ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline ? <Link className="text-accent" to={`/pipelines/${artifact.pipeline.run_id}`}>{artifact.pipeline.run_id}</Link> : "—"}</td><td className="px-4 py-3">{artifact.pipeline?.stage_run_id ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.recipe ?? "—"}</td><td className="px-4 py-3">{artifact.pipeline?.result ?? "Pending"}</td><td className="px-4 py-3">{artifact.owner_team?.name ?? "—"}</td><td className="px-4 py-3">{artifact.share_status === "pending_scan" ? "Team private — scan pending" : artifact.share_status}</td></tr>)}</tbody></table></div>
-          ) : query.isPending ? (
-            <div className="p-5">
-              <LoadingState announce={false} />
-            </div>
-          ) : query.isError ? (
-            <div className="p-5">
-              <ErrorState error={query.error} />
-            </div>
-          ) : query.data.items.length === 0 ? (
-            <EmptyState
-              label="No runs match this library view."
-              hint="Try All teams or clear the filters."
-            />
-          ) : (
-            <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Runs scroll area">
-              <table aria-label="Runs" className="min-w-full divide-y divide-slate-200 text-sm">
-                <thead>
-                  <tr className="bg-slate-50/50">
-                    {[
-                      "Run",
-                      "Owner",
-                      "Benchmark / task subset",
-                      "Agent / model",
-                      "Status",
-                      "Score",
-                      "Trials",
-                      "Usage cost",
-                      "Token",
-                      "Created",
-                      "Artifacts",
-                      "Visibility",
-                    ].map((header) => (
-                      <th
-                        key={header}
-                        className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
-                      >
-                        {header}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {query.data.items.map((batch) => {
-                    const task = humanizeTaskFilter(batch.task_filter, {
-                      matchedTaskCount: batch.expected_trial_count,
-                    });
-                    const terminal = TERMINAL_STATES.has(batch.state);
-                    const result = batch.result_status && terminal
-                      ? batchResultPresentation(batch.result_status, batch.trial_summary) : null;
-                    return (
-                      <tr key={batch.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3">
-                          <Link
-                            to={`/library/batches/${batch.id}`}
-                            className="block min-w-64 max-w-sm break-words font-medium text-accent hover:text-accent-hover"
+          <Card>
+            <Card.Body className="p-0">
+              {pipelineOnly ? pipelineArtifactsQuery.isPending ? (
+                <div className="p-5"><LoadingState /></div>
+              ) : pipelineArtifactsQuery.isError ? (
+                <div className="p-5"><ErrorState error={pipelineArtifactsQuery.error} /></div>
+              ) : pipelineArtifactsQuery.data.items.length === 0 ? (
+                <EmptyState label="No Pipeline artifacts match this view." hint="Clear a Pipeline filter or select another team." />
+              ) : (
+                <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Pipeline artifacts scroll area">
+                  <table aria-label="Pipeline artifacts" className="min-w-full text-sm">
+                    <thead><tr>{["Artifact", "Type", "Producer Pipeline", "Producer Stage", "Recipe", "Result", "Team", "Scan status"].map((header) => <th scope="col" key={header} className="px-4 py-3 text-left text-xs uppercase text-slate-500">{header}</th>)}</tr></thead>
+                    <tbody>{pipelineArtifactsQuery.data.items.map((artifact) => {
+                      const canOpen = artifact.owner_team?.id === auth.currentTeamId;
+                      const name = artifact.relative_path ?? artifact.key.split("/").pop();
+                      return <tr key={artifact.id ?? artifact.key} className="border-t">
+                        <td className="px-4 py-3"><div className="block min-w-64 max-w-sm break-words">
+                          {canOpen && artifact.id && artifact.pipeline ? <Link className="text-accent" state={returnContext} to={`/pipelines/${artifact.pipeline.run_id}/stages/${artifact.pipeline.stage_run_id}/artifacts/${artifact.id}`}>{name}</Link> : <span>{name}</span>}
+                          <details className="mt-1 text-xs"><summary>{artifact.pipeline ? "Artifact ID" : "Storage key"}</summary>{artifact.pipeline ? artifact.id : artifact.key}</details>
+                        </div></td>
+                        <td className="px-4 py-3">{artifact.artifact_type ?? "—"}</td>
+                        <td className="px-4 py-3">{canOpen && artifact.pipeline ? <Link className="text-accent" state={returnContext} to={`/pipelines/${artifact.pipeline.run_id}`}>{artifact.pipeline.run_id}</Link> : artifact.pipeline?.run_id ?? "—"}</td>
+                        <td className="px-4 py-3">{canOpen && artifact.pipeline ? <Link className="text-accent" state={returnContext} to={`/pipelines/${artifact.pipeline.run_id}?stage=${artifact.pipeline.stage_run_id}`}>{artifact.pipeline.stage_run_id}</Link> : artifact.pipeline?.stage_run_id ?? "—"}</td>
+                        <td className="px-4 py-3">{artifact.pipeline?.recipe ?? "—"}</td>
+                        <td className="px-4 py-3">{artifact.pipeline?.result ?? "Pending"}</td>
+                        <td className="px-4 py-3">{artifact.owner_team?.name ?? "—"}{!canOpen ? <p className="mt-1 text-xs"><Link className="text-accent underline" to="/settings">Select the owning team to inspect details</Link>. Pipeline details use your current team access.</p> : null}</td>
+                        <td className="px-4 py-3">{artifact.share_status === "pending_scan" ? "Team private — scan pending" : artifact.share_status}</td>
+                      </tr>;
+                    })}</tbody>
+                  </table>
+                </div>
+              ) : query.isPending ? (
+                <div className="p-5">
+                  <LoadingState announce={false} />
+                </div>
+              ) : query.isError ? (
+                <div className="p-5">
+                  <ErrorState error={query.error} />
+                </div>
+              ) : query.data.items.length === 0 ? (
+                <EmptyState
+                  label="No runs match this library view."
+                  hint="Try All teams or clear the filters."
+                />
+              ) : (
+                <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Runs scroll area">
+                  <table aria-label="Runs" className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead>
+                      <tr className="bg-slate-50/50">
+                        {[
+                          "Run",
+                          "Owner",
+                          "Benchmark / task subset",
+                          "Agent / model",
+                          "Status",
+                          "Created",
+                          "Artifacts",
+                        ].map((header) => (
+                          <th
+                            key={header}
+                            className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500"
                           >
-                            {batch.name}
-                          </Link>
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          {ownershipLabel(batch)}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          {task.primary}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          {primaryModel(batch)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <StatusPill variant={result?.variant ?? batchStateVariant(batch.state)}>
-                            {result?.label ?? batch.state}
-                          </StatusPill>
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          <div>
-                            {batch.aggregate_reward != null
-                              ? batch.aggregate_reward.toFixed(3)
-                              : "--"}
-                          </div>
-                          <div className="text-xs text-slate-500">
-                            {costStatusLabel(batch)}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          {batch.expected_trial_count}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700">
-                          {formatUsageCost(batch)}
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                          {batch.created_by_token_prefix}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500">
-                          {formatDate(batch.created_at)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <ArtifactBadges
-                            summary={batch.artifact_summary}
-                            truncated={batch.artifact_summary_truncated}
-                          />
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-600">
-                          {batch.visibility} / {batch.share_status}
-                        </td>
+                            {header}
+                          </th>
+                        ))}
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Card.Body>
-        <Card.Footer>
-          {pipelineOnly ? <p className="text-xs text-slate-500">Pipeline Artifact results are bounded to the authorized server page.</p> : <Pagination
-            state={page.state}
-            hasNext={query.data?.next_cursor != null}
-            isLoading={query.isPending || query.isFetching}
-            isError={query.isError}
-            onNext={() => {
-              const cursor = query.data?.next_cursor;
-              if (cursor) page.next(cursor);
-            }}
-            onPrev={page.prev}
-            onRetry={() => void query.refetch()}
-            className="mt-0"
-          />}
-        </Card.Footer>
-      </Card>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {query.data.items.map((batch) => {
+                        const task = humanizeTaskFilter(batch.task_filter, {
+                          matchedTaskCount: batch.expected_trial_count,
+                        });
+                        const terminal = TERMINAL_STATES.has(batch.state);
+                        const result = batch.result_status && terminal
+                          ? batchResultPresentation(batch.result_status, batch.trial_summary) : null;
+                        return (
+                          <tr key={batch.id} className="hover:bg-slate-50">
+                            <td className="px-4 py-3">
+                              <Link
+                                to={`/library/batches/${batch.id}`}
+                                state={returnContext}
+                                className="block min-w-64 max-w-sm break-words font-medium text-accent hover:text-accent-hover"
+                              >
+                                {batch.name}
+                              </Link>
+                            </td>
+                            <td className="px-4 py-3 text-slate-700">
+                              {ownershipLabel(batch)}
+                            </td>
+                            <td className="px-4 py-3 text-slate-700">
+                              {task.primary}
+                            </td>
+                            <td className="px-4 py-3 text-slate-700">
+                              {primaryModel(batch)}
+                            </td>
+                            <td className="px-4 py-3">
+                              <StatusPill variant={result?.variant ?? batchStateVariant(batch.state)}>
+                                {result?.label ?? batch.state}
+                              </StatusPill>
+                              <p className="mt-1 text-xs text-slate-500">Score {batch.aggregate_reward?.toFixed(3) ?? "—"} · {batch.expected_trial_count} trials</p>
+                            </td>
+                            <td className="px-4 py-3 text-xs text-slate-500">
+                              {formatDate(batch.created_at)}
+                            </td>
+                            <td className="px-4 py-3">
+                              <ArtifactBadges
+                                summary={batch.artifact_summary}
+                                truncated={batch.artifact_summary_truncated}
+                              />
+                            </td>
+
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Card.Body>
+            <Card.Footer>
+              {<Pagination
+                state={page.state}
+                hasNext={(pipelineOnly ? pipelineArtifactsQuery.data : query.data)?.next_cursor != null}
+                isLoading={pipelineOnly ? pipelineArtifactsQuery.isPending || pipelineArtifactsQuery.isFetching : query.isPending || query.isFetching}
+                isError={pipelineOnly ? pipelineArtifactsQuery.isError : query.isError}
+                onNext={() => {
+                  const cursor = (pipelineOnly ? pipelineArtifactsQuery.data : query.data)?.next_cursor;
+                  if (cursor) page.next(cursor);
+                }}
+                onPrev={page.prev}
+                onRetry={() => void (pipelineOnly ? pipelineArtifactsQuery.refetch() : query.refetch())}
+                className="mt-0"
+              />}
+            </Card.Footer>
+          </Card>
+        </>}
+      />
     </div>
   );
 }
