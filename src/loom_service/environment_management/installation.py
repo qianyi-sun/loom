@@ -50,6 +50,8 @@ class ManagementInstallation(BaseModel):
 
     @model_validator(mode="after")
     def validate_publications(self) -> ManagementInstallation:
+        if self.provider_runtime is not None and self.foundation.provisioning_project_id is None:
+            raise ValueError("provider runtime requires an explicit dedicated provisioning project")
         ImageAdmissionKeyring.from_json(json.dumps(self.keyring))
         if (len({row.candidate_id for row in self.publications}) != len(self.publications)
                 or any(row.candidate_id.int == 0 for row in self.publications)):

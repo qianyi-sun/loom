@@ -40,6 +40,7 @@ class RenderedEnvironment:
     files: dict[str, list[dict[str, Any]]]
     platform_envelope: PlatformEnvelope
     execution_enabled: Literal[False] = False
+    provisioning_project_id: str | None = None
 
 
 def _configuration(
@@ -217,4 +218,5 @@ def render_environment(
                 ephemeral = f"{config['postgres_storage_gi']}Gi" if doc["kind"] == "CronJob" else "256Mi"
                 container["resources"]["requests"]["ephemeral-storage"] = ephemeral
                 container["resources"]["limits"]["ephemeral-storage"] = ephemeral
-    return RenderedEnvironment(row, config, files, _envelope(files))
+    return RenderedEnvironment(row, config, files, _envelope(files),
+                               provisioning_project_id=foundation.provisioning_project_id)

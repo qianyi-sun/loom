@@ -121,6 +121,7 @@ async def test_provider_runtime_is_supervised_and_closed_before_database_shutdow
 
     monkeypatch.setattr(nebius.sdk, "SDK", sdk_factory)
     data = json.loads(installation_file.read_text())
+    data["foundation"]["provisioning_project_id"] = "project-managed-storage"
     data["provider_runtime"] = {
         "kubernetes": connection.model_dump(mode="json"),
         "cloud_credentials_file": str(connection.credentials_file),
@@ -168,6 +169,7 @@ async def test_invalid_provider_credentials_close_clients_and_do_not_start_worke
 
     monkeypatch.setattr(nebius.sdk, "SDK", sdk_factory)
     data = json.loads(installation_file.read_text())
+    data["foundation"]["provisioning_project_id"] = "project-managed-storage"
     data["provider_runtime"] = {
         "kubernetes": connection.model_dump(mode="json"),
         "cloud_credentials_file": str(connection.credentials_file.parent / "missing-private-file"),

@@ -174,7 +174,8 @@ class EnvironmentRegistry:
                     idempotency_key=idempotency_key, request_sha256=request_sha256,
                     deployment_generation=1, action="create", phase="pending",
                     plan_json={"registration": row.model_dump(mode="json"),
-                               "files": prepared.files, "config": prepared.config},
+                               "files": prepared.files, "config": prepared.config,
+                               "provisioning_project_id": prepared.provisioning_project_id},
                 )
                 session.add(operation)
                 await session.flush()
@@ -340,7 +341,8 @@ class EnvironmentRegistry:
                     idempotency_key=idempotency_key, request_sha256=fingerprint,
                     deployment_generation=environment.deployment_generation, action="destroy_retained", phase="pending",
                     plan_json={"registration": registration_view(environment).model_dump(mode="json"),
-                               "config": source.plan_json["config"], "source_operation_id": str(source.operation_id)},
+                               "config": source.plan_json["config"], "source_operation_id": str(source.operation_id),
+                               "provisioning_project_id": source.plan_json.get("provisioning_project_id")},
                 )
                 session.add(operation)
                 await session.flush()
@@ -452,13 +454,15 @@ class EnvironmentRegistry:
                                    source.runner_epoch, lease.lease_token),
                     source.plan_json["registration"], source.plan_json["config"], identities,
                     {row.resource_key: row.payload_json for row in source_rows if row.kind == "kubernetes"},
+                    provisioning_project_id=source.plan_json.get("provisioning_project_id"),
                 )
             return ProvisioningContext(lease, operation.plan_json["registration"], operation.plan_json["config"], {
                 row.resource_key: row.provider_identity for row in rows if row.provider_identity is not None
             }, {
                 row.resource_key: row.payload_json for row in rows if row.kind == "kubernetes" or
                 row.payload_json.get("action") in {"retained_dependent_job", "retained_terminal_pod"}
-            }, action=cast(Any, operation.action), source=source_context)
+            }, action=cast(Any, operation.action), source=source_context,
+                provisioning_project_id=operation.plan_json.get("provisioning_project_id"))
 
     async def journal_retained_resources(self, lease: OperationLease, steps: list[ProvisioningStep]) -> None:
         """Discovery commits exact child UIDs before any destructive API request."""

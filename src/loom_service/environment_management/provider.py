@@ -39,6 +39,7 @@ class ProvisioningContext:
     documents: dict[str, dict[str, Any]] = field(default_factory=dict)
     action: Literal["create", "destroy_retained"] = "create"
     source: ProvisioningContext | None = None
+    provisioning_project_id: str | None = None
 
     @property
     def namespaces(self) -> tuple[str, ...]:

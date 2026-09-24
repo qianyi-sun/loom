@@ -35,7 +35,9 @@ class NebiusEnvironmentCloudProvider:
         purpose = step.payload.get("purpose")
         incarnation = context.registration["incarnation"].replace("-", "")
         prefix = "loom-" + incarnation + "-"
-        parent = context.config["project_id"]
+        # Missing scope is a legacy frozen intent, not the current installation
+        # default. Replays and retained cleanup must not move existing resources.
+        parent = context.provisioning_project_id or context.config["project_id"]
         spec: dict[str, Any]
         if step.kind == "object_bucket":
             if purpose not in {"artifacts", "trajectories", "source", "backup"}:
@@ -62,7 +64,7 @@ class NebiusEnvironmentCloudProvider:
             if kind == "service_account":
                 spec = {"description": "Isolated Loom environment " + purpose + " objects"}
             elif kind == "group":
-                parent, spec = context.config["quota_parent_id"], {}
+                parent, spec = context.provisioning_project_id or context.config["quota_parent_id"], {}
             elif kind == "membership":
                 parent = self._dependency(context, purpose, "group")
                 spec = {"member_id": self._dependency(context, purpose, "service_account")}

@@ -52,6 +52,9 @@ its private key in developer namespaces. This contract does not provision it.
     # A creation default, not a resize command. Imported bindings retain their
     # existing volume size; durable creation plans freeze the selected value.
     generated_postgres_storage_gi: int | None = Field(default=None, ge=10, le=1024, strict=True)
+    # Cloud IAM/buckets live outside the cluster project. This protected scope
+    # is frozen in operation plans, never substituted for cluster/quota identity.
+    provisioning_project_id: str | None = Field(default=None, pattern=_PROVIDER_ID)
 
     _dns_zone = field_validator("public_dns_zone")(_hostname)
 
@@ -70,6 +73,10 @@ its private key in developer namespaces. This contract does not provision it.
         if config.get("schema_version") != "loom.nebius-platform.v1":
             raise ValueError("foundation must be the operator's standalone installation")
         validate_environment(config)
+        if self.provisioning_project_id is not None and self.provisioning_project_id in {
+            config["project_id"], config["quota_parent_id"],
+        }:
+            raise ValueError("provisioning project must be separate from cluster project and tenant")
         if config.get("regional_execution_targets"):
             raise ValueError("managed environments require one primary-region foundation")
         if self.min_nodes > config["capacity_policy"]["max_nodes"]:

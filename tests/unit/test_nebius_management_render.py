@@ -36,6 +36,7 @@ def management_inputs(platform_inputs):
             "cloud_credentials_file": "/var/run/loom-management-cloud/credentials.json",
         },
     }
+    installation["foundation"]["provisioning_project_id"] = "project-managed-storage"
     deployment = {
         "schema_version": "loom.nebius-management-deployment.v1",
         "installation_id": "30000000-0000-4000-8000-000000000001",

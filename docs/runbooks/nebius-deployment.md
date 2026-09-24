@@ -532,6 +532,17 @@ origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
 `cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
 These are explicit projected-file paths, not an ambient operator login.
 
+Set `installation.foundation.provisioning_project_id` to the dedicated project
+qualified for management-owned IAM and object storage, separate from the cluster
+project and tenant/quota parent. Provider activation rejects an omitted/null scope.
+Qualify its region against the configured storage endpoints and its effective
+permissions before supplying the dedicated cloud credential; the identifier alone
+is not an IAM grant. Nebius project-scoped groups allow management provisioning
+without tenant-wide IAM administration. Do not grant cluster-project administration
+as a substitute or change platform `project_id`/`quota_parent_id` to redirect IAM.
+Existing operations retain their frozen scope for retries and credential cleanup;
+changing this field neither migrates resources nor repairs historical permissions.
+
 For new managed databases, set
 `installation.foundation.generated_postgres_storage_gi` explicitly when the
 standalone database's size is inappropriate. The value is an integer from 10 to
