@@ -1,6 +1,6 @@
 """Bounded, manifest-bound directory snapshots for independent verification.
 
-Only task-declared directory roots are restored. A root must exist, must not
+Only task-declared directory roots are restored. A root may be absent, must not
 traverse symlinks, and may contain only ordinary files/directories and links
 contained within that root or exact declared external executable leaves.
 External references must match the fresh verifier before restore. Processes
@@ -110,19 +110,32 @@ async def _reference_evidence(
     return records
 
 
-async def _check_root(driver: Driver, root: PurePosixPath, *, writable: bool = False) -> None:
+async def _check_root(driver: Driver, root: PurePosixPath, *, writable: bool = False) -> bool:
+    """Return presence after rejecting links, nondirectories and inaccessible ancestors."""
     components = (*reversed(root.parents), root)
-    checks = [f"test ! -L {shlex.quote(str(path))}" for path in components]
+    checks = []
+    for path in components:
+        quoted = shlex.quote(str(path))
+        checks.append(f"test ! -L {quoted} && (test ! -e {quoted} || (test -d {quoted} && test -x {quoted}))")
     quoted = shlex.quote(str(root))
-    if writable:
-        checks.append(f"(test ! -e {quoted} || (test -d {quoted} && test -w {quoted}))")
-    else:
-        checks.extend((f"test -d {quoted}", f"test -r {quoted}"))
+    checks.append(f"if test ! -e {quoted}; then exit 3; else test {'-w' if writable else '-r'} {quoted}; fi")
     result = await driver.exec(" && ".join(checks))
-    if result.return_code:
+    if result.return_code not in (0, 3) or result.stderr or result.truncated:
         raise WorkspaceSnapshotError(
             f"mutable path must be an accessible directory without symlink ancestors: {root}",
         )
+    return result.return_code == 0
+
+
+def _empty_archive(archive: Path) -> None:
+    # Keep the required execution-output contract, without inventing a directory.
+    archive.unlink(missing_ok=True)
+    with tarfile.open(archive, "w"):
+        pass
+
+
+def _manifest_version(records: list[dict[str, int | str]], *, has_references: bool) -> int:
+    return 3 if any(record.get("state") == "absent" for record in records) else 2 if has_references else 1
 
 
 def _check_totals(records: list[dict[str, int | str]]) -> None:
@@ -165,21 +178,24 @@ async def export_mutable_paths(
     # Never leave an old manifest certifying an incomplete newer export.
     manifest = directory / "manifest.json"
     manifest.unlink(missing_ok=True)
-    for root in paths:
-        await _check_root(driver, root)
+    present = {root: await _check_root(driver, root) for root in paths}
     if paths:
-        await _check_cross_root_hardlinks(driver, (workdir, *paths))
+        await _check_cross_root_hardlinks(driver, (workdir, *(root for root in paths if present[root])))
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
-        await _export_workspace_archive(driver, root, archive, preserve_acls=preserve_acls)
+        if present[root]:
+            await _export_workspace_archive(driver, root, archive, preserve_acls=preserve_acls)
+        else:
+            await asyncio.to_thread(_empty_archive, archive)
         evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files)
-        records.append({"path": str(root), "archive": archive.name, **evidence})
+        records.append({"path": str(root), "archive": archive.name, **evidence,
+                        **({"state": "absent"} if not present[root] else {})})
         _check_totals(records)
     # Export commands execute task-owned utilities. Inspect references only
     # after every source command has completed.
     references = await _reference_evidence(driver, reference_files, reference_symlinks=reference_symlinks)
     temporary = directory / "manifest.json.tmp"
-    document = {"schema_version": 2 if reference_files else 1, "paths": records,
+    document = {"schema_version": _manifest_version(records, has_references=bool(reference_files)), "paths": records,
                 **({"reference_files": references} if reference_files else {})}
     temporary.write_text(json.dumps(document, sort_keys=True) + "\n")
     temporary.replace(manifest)
@@ -199,6 +215,10 @@ async def import_mutable_paths(
         if manifest.is_symlink() or manifest.stat().st_size > 64 * 1024:
             raise ValueError("invalid manifest file")
         declared = json.loads(manifest.read_text())
+        if (not isinstance(declared, dict) or not isinstance(declared.get("paths"), list)
+                or len(declared["paths"]) != len(paths)
+                or any(not isinstance(record, dict) for record in declared["paths"])):
+            raise ValueError("invalid manifest paths")
     except (OSError, ValueError) as exc:
         raise WorkspaceSnapshotError("mutable paths manifest is missing or invalid") from exc
     records: list[dict[str, int | str]] = []
@@ -208,9 +228,13 @@ async def import_mutable_paths(
         archive = directory / f"{index}.tar"
         evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files)
         await asyncio.to_thread(check_acl_declaration, archive, preserve_acls=preserve_acls)
-        records.append({"path": str(root), "archive": archive.name, **evidence})
+        absent = declared["paths"][index].get("state") == "absent"
+        if absent and evidence["entries"] != 0:
+            raise WorkspaceSnapshotError("absent mutable path archive must be empty")
+        records.append({"path": str(root), "archive": archive.name, **evidence,
+                        **({"state": "absent"} if absent else {})})
         _check_totals(records)
-    expected = {"schema_version": 2 if reference_files else 1, "paths": records,
+    expected = {"schema_version": _manifest_version(records, has_references=bool(reference_files)), "paths": records,
                 **({"reference_files": references} if reference_files else {})}
     if declared != expected:
         raise WorkspaceSnapshotError("mutable paths manifest differs from declared paths, reference files or archive content")
@@ -223,6 +247,8 @@ async def import_mutable_paths(
         raise WorkspaceSnapshotError("cannot determine mutable path restore identity") from exc
     for index, root in enumerate(paths):
         await _check_root(driver, root, writable=True)
+        if records[index].get("state") == "absent":
+            continue
         if preserve_acls:
             await require_acl_support(driver, root)
         if uid != 0:
@@ -230,6 +256,11 @@ async def import_mutable_paths(
                 if any(member.uid != uid or member.gid != gid for member in stream):
                     raise WorkspaceSnapshotError(f"mutable path ownership cannot be preserved by verifier: {root}")
     for index, root in enumerate(paths):
+        if records[index].get("state") == "absent":
+            result = await driver.exec(f"rm -rf -- {shlex.quote(str(root))}")
+            if result.return_code or result.stderr or result.truncated:
+                raise WorkspaceSnapshotError(f"cannot remove absent verifier mutable directory: {root}")
+            continue
         # A fresh verifier has image-owned baseline files. Replace the declared
         # contents, so agent deletions cannot silently reappear during grading.
         result = await driver.exec(

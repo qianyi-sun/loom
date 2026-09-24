@@ -738,7 +738,13 @@ Automatic Terminus tasks may declare `environment.mutable_paths` for directory
 state outside their workdir. The controller captures each root in a separate
 validated archive and binds its path, size and SHA-256 in a required manifest.
 The independent verifier receives the same absolute paths, including deletions,
-mode and ownership, before running private tests. There are at most 16 roots,
+mode and ownership, before running private tests. A root that was never created
+or was removed remains absent in the verifier, including when the image supplies
+a baseline directory. Such snapshots use a version-3 manifest with an explicit
+`state: absent` record bound to an empty archive; the archive remains a required
+execution output. Restore validates all records and archives before changing any
+root, removes only declared absent directories, and does not create their parents.
+Present-only snapshots retain the existing manifest version. There are at most 16 roots,
 100,000 entries and 256 MiB aggregate archived/expanded content. Runtime and
 verifier roots, overlapping roots, symlink ancestors, escaping links, special
 files and cross-root hardlinks are rejected. Relative and absolute symlink
