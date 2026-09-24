@@ -566,6 +566,8 @@ local provisioner RoleBindings. The manager cannot retag/adopt foreign namespace
 or read their Secrets; imported namespaces require a different, explicitly
 qualified enrollment operation. Missing or mismatched policy/grant state is an
 activation blocker, never a reason to supply cluster-admin credentials.
+Qualify both RoleBinding restrictions and the observer Role's exact read-only
+rules; a fixed Role name alone does not constrain delegated permissions.
 
 For new managed databases, set
 `installation.foundation.generated_postgres_storage_gi` explicitly when the

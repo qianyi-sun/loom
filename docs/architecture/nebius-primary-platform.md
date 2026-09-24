@@ -328,7 +328,9 @@ provisioner and retained cleanup; they do not allow PVC deletion.
 Fail-closed admission limits the exact manager subject to generated namespace
 names, installation/environment/incarnation markers and restricted Pod Security.
 RoleBindings require that namespace ownership and either the exact provisioner
-subject/role or the existing local execution-observer binding. A namespace prefix
+subject/role or the existing local execution-observer binding. Role admission also
+limits that observer Role to get/list/watch on Jobs and Pods; fixing only its name
+would let provisioning permissions be transferred to child code. A namespace prefix
 alone never grants access. Cluster administrators remain trusted; runtime and
 child Pods must never receive their credentials.
 

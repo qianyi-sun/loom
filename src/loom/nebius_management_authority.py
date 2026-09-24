@@ -114,6 +114,17 @@ def render_namespace_authority(binding: ManagementNamespaceAuthority) -> list[di
     docs += _policy(binding, "bindings", group="rbac.authorization.k8s.io", resource="rolebindings",
                     operations=["CREATE", "UPDATE"], expression=f"{owned} && {common} && (({provisioner}) || ({observer}))",
                     message="management namespace binding boundary")
+    observer_rules = (
+        "object.metadata.name == 'loom-execution-observer' && has(object.rules) && size(object.rules) == 2 && "
+        "object.rules[0].apiGroups == ['batch'] && object.rules[0].resources == ['jobs'] && "
+        "object.rules[1].apiGroups == [''] && object.rules[1].resources == ['pods'] && "
+        "object.rules.all(rule, rule.verbs == ['get', 'list', 'watch'] && "
+        "(!has(rule.resourceNames) || size(rule.resourceNames) == 0) && "
+        "(!has(rule.nonResourceURLs) || size(rule.nonResourceURLs) == 0))"
+    )
+    docs += _policy(binding, "roles", group="rbac.authorization.k8s.io", resource="roles",
+                    operations=["CREATE", "UPDATE"], expression=f"{owned} && {observer_rules}",
+                    message="management observer role boundary")
     rules = [
         {"apiGroups": [""], "resources": ["secrets", "services", "serviceaccounts", "configmaps", "resourcequotas",
                                            "persistentvolumeclaims"], "verbs": ["get", "create"]},
