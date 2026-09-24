@@ -780,7 +780,10 @@ The static runtime copies those files only after verifier execution, emits
 bounded per-phase stdout/stderr evidence, and writes an atomically renamed
 `loom.execution-runtime-result.v1` semantic manifest. The manifest records each
 declared output as captured or missing with its exact size and SHA-256 and
-projects verifier rewards from the committed scoring document. It distinguishes
+projects verifier rewards only from the committed `verifier/output.json` scoring
+document. Other artifacts with the verifier kind, including exception diagnostics,
+remain evidence and cannot supply or suppress a reward. A captured reward does
+not change a failed verifier phase into success. The runtime distinguishes
 setup, task, verifier, timeout, cancellation, missing-artifact, trajectory,
 upload, and runtime failures, preserves signal/exit/timestamp/truncation
 evidence, and repeats the exact lease-bound runtime identity. A required output

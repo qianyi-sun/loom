@@ -177,7 +177,10 @@ func secureOutputParent(root, parent string) error {
 
 func verifierRewards(outputRoot string, outputs []outputEvidence) (map[string]float64, error) {
 	for _, item := range outputs {
-		if item.Kind != "verifier" || item.State != "captured" {
+		// Verifier diagnostics share this kind but are not scoring documents.
+		// Use the canonical path also consumed by the materializer, independent
+		// of declaration order or rewards-like fields in an exception artifact.
+		if item.Kind != "verifier" || item.RelativePath != "verifier/output.json" || item.State != "captured" {
 			continue
 		}
 		if item.SizeBytes == nil || *item.SizeBytes > maxVerifierResultBytes {
