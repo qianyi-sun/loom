@@ -689,7 +689,7 @@ export function useNewBatch() {
   const releaseModelText = releaseNeedsProvider
     ? firstSelectedModel?.modelName
       ? `${firstSelectedModel.modelName} ${
-          selectedModel ? preflightLabel(selectedModel.last_preflight_status) : "not preflighted"
+          selectedModel ? preflightLabel(selectedModel.last_preflight_status, selectedModel.last_preflight_failure_kind) : "not preflighted"
         }.`
       : "Pick a model before submitting."
     : "No model required for the selected agent.";

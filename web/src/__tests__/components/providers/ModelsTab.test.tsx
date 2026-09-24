@@ -120,6 +120,26 @@ describe("ModelsTab", () => {
     expect(screen.getByText(/HTTP 403 from upstream/i)).toBeInTheDocument();
   });
 
+  it("renders an inconclusive preflight as non-blocking rather than Cannot call", async () => {
+    renderTab([
+      {
+        model_id: "slow-reasoner",
+        source: "upstream",
+        visible: true,
+        visibility: "default",
+        last_preflight_status: "failed",
+        last_preflight_http_status: null,
+        last_preflight_error_code: "timeout",
+        last_preflight_error_message: "timeout after 20.0s: read timeout",
+        last_preflight_failure_kind: "inconclusive",
+      },
+    ]);
+    await waitFor(() => screen.getByText("slow-reasoner"));
+    expect(screen.getByText("Inconclusive")).toBeInTheDocument();
+    expect(screen.queryByText(/Cannot call/i)).toBeNull();
+    expect(screen.getByText(/timeout after 20.0s/i)).toBeInTheDocument();
+  });
+
   it("renders hidden rows from the provider models API visibility contract", async () => {
     renderTab([
       {

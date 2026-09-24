@@ -391,6 +391,8 @@ def test_default_pricing_source(provider_type: str, expected: str) -> None:
 import httpx  # noqa: E402
 
 from loom_service.provider_connections_service import (  # noqa: E402
+    classify_preflight_failure,
+    preflight_failure_kind,
     preflight_model,
     probe_connection,
 )
@@ -633,6 +635,59 @@ async def test_preflight_openai_403_marks_access_denied_and_redacts_key() -> Non
     assert "HTTP 403" in result.error_message
     assert real_key not in result.error_message
     assert "[REDACTED]" in result.error_message
+
+
+async def test_preflight_timeout_is_recorded_as_inconclusive() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timeout")
+
+    result = await preflight_model(
+        "openai-compatible", "https://api.openai.com/v1", "sk-XYZ",
+        "slow-model",
+        _client_factory=_client_factory(httpx.MockTransport(_handler)),
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "timeout"
+    assert "timeout after 20.0s" in (result.error_message or "")
+    assert classify_preflight_failure(
+        result.error_code, result.http_status,
+    ) == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("error_code", "http_status", "expected"),
+    [
+        # #948: probes that never got a definitive answer must not block.
+        ("timeout", None, "inconclusive"),
+        ("request-error", None, "inconclusive"),
+        ("unexpected-error", None, "inconclusive"),
+        ("upstream-http-error", 408, "inconclusive"),
+        ("upstream-http-error", 429, "inconclusive"),
+        ("upstream-http-error", 502, "inconclusive"),
+        ("upstream-http-error", 503, "inconclusive"),
+        # Genuine auth/model incompatibility stays fail-closed.
+        ("access-denied", 401, "rejected"),
+        ("access-denied", 403, "rejected"),
+        ("upstream-http-error", 400, "rejected"),
+        ("upstream-http-error", 404, "rejected"),
+        ("egress-policy-rejected", None, "rejected"),
+        # Unknown/legacy codes without a transient status: fail closed.
+        ("upstream_404", None, "rejected"),
+        (None, None, "rejected"),
+    ],
+)
+def test_classify_preflight_failure(
+    error_code: str | None, http_status: int | None, expected: str,
+) -> None:
+    assert classify_preflight_failure(error_code, http_status) == expected
+
+
+def test_preflight_failure_kind_is_none_unless_failed() -> None:
+    assert preflight_failure_kind(None, None, None) is None
+    assert preflight_failure_kind("valid", None, 200) is None
+    assert preflight_failure_kind("failed", "timeout", None) == "inconclusive"
+    assert preflight_failure_kind("failed", "access-denied", 403) == "rejected"
 
 
 # ──────────────────────────────────────────────────────────────────────

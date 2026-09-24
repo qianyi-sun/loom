@@ -75,7 +75,11 @@ export function sourceLabel(s: ModelSource): string {
 
 export function preflightOptionSuffix(m: ModelEntry): string {
   if (m.last_preflight_status === "valid") return " (callable)";
-  if (m.last_preflight_status === "failed") return " (preflight failed)";
+  if (m.last_preflight_status === "failed") {
+    return m.last_preflight_failure_kind === "inconclusive"
+      ? " (preflight inconclusive)"
+      : " (preflight failed)";
+  }
   return "";
 }
 

@@ -413,6 +413,9 @@ def _print_model_row(entry: dict[str, Any]) -> None:
         flags.append(f"preflight={preflight_status}")
         if entry.get("last_preflight_error_code"):
             flags.append(str(entry["last_preflight_error_code"]))
+        # 'inconclusive' (timeout/transient) does not block submission (#948).
+        if entry.get("last_preflight_failure_kind"):
+            flags.append(str(entry["last_preflight_failure_kind"]))
     else:
         flags.append("preflight=untested")
     flag_str = ",".join(flags)
@@ -510,6 +513,14 @@ def _models(args: argparse.Namespace) -> int:
                         print(f"  error code: {code}")
                     if message:
                         print(f"  error: {message}")
+                    kind = preflight_body.get("last_preflight_failure_kind")
+                    if kind == "inconclusive":
+                        print(
+                            "  inconclusive: the probe did not get a definitive "
+                            "answer; this does not block batch submission"
+                        )
+                    elif kind == "rejected":
+                        print("  rejected: batches using this model are blocked")
 
             list_resp = c.get(
                 f"/api/v1/provider-connections/{conn_id}/models",

@@ -46,6 +46,32 @@ function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JS
       </div>
     );
   }
+  if (
+    model.last_preflight_status === "failed" &&
+    model.last_preflight_failure_kind === "inconclusive"
+  ) {
+    return (
+      <div className="max-w-sm space-y-1">
+        <span
+          className="rounded bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800"
+          title="The latest preflight timed out or hit a temporary upstream error. It did not confirm the model is callable, and it does not block new batches."
+        >
+          Inconclusive
+        </span>
+        <p className="text-xs text-slate-500">{providerTestAge(model.last_preflight_at)}</p>
+        {model.last_preflight_error_code ? (
+          <p className="text-xs font-medium text-amber-800">
+            {model.last_preflight_error_code}
+          </p>
+        ) : null}
+        {model.last_preflight_error_message ? (
+          <p className="break-words text-xs text-slate-500">
+            {model.last_preflight_error_message}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
   if (model.last_preflight_status === "failed") {
     return (
       <div className="max-w-sm space-y-1">

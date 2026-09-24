@@ -5904,6 +5904,8 @@ export interface components {
             last_preflight_error_code: string | null;
             /** Last Preflight Error Message */
             last_preflight_error_message: string | null;
+            /** Last Preflight Failure Kind */
+            last_preflight_failure_kind?: ("rejected" | "inconclusive") | null;
             /** Last Preflight Http Status */
             last_preflight_http_status: number | null;
             /** Last Preflight Status */

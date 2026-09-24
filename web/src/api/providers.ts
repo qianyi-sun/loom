@@ -36,6 +36,8 @@ export interface ModelEntry {
   last_preflight_http_status?: number | null;
   last_preflight_error_code?: string | null;
   last_preflight_error_message?: string | null;
+  /** Only a "rejected" failure blocks batch submission (#948). */
+  last_preflight_failure_kind?: "rejected" | "inconclusive" | null;
 }
 
 export interface ProviderConnectionModelEntry {
@@ -56,6 +58,8 @@ export interface ProviderConnectionModelEntry {
   last_preflight_http_status?: number | null;
   last_preflight_error_code?: string | null;
   last_preflight_error_message?: string | null;
+  /** Only a "rejected" failure blocks batch submission (#948). */
+  last_preflight_failure_kind?: "rejected" | "inconclusive" | null;
 }
 
 export interface ProviderConnectionEntry {

@@ -253,7 +253,28 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
           </Button>
         </div>
       ) : null}
-      {!customMode && selectedCatalogModel?.last_preflight_status === "failed" ? (
+      {!customMode &&
+      selectedCatalogModel?.last_preflight_status === "failed" &&
+      selectedCatalogModel.last_preflight_failure_kind === "inconclusive" ? (
+        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <p className="font-medium">
+            The last preflight for this model was inconclusive.
+          </p>
+          <p className="mt-1 text-xs">
+            The check timed out or hit a temporary upstream error, so it did not
+            confirm the model is callable. You can still submit; re-run the
+            preflight from Providers to confirm.
+            {selectedCatalogModel.last_preflight_at
+              ? ` Checked ${new Date(selectedCatalogModel.last_preflight_at).toLocaleString()}.`
+              : ""}
+          </p>
+          {selectedCatalogModel.last_preflight_error_message ? (
+            <p className="mt-1 break-words text-xs text-amber-800">
+              {selectedCatalogModel.last_preflight_error_message}
+            </p>
+          ) : null}
+        </div>
+      ) : !customMode && selectedCatalogModel?.last_preflight_status === "failed" ? (
         <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
           <p className="font-medium">This model failed its last preflight.</p>
           {selectedCatalogModel.last_preflight_error_code ? (
