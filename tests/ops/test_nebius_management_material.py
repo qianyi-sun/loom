@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import stat
+import subprocess
+import sys
+from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -90,3 +95,177 @@ def test_unknown_create_is_read_back_never_repeated(tmp_path, failure):
         with pytest.raises(MaterialError, match="unresolved"):
             deliver_material(binding=binding, api=api, state_dir=state)
         assert len(api.created) == 1 and not api.secrets
+
+
+@pytest.mark.parametrize("name", ["loom-platform-db", "loom-management-db-tls", "loom-platform-auth", "loom-admin-secret"])
+def test_any_existing_secret_blocks_all_creation(tmp_path, name):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    api.secrets[name] = {"foreign": "retained"}
+    with pytest.raises(MaterialError, match="refusing adoption"):
+        deliver_material(binding=binding, api=api, state_dir=tmp_path / "material")
+    assert not api.created and api.secrets == {name: {"foreign": "retained"}}
+    assert not (tmp_path / "material/material.json").exists()
+
+
+@pytest.mark.parametrize("drift", ["uid", "data", "owner", "label", "immutable", "type", "deleting", "missing"])
+def test_completed_delivery_rejects_secret_drift_without_replacement(tmp_path, drift):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    state = tmp_path / "material"
+    deliver_material(binding=binding, api=api, state_dir=state)
+    original_journal = (state / "material.json").read_bytes()
+    secret = api.secrets["loom-platform-auth"]
+    if drift == "uid":
+        secret["metadata"]["uid"] = str(uuid4())
+    elif drift == "data":
+        secret["data"]["secret-store-master-key"] = "Zm9yZWlnbg=="
+    elif drift == "owner":
+        secret["metadata"]["ownerReferences"] = [{"uid": str(uuid4())}]
+    elif drift == "label":
+        secret["metadata"]["labels"]["loom.nebius/management-installation"] = str(uuid4())
+    elif drift == "deleting":
+        secret["metadata"]["deletionTimestamp"] = "2026-09-24T00:00:01Z"
+    elif drift == "immutable":
+        secret["immutable"] = False
+    elif drift == "type":
+        secret["type"] = "kubernetes.io/service-account-token"
+    else:
+        del api.secrets["loom-platform-auth"]
+    with pytest.raises(MaterialError):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert len(api.created) == 4
+    assert (state / "material.json").read_bytes() == original_journal
+
+
+@pytest.mark.parametrize("drift", ["material", "hash", "status", "resource", "binding", "invalid_json", "mode", "symlink"])
+def test_bad_private_state_never_regenerates_credentials(tmp_path, drift):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    state = tmp_path / "material"
+    deliver_material(binding=binding, api=api, state_dir=state)
+    before = copy.deepcopy(api.secrets)
+    journal = state / "material.json"
+    record = json.loads(journal.read_bytes())
+    if drift == "material":
+        del record["material"]["loom-platform-auth"]
+    elif drift == "hash":
+        record["material_sha256"] = "f" * 64
+    elif drift == "status":
+        record["status"] = "unknown"
+    elif drift == "resource":
+        record["resources"]["loom-platform-db"]["uid"] = None
+    elif drift == "binding":
+        record["binding"]["namespace_uid"] = str(uuid4())
+    journal.write_text(json.dumps(record) if drift != "invalid_json" else "{invalid-private-value")
+    if drift == "mode":
+        journal.chmod(0o644)
+    if drift == "symlink":
+        retained = state / "retained.json"
+        journal.rename(retained)
+        journal.symlink_to(retained)
+    with pytest.raises(MaterialError) as error:
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert "invalid-private-value" not in str(error.value)
+    assert len(api.created) == 4 and api.secrets == before
+
+
+def test_changed_cluster_or_namespace_binding_does_not_deliver(tmp_path):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    for field in ("namespace_uid", "kube_system_uid"):
+        with pytest.raises(MaterialError) as error:
+            deliver_material(binding=replace(binding, **{field: str(uuid4())}), api=api, state_dir=tmp_path / "material")
+        assert "private-cluster-identity-diagnostic" not in str(error.value)
+    assert not api.created
+
+
+def test_final_readback_catches_earlier_secret_changed_during_later_create(tmp_path):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    create = api.create_secret
+
+    def race(document):
+        create(document)
+        if len(api.created) == 4:
+            api.secrets["loom-platform-db"]["metadata"]["uid"] = str(uuid4())
+
+    api.create_secret = race
+    with pytest.raises(MaterialError, match="differs"):
+        deliver_material(binding=binding, api=api, state_dir=tmp_path / "material")
+    assert json.loads((tmp_path / "material/material.json").read_bytes())["status"] == "prepared"
+
+
+def test_process_death_after_create_intent_cannot_reopen_create(tmp_path):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    # Real process death, not a catchable exception: the fsynced intent survives.
+    program = r'''
+import json, os, sys
+from pathlib import Path
+from scripts.ops.nebius_management_material import ManagementBinding, deliver_material
+from tests.ops.test_nebius_management_material import SecretAPI
+binding = ManagementBinding(**json.loads(sys.argv[1]))
+api = SecretAPI(binding)
+api.create_secret = lambda document: os._exit(73)
+deliver_material(binding=binding, api=api, state_dir=Path(sys.argv[2]))
+'''
+    state = tmp_path / "material"
+    outcome = subprocess.run([sys.executable, "-c", program, json.dumps(binding.__dict__), str(state)],
+                             env=dict(os.environ), capture_output=True, timeout=30)
+    assert outcome.returncode == 73
+    journal = json.loads((state / "material.json").read_bytes())
+    assert sum(row["status"] == "create_intent" for row in journal["resources"].values()) == 1
+    with pytest.raises(MaterialError, match="unresolved"):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert not api.created
+
+
+@pytest.mark.parametrize("change", ["namespace", "name", "owner", "operation", "immutable", "extra", "data", "type"])
+def test_transport_cannot_write_outside_fixed_secret_shape(tmp_path, monkeypatch, change):
+    from scripts.ops.nebius_management_material import (
+        KubectlMaterialAPI,
+        MaterialError,
+        deliver_material,
+    )
+
+    binding, fake = delivery()
+    deliver_material(binding=binding, api=fake, state_dir=tmp_path / "material")
+    doc = copy.deepcopy(fake.secrets["loom-platform-auth"])
+    for field in ("uid", "resourceVersion", "creationTimestamp"):
+        del doc["metadata"][field]
+    if change == "namespace":
+        doc["metadata"]["namespace"] = "foreign"
+    elif change == "name":
+        doc["metadata"]["name"] = "foreign"
+    elif change == "owner":
+        doc["metadata"]["labels"]["loom.nebius/management-installation"] = str(uuid4())
+    elif change == "operation":
+        doc["metadata"]["annotations"]["loom.nebius/management-material-operation"] = "not-a-uuid"
+    elif change == "immutable":
+        doc["immutable"] = False
+    elif change == "extra":
+        doc["stringData"] = {"foreign": "private-payload"}
+    elif change == "data":
+        doc["data"]["secret-store-master-key"] = "not-base64-private-payload"
+    else:
+        doc["type"] = "kubernetes.io/service-account-token"
+    kubeconfig = tmp_path / "config"
+    kubeconfig.write_text("private-kubeconfig")
+    kubeconfig.chmod(0o600)
+    adapter = KubectlMaterialAPI(kubeconfig, binding=binding, executable=Path("/usr/bin/kubectl"),
+                                 api_server="https://cluster.example.test")
+
+    def no_command(*args, **kwargs):
+        raise AssertionError("Rejected documents must never reach a subprocess")
+
+    monkeypatch.setattr(subprocess, "run", no_command)
+    with pytest.raises(MaterialError, match="outside management material scope") as error:
+        adapter.create_secret(doc)
+    assert "private-payload" not in str(error.value)

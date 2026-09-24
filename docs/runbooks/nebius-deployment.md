@@ -572,6 +572,18 @@ off-node backup and the protected management rollout must be qualified before
 activation. No `nebius-rollout` management-install operation is introduced by the
 render-only command, and it purchases no capacity or storage.
 
+The private `nebius_management_material` helper implements initial delivery of
+fresh management database/TLS/master-key/admin Secrets. It requires an already
+qualified installation-owned namespace and records its UID plus the cluster UID.
+Generated material is persisted once in a private recovery journal before any
+immutable Secret create; retries read back exact data/ownership/UIDs instead of
+regenerating credentials or repeating an ambiguous create. Preserve that journal
+and never include it in workflow artifacts. Lost state or conflicting live
+Secrets require explicit recovery; this helper is not a credential rotation or
+namespace-adoption procedure. Cloud/Kubernetes/publication/backup credentials
+remain separate inputs. This internal primitive has no shared-cluster CLI and
+does not yet connect a protected management installation or prove readiness.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
