@@ -161,13 +161,15 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize(
-    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status"),
+    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status", "web_egress", "web_ready"),
     [
-        ("direct-completion", False, True, False, 201),
-        ("terminus-2", True, True, True, 201),
-        ("terminus-2", True, False, True, 400),
-        ("terminus-2", True, True, False, 400),
-        ("direct-completion", True, True, True, 400),
+        ("direct-completion", False, True, False, 201, False, False),
+        ("terminus-2", True, True, True, 201, False, False),
+        ("terminus-2", True, False, True, 400, False, False),
+        ("terminus-2", True, True, False, 400, False, False),
+        ("direct-completion", True, True, True, 400, False, False),
+        ("terminus-2", True, True, True, 201, True, True),
+        ("terminus-2", True, True, True, 400, True, False),
     ],
 )
 @pytest.mark.parametrize("dockerfile", [False, True], ids=["prebuilt", "dockerfile"])
@@ -181,10 +183,14 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
     has_controller: bool,
     expected_status: int,
     dockerfile: bool,
+    web_egress: bool,
+    web_ready: bool,
 ) -> None:
     team_id, raw = seed_team
     if dockerfile:
         expected_status = 201 if agent_name == "terminus-2" and has_controller else 400
+    if web_egress and not web_ready:
+        expected_status = 400
     task_id = "automatic-nebius-submit"
     batch_id = uuid4()
     task_image = "registry.example/task@sha256:" + "a" * 64
@@ -200,7 +206,8 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
         admitted_images.append(controller_image)
     profile = ServiceExecutionRuntimeProfileV1(
         candidate_sha="1" * 40,
-        execution_class_id="linux-amd64-cpu-pod-v1",
+        execution_class_id="linux-amd64-cpu-web-pod-v1" if web_ready else "linux-amd64-cpu-pod-v1",
+        supports_task_web_egress=web_ready,
         task_image_ref=default_task_image,
         agent_image_ref=controller_image if has_controller else None,
         runtime_image_ref=runtime_image,
@@ -243,8 +250,10 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                             "cpus": 1,
                             "memory_mb": 1024,
                             "storage_mb": 2048,
-                            "baseline_network_policy": {"kind": "gateway-only"},
-                            "network_policies_supported": ["gateway-only"],
+                            "baseline_network_policy": ({"kind": "web-allowlist", "destinations": [
+                                {"host": "registry.npmjs.org", "protocol": "https"},
+                            ]} if web_egress else {"kind": "gateway-only"}),
+                            "network_policies_supported": ["web-allowlist" if web_egress else "gateway-only"],
                         },
                         "agent": {"name": agent_name},
                         "verifier": {
@@ -310,6 +319,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
             assert trial is not None
             assert trial.requires_caps["backend"] == "nebius"
             assert trial.requires_caps["worker_pool"] == "nebius-cpu"
+            assert trial.requires_caps["network_policies"] == ["web-allowlist" if web_egress else "gateway-only"]
             assert trial.attempt_count == 0
             assert trial.state == "queued"
             if dockerfile:
