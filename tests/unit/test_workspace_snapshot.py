@@ -43,6 +43,35 @@ def _member(name: str, kind: bytes, *, mode: int = 0o644, link: str = "") -> tar
     return info
 
 
+def test_declared_external_leaf_preserves_interpreter_and_internal_aliases(tmp_path, policy):
+    archive = tmp_path / "venv.tar"
+    _write_archive(archive, [
+        _member("bin/python", tarfile.SYMTYPE, link="/usr/local/bin/python3.9"),
+        _member("bin/python3", tarfile.SYMTYPE, link="python"),
+        _member("bin/python3.9", tarfile.SYMTYPE, link="python"),
+    ])
+    _validate_workspace_archive(archive, policy, root=PurePosixPath("/cache"),
+        external_reference_files=frozenset({PurePosixPath("/usr/local/bin/python3.9")}))
+    with tarfile.open(archive) as stream:
+        assert [m.linkname for m in stream] == ["/usr/local/bin/python3.9", "python", "python"]
+
+
+@pytest.mark.parametrize("member", [
+    _member("alias", tarfile.SYMTYPE, link="bin/python/../private"),
+    _member("alias", tarfile.SYMTYPE, link="/usr/local/bin/python3.9/../private"),
+    _member("alias", tarfile.SYMTYPE, link="/usr/local/bin/other"),
+    _member("bin/python/child", tarfile.REGTYPE),
+    _member("hard", tarfile.LNKTYPE, link="/usr/local/bin/python3.9"),
+])
+def test_external_reference_is_a_leaf_not_an_escape_prefix(tmp_path, policy, member):
+    archive = tmp_path / "invalid.tar"
+    _write_archive(archive, [_member("bin/python", tarfile.SYMTYPE,
+                                  link="/usr/local/bin/python3.9"), member])
+    with pytest.raises(WorkspaceSnapshotError):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath("/cache"),
+            external_reference_files=frozenset({PurePosixPath("/usr/local/bin/python3.9")}))
+
+
 def test_snapshot_accepts_modes_directories_and_safe_links(
     tmp_path: Path,
     policy: WorkspaceStagingPolicy,
