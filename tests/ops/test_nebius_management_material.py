@@ -4,14 +4,19 @@ from __future__ import annotations
 import copy
 import json
 import os
+import ssl
 import stat
 import subprocess
 import sys
+import threading
 from dataclasses import replace
+from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from cryptography.hazmat.primitives import serialization
 
 
 class SecretAPI:
@@ -270,6 +275,96 @@ deliver_material(binding=binding, api=api, state_dir=Path(sys.argv[2]))
     with pytest.raises(MaterialError, match="unresolved"):
         deliver_material(binding=binding, api=api, state_dir=state)
     assert not api.created
+
+
+@pytest.fixture
+def https_api(tmp_path, monkeypatch):
+    from tests.ops import test_nebius_certificates as certificates
+
+    monkeypatch.setattr(certificates, "NOW", datetime.now(UTC))
+    chain, key, roots = certificates.material(names=("localhost",))
+    cert, private = tmp_path / "server.crt", tmp_path / "server.key"
+    cert.write_bytes(chain)
+    private.write_bytes(key)
+    private.chmod(0o600)
+    trust = ssl.create_default_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode())
+    binding, backend = delivery()
+    state = {"response": 201, "store": True, "requests": []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def respond(self, status, body):
+            payload = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Retry-After", "1")
+            self.send_header("Location", "/retry-target")
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            state["requests"].append(("GET", self.path, self.headers.get("Authorization")))
+            ns = self.path.rsplit("/", 1)[-1]
+            if ns in ("kube-system", binding.namespace):
+                self.respond(200, {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                    "name": ns, "uid": binding.kube_system_uid if ns == "kube-system" else binding.namespace_uid,
+                    "labels": {"loom.nebius/management-installation": binding.installation_id}}})
+            else:
+                secret = backend.secrets.get(ns)
+                self.respond(404 if secret is None else 200, secret or {"kind": "Status"})
+
+        def do_POST(self):
+            state["requests"].append(("POST", self.path, self.headers.get("Authorization")))
+            document = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if state["store"]:
+                backend.create_secret(document)
+            self.respond(state["response"], {"private-error": "must-not-leak"})
+
+        def log_message(self, *args):
+            pass
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, private)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield binding, backend, state, f"https://localhost:{server.server_port}", trust
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("status", [429, 503, 307])
+def test_http_unknown_write_never_retries_or_redirects(https_api, tmp_path, status):
+    from scripts.ops.nebius_management_material import HTTPSMaterialAPI, MaterialError, deliver_material
+
+    binding, backend, wire, endpoint, trust = https_api
+    wire.update(response=status, store=False)
+    with HTTPSMaterialAPI(binding=binding, api_server=endpoint, ssl_context=trust, token="private-token") as api:
+        for _ in range(2):
+            with pytest.raises(MaterialError, match="unresolved") as error:
+                deliver_material(binding=binding, api=api, state_dir=tmp_path / "material")
+            assert "must-not-leak" not in str(error.value)
+    posts = [row for row in wire["requests"] if row[0] == "POST"]
+    assert posts == [("POST", "/api/v1/namespaces/loom-nebius-management/secrets", "Bearer private-token")]
+    assert not backend.secrets
+    assert not any(row[1] == "/retry-target" for row in wire["requests"])
+
+
+def test_http_lost_success_is_resolved_only_by_secret_readback(https_api, tmp_path, monkeypatch):
+    from scripts.ops.nebius_management_material import HTTPSMaterialAPI, deliver_material
+
+    binding, backend, wire, endpoint, trust = https_api
+    wire["response"] = 503
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+    with HTTPSMaterialAPI(binding=binding, api_server=endpoint, ssl_context=trust, token="private-token") as api:
+        first = deliver_material(binding=binding, api=api, state_dir=tmp_path / "material")
+        assert deliver_material(binding=binding, api=api, state_dir=tmp_path / "material") == first
+    assert len([row for row in wire["requests"] if row[0] == "POST"]) == 4
+    assert {name: row["metadata"]["uid"] for name, row in backend.secrets.items()} == first["secret_uids"]
 
 
 @pytest.mark.parametrize("change", ["namespace", "name", "owner", "operation", "immutable", "extra", "data", "type"])
