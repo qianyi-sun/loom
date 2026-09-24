@@ -110,15 +110,23 @@ async def _reference_evidence(
     return records
 
 
-async def _check_root(driver: Driver, root: PurePosixPath, *, writable: bool = False) -> bool:
+async def _check_root(
+    driver: Driver, root: PurePosixPath, *, writable: bool = False, removing: bool = False,
+) -> bool:
     """Return presence after rejecting links, nondirectories and inaccessible ancestors."""
     components = (*reversed(root.parents), root)
     checks = []
     for path in components:
         quoted = shlex.quote(str(path))
-        checks.append(f"test ! -L {quoted} && (test ! -e {quoted} || (test -d {quoted} && test -x {quoted}))")
+        accessible = "" if removing and path == root else f" && test -x {quoted}"
+        checks.append(f"test ! -L {quoted} && (test ! -e {quoted} || (test -d {quoted}{accessible}))")
     quoted = shlex.quote(str(root))
-    checks.append(f"if test ! -e {quoted}; then exit 3; else test {'-w' if writable else '-r'} {quoted}; fi")
+    permission = f"test {'-w' if writable else '-r'} {quoted}"
+    if removing:
+        # Removing an empty directory needs write/search on its parent, not the
+        # leaf. Nonempty trees can still fail explicitly during recursive removal.
+        permission = f"test -w {shlex.quote(str(root.parent))}"
+    checks.append(f"if test ! -e {quoted}; then exit 3; else {permission}; fi")
     result = await driver.exec(" && ".join(checks))
     if result.return_code not in (0, 3) or result.stderr or result.truncated:
         raise WorkspaceSnapshotError(
@@ -245,8 +253,11 @@ async def import_mutable_paths(
             raise ValueError("identity failed")
     except ValueError as exc:
         raise WorkspaceSnapshotError("cannot determine mutable path restore identity") from exc
+    present = {}
     for index, root in enumerate(paths):
-        await _check_root(driver, root, writable=True)
+        present[root] = await _check_root(
+            driver, root, writable=True, removing=records[index].get("state") == "absent",
+        )
         if records[index].get("state") == "absent":
             continue
         if preserve_acls:
@@ -257,7 +268,12 @@ async def import_mutable_paths(
                     raise WorkspaceSnapshotError(f"mutable path ownership cannot be preserved by verifier: {root}")
     for index, root in enumerate(paths):
         if records[index].get("state") == "absent":
-            result = await driver.exec(f"rm -rf -- {shlex.quote(str(root))}")
+            if not present[root]:
+                continue
+            quoted = shlex.quote(str(root))
+            # rmdir needs no leaf read/search permission for an empty directory;
+            # recursive rm does, even when no child exists.
+            result = await driver.exec(f"rmdir -- {quoted} 2>/dev/null || rm -rf -- {quoted}")
             if result.return_code or result.stderr or result.truncated:
                 raise WorkspaceSnapshotError(f"cannot remove absent verifier mutable directory: {root}")
             continue
