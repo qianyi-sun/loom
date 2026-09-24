@@ -345,8 +345,11 @@ unlimited meaning, not a bypass of provider quota. Initial recovery evidence use
 a versioned bucket without enabled lifecycle deletion/transition rules; retention
 automation is not established by the installer. Neither these observations nor an object
 readback prove restoration or authorize infrastructure expansion. The protected
-workflow entrypoint and installed multi-owner acceptance must still be completed
-before this source-level installer can be described as an operational environment.
+workflow exposes fixed preflight/install operations bound to exact integrated
+tooling and a separately stored, digest-pinned private input file. It transfers no
+operator or runtime credentials through Actions. Installed restoration, credential
+renewal and multi-owner acceptance must still be completed before this source-level
+installer can be described as an operational environment.
 
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,

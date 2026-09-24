@@ -40,6 +40,7 @@ def entry_inputs(tmp_path, checks, installation):
     ingress = configuration(tmp_path)
     ingress["candidate"] = "1" * 40  # Historical installation journal is not rewritten.
     config = request.deployment.installation.foundation.platform_config
+    config["cluster_id"] = "mk8scluster-e00fixture"
     ingress["api_server"] = config["kubernetes_api_server"]
     ingress["cluster_id"] = config["cluster_id"]
     connection = {"endpoint": config["kubernetes_api_server"], "ca_file": private("operator-ca.pem", "fixture-ca"),
@@ -49,6 +50,7 @@ def entry_inputs(tmp_path, checks, installation):
         "prerequisites": client.settings.model_dump(mode="json"), "operator_connection": connection,
         "operator_cloud_credentials": connection["credentials_file"], "material_files": materials,
         "ingress_config": private("ingress.json", json.dumps(ingress)), "foundation_candidate": "2" * 40}
+    payload["deployment"]["installation"]["foundation"]["platform_config_json"] = json.dumps(config)
     private("inputs.json", json.dumps(payload))
     metadata["inputs_sha256"] = hashlib.sha256((root / "inputs.json").read_bytes()).hexdigest()
     path = private("operation.json", json.dumps(metadata))
