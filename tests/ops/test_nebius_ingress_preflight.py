@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
 from pathlib import Path
 from uuid import uuid4
 
@@ -149,3 +150,17 @@ def test_diagnostic_transport_rejects_non_fixed_reads_and_every_payload(wire, ar
     with pytest.raises(RuntimeError):
         adapter._run(args, payload=payload)
     assert kube.calls == []
+
+
+def test_diagnostic_preserves_wire_size_at_gateway_limit(wire, monkeypatch):
+    from scripts.ops.deploy_nebius_platform import Kubectl
+
+    _, config, _, _ = wire
+    monkeypatch.delenv("LOOM_DEPLOY_SSH_TARGET", raising=False)
+    raw = "x" * (4 * 1024 * 1024) + "\n"
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, raw, ""))
+    adapter = module().ReadOnlyIngressAPI(Kubectl(Path(config["kubeconfig"])), config)
+    with pytest.raises(RuntimeError):
+        adapter._get(["get", "pods", "--all-namespaces"])
+    assert adapter.failure == "response_too_large"
+    assert adapter.reads[-1]["bytes"] == 4194305
