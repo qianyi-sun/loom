@@ -83,12 +83,20 @@ func TestRestoreDirectoryRejectsInvalidStageBeforeDeletingBaseline(t *testing.T)
 			stage := filepath.Join(root, name)
 			switch kind {
 			case "file":
-				if err := os.WriteFile(stage, nil, 0600); err != nil { t.Fatal(err) }
+				if err := os.WriteFile(stage, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "symlink":
-				if err := os.Symlink(t.TempDir(), stage); err != nil { t.Fatal(err) }
+				if err := os.Symlink(t.TempDir(), stage); err != nil {
+					t.Fatal(err)
+				}
 			case "self-collision":
-				if err := os.Mkdir(stage, 0700); err != nil { t.Fatal(err) }
-				if err := os.Mkdir(filepath.Join(stage, name), 0700); err != nil { t.Fatal(err) }
+				if err := os.Mkdir(stage, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(stage, name), 0700); err != nil {
+					t.Fatal(err)
+				}
 			case "invalid-name":
 				name = "../outside"
 			}
@@ -105,34 +113,136 @@ func TestRestoreDirectoryRejectsInvalidStageBeforeDeletingBaseline(t *testing.T)
 func TestRestoreDirectoryRejectsSymlinkAncestorsAndProtectedRoots(t *testing.T) {
 	parent := t.TempDir()
 	outside := t.TempDir()
-	if err := os.Mkdir(filepath.Join(outside, restoreStage), 0700); err != nil { t.Fatal(err) }
-	if err := os.Symlink(outside, filepath.Join(parent, "link")); err != nil { t.Fatal(err) }
+	if err := os.Mkdir(filepath.Join(outside, restoreStage), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, "link")); err != nil {
+		t.Fatal(err)
+	}
 	for _, root := range []string{"/", "/tmp", "/proc", "/proc/self", "/opt", "/opt/verifier", "/loom", "/tests", parent + "/../escape", filepath.Join(parent, "link")} {
 		if status := restoreRequest(t, root, restoreStage); status == http.StatusNoContent {
 			t.Fatalf("unsafe root accepted: %s", root)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(outside, restoreStage)); err != nil { t.Fatal(err) }
+	if _, err := os.Stat(filepath.Join(outside, restoreStage)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRestoreDirectoryDoesNotTraverseOldSymlinkLeaves(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "keep"), []byte("private"), 0600); err != nil { t.Fatal(err) }
-	if err := os.Symlink(outside, filepath.Join(root, "old-link")); err != nil { t.Fatal(err) }
-	if err := os.Mkdir(filepath.Join(root, restoreStage), 0700); err != nil { t.Fatal(err) }
-	if status := restoreRequest(t, root, restoreStage); status != http.StatusNoContent { t.Fatalf("status %d", status) }
-	if data, err := os.ReadFile(filepath.Join(outside, "keep")); err != nil || string(data) != "private" { t.Fatalf("outside changed: %q %v", data, err) }
+	if err := os.WriteFile(filepath.Join(outside, "keep"), []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "old-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, restoreStage), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if status := restoreRequest(t, root, restoreStage); status != http.StatusNoContent {
+		t.Fatalf("status %d", status)
+	}
+	if data, err := os.ReadFile(filepath.Join(outside, "keep")); err != nil || string(data) != "private" {
+		t.Fatalf("outside changed: %q %v", data, err)
+	}
 }
 
 func TestRestoreDirectoryPreservesRootOwnership(t *testing.T) {
-	if os.Getuid() != 0 { t.Skip("ownership change requires root") }
+	if os.Getuid() != 0 {
+		t.Skip("ownership change requires root")
+	}
 	root := t.TempDir()
 	stage := filepath.Join(root, restoreStage)
-	if err := os.Mkdir(stage, 0755); err != nil { t.Fatal(err) }
-	if err := os.Chown(stage, 1234, 1235); err != nil { t.Fatal(err) }
-	if status := restoreRequest(t, root, restoreStage); status != http.StatusNoContent { t.Fatalf("status %d", status) }
+	if err := os.Mkdir(stage, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(stage, 1234, 1235); err != nil {
+		t.Fatal(err)
+	}
+	if status := restoreRequest(t, root, restoreStage); status != http.StatusNoContent {
+		t.Fatalf("status %d", status)
+	}
 	info, err := os.Stat(root)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	stat := info.Sys().(*syscall.Stat_t)
-	if stat.Uid != 1234 || stat.Gid != 1235 { t.Fatalf("ownership %d:%d", stat.Uid, stat.Gid) }
+	if stat.Uid != 1234 || stat.Gid != 1235 {
+		t.Fatalf("ownership %d:%d", stat.Uid, stat.Gid)
+	}
+}
+
+func TestRestoreDirectoryDoesNotRequireWritableParent(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("requires unprivileged permission enforcement")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "owned")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, restoreStage), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	if status := restoreRequest(t, root, restoreStage); status != http.StatusNoContent {
+		t.Fatalf("status %d", status)
+	}
+}
+
+func TestRestoreDirectoryReadOnlyStageRetainsFinalPermissions(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("requires unprivileged permission enforcement")
+	}
+	root := t.TempDir()
+	stage := filepath.Join(root, restoreStage)
+	if err := os.Mkdir(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "content"), []byte("read only"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stage, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(root, 0700); os.Chmod(stage, 0700) })
+	if err := replaceDirectory(root, restoreStage); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(root)
+	if err != nil || info.Mode().Perm() != 0555 {
+		t.Fatalf("mode changed: %v %v", info, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "content")); err != nil || string(data) != "read only" {
+		t.Fatalf("content changed: %q %v", data, err)
+	}
+}
+
+func TestRestoreDirectoryOnlyRequiresSearchableAncestors(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("requires unprivileged permission enforcement")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "owned")
+	stage := filepath.Join(root, restoreStage)
+	if err := os.MkdirAll(stage, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, "content"), []byte("restored"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0111); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	if err := replaceDirectory(root, restoreStage); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "content")); err != nil || string(data) != "restored" {
+		t.Fatalf("content changed: %q %v", data, err)
+	}
 }

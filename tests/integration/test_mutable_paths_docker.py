@@ -54,12 +54,12 @@ async def test_native_handoff_restores_the_shell_runtime_libraries(sandboxes, tm
     await export_mutable_paths(agent, (root,), tmp_path / 'libraries', workdir=PurePosixPath('/app'))
     await import_mutable_paths(verifier, (root,), tmp_path / 'libraries', workdir=PurePosixPath('/app'))
     checked = await verifier.exec(
-        f'test ! -e {root}/loom-deleted-marker; '
+        f'set -eu; test ! -e {root}/loom-deleted-marker; '
         f'test "$(cat {root}/loom-library-marker)" = transferred; '
         "python -c 'import ssl; print(ssl.OPENSSL_VERSION)'",
     )
     assert checked.return_code == 0 and b'OpenSSL' in checked.stdout, checked.stderr
-    untouched = await other_trial.exec(f'test ! -e {root}/loom-library-marker; /bin/sh -c true')
+    untouched = await other_trial.exec(f'set -eu; test ! -e {root}/loom-library-marker; /bin/sh -c true')
     assert untouched.return_code == 0, untouched.stderr
 
 
