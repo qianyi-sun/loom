@@ -1,5 +1,6 @@
 """Declarations for bounded directory state transfer to a private verifier."""
 
+import re
 from pathlib import PurePosixPath
 
 MAX_MUTABLE_PATHS = 16
@@ -9,6 +10,18 @@ _PROTECTED = tuple(PurePosixPath(path) for path in (
     "/proc", "/sys", "/dev", "/run", "/var/run", "/loom", "/tests", "/verifier", "/solution",
     "/opt/verifier", "/opt/verifier-python", "/opt/verifier-assets", "/opt/verifier-tools",
 ))
+
+
+def validate_task_workdir(value: str | PurePosixPath) -> str:
+    """Validate a task-container cwd without granting access to private/runtime roots."""
+    text = str(value)
+    path = PurePosixPath(text)
+    if (len(text) > 4096 or not re.fullmatch(r"/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+", text)
+            or any(part in {".", ".."} for part in text.split("/"))
+            or path == PurePosixPath("/tmp")
+            or any(path.is_relative_to(root) or root.is_relative_to(path) for root in _PROTECTED)):
+        raise ValueError("task workdir requires a canonical directory outside protected runtime and verifier paths")
+    return text
 
 
 def validate_mutable_paths(paths: tuple[PurePosixPath, ...], *, workdir: PurePosixPath) -> None:

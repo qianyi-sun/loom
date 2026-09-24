@@ -39,6 +39,7 @@ from loom.execution_runtime_contract import (
 from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
+from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
@@ -343,10 +344,13 @@ def automatic_service_execution_rejections(
         reasons.append("resource_limits_required")
     elif env.cpus > 128 or env.memory_mb > 1_048_576 or env.storage_mb > 1_048_576:
         reasons.append("resource_limits_out_of_range")
-    if (env.workdir not in {PurePosixPath("/workspace"), PurePosixPath("/app")}
-        if terminus else env.workdir != PurePosixPath("/workspace")) or (not terminus and env.user != "agent"):
+    if not terminus and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
         reasons.append("standard_workspace_identity_required")
     if terminus:
+        try:
+            validate_task_workdir(env.workdir)
+        except ValueError:
+            reasons.append("standard_workspace_identity_required")
         try:
             resolve_sandbox_identity(env.user, env.environment.get("HOME"))
             if task.verifier.user is not None:

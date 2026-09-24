@@ -266,6 +266,7 @@ def test_adaptation_preserves_declared_task_workdir(tmp_path: Path, workdir: str
     "/", "/loom/task", "/opt", "/opt/verifier", "/opt/verifier-python/project",
     "/proc/self", "/var", "/var/run/task", "/tests/project", "/tmp",
     "relative", "/app/../tests", "/app;touch /tmp/unsafe", "/app/$(id)",
+    "", "/app/", "//app", "/app/./state", "/app//state", "/app\n", "/app/\x00state",
 ])
 def test_adaptation_rejects_unsafe_workdir_before_writing_outputs(
     tmp_path: Path, workdir: str,
@@ -277,10 +278,13 @@ def test_adaptation_rejects_unsafe_workdir_before_writing_outputs(
     assert {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
-def test_adaptation_defaults_only_an_absent_workdir(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_adaptation_defaults_only_an_absent_workdir(tmp_path: Path, explicit_null: bool) -> None:
     _write_runtime_inputs(tmp_path)
     raw = _harbor_shaped_config()
     raw["environment"].pop("workdir")
+    if explicit_null:
+        raw["environment"]["workdir"] = None
     adapted, stats = adapt_bundle_for_nebius_terminus(tmp_path, raw)
     assert adapted["environment"]["workdir"] == "/app"
     assert stats.workspace_identity_forced

@@ -174,3 +174,70 @@ async def test_cross_root_hardlinks_are_rejected_instead_of_silently_copied(dock
         await export_mutable_paths(agent, (PurePosixPath("/data"), PurePosixPath("/home/task")),
                                    tmp_path, workdir=PurePosixPath("/workspace"))
     assert not (tmp_path / "manifest.json").exists()
+
+
+async def test_declared_workdir_and_external_state_reach_only_the_private_verifier(
+    sandboxes, tmp_path,  # noqa: F811
+):
+    from loom.mutable_paths import validate_task_workdir
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+    from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+    from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+
+    agent, verifier, other_trial = sandboxes
+    workdir = PurePosixPath(validate_task_workdir("/media/project"))
+    paths = (PurePosixPath("/opt/project-state"),)
+    policy = WorkspaceStagingPolicy(("tests/**", "verifier/**"), ("tests/**", "verifier/**"), ())
+    source = tmp_path / "task-input"
+    (source / "tests").mkdir(parents=True)
+    (source / "instruction.md").write_text("Update the project and its external state.\n")
+    (source / "tests/secret").write_text("private-original-check\n")
+    for driver in (agent, verifier):
+        made = await driver.exec(
+            "mkdir -p /media/project /opt/project-state; "
+            "printf stale > /media/project/deleted; printf old > /opt/project-state/head",
+        )
+        assert made.return_code == 0, made.stderr
+    await materialize_workspace(driver=agent, task_dir=source, dst=workdir, policy=policy)
+    assert (await agent.exec("test ! -e tests/secret", cwd=workdir)).return_code == 0
+    changed = await agent.exec(
+        "set -eu; test \"$PWD\" = /media/project; rm deleted; "
+        "printf changed > answer; printf new > /opt/project-state/head",
+        cwd=workdir,
+    )
+    assert changed.return_code == 0, changed.stderr
+    await materialize_workspace(
+        driver=verifier, task_dir=source, dst=workdir, policy=policy, phase="verifier",
+    )
+    await handoff_workspace_snapshot(
+        agent_driver=agent, verifier_driver=verifier, workdir=workdir, policy=policy,
+    )
+    await export_mutable_paths(agent, paths, tmp_path / "state", workdir=workdir)
+    await import_mutable_paths(verifier, paths, tmp_path / "state", workdir=workdir)
+    checked = await verifier.exec(
+        "set -eu; test \"$PWD\" = /media/project; test ! -e deleted; "
+        "test \"$(cat answer)\" = changed; test \"$(cat /opt/project-state/head)\" = new; "
+        "test \"$(cat tests/secret)\" = private-original-check",
+        cwd=workdir,
+    )
+    assert checked.return_code == 0, checked.stderr
+    untouched = await other_trial.exec("test ! -e /media/project; test ! -e /opt/project-state")
+    assert untouched.return_code == 0, untouched.stderr
+    assert (await agent.exec("test ! -e tests/secret", cwd=workdir)).return_code == 0
+
+
+async def test_declared_workdir_symlink_cannot_redirect_private_handoff(sandboxes):  # noqa: F811
+    from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_snapshot import WorkspaceSnapshotError, handoff_workspace_snapshot
+
+    agent, verifier, _ = sandboxes
+    assert (await agent.exec("mkdir -p /media/project; printf forged > /media/project/secret")).return_code == 0
+    assert (await verifier.exec(
+        "mkdir -p /media /tests; printf trusted > /tests/secret; ln -s /tests /media/project",
+    )).return_code == 0
+    with pytest.raises(WorkspaceSnapshotError):
+        await handoff_workspace_snapshot(
+            agent_driver=agent, verifier_driver=verifier, workdir=PurePosixPath("/media/project"),
+            policy=WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ()),
+        )
+    assert (await verifier.exec("cat /tests/secret")).stdout == b"trusted"

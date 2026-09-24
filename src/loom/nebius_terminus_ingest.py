@@ -23,6 +23,7 @@ from loom.harbor_verifier_script import (
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
+from loom.mutable_paths import validate_task_workdir
 from loom.nebius_terminus_image import prepare_nebius_terminus_image
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -201,11 +202,9 @@ def adapt_bundle_for_nebius_terminus(
         environment["os"] = "linux"
 
     workdir = environment.get("workdir")
-    workdir_ok = workdir in {"/app", "/workspace", PurePosixPath("/app"), PurePosixPath("/workspace")}
-    workspace_forced = not workdir_ok
+    workspace_forced = workdir is None
+    environment["workdir"] = validate_task_workdir("/app" if workdir is None else workdir)
     environment.setdefault("user", "agent")
-    if not workdir_ok:
-        environment["workdir"] = "/app"
 
     verifier_identity_stripped = False
     verifier["name"] = verifier.get("name") or "script"

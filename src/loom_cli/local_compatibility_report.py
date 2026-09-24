@@ -10,7 +10,7 @@ import tempfile
 import tomllib
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,6 +27,7 @@ from loom.execution_requirements import (
 )
 from loom.models.task import EnvironmentConfig, TaskConfig
 from loom.models.task_checksum import task_checksum
+from loom.mutable_paths import validate_task_workdir
 from loom.nebius_terminus_ingest import (
     NEBIUS_TERMINUS_PROFILE,
     UnsupportedComposeEnvironmentError,
@@ -70,7 +71,7 @@ def render_compatibility_payload(reports: tuple[TaskCompatibilityReport, ...]) -
         "limitations": [
             "Static local checks only; no image build, registry lookup, model calls or runtime execution.",
             "Undeclared requirements in instructions and scripts require task-author review.",
-            "Inherited registry-image startup and user settings are not inspected by source-only checks.",
+            "Inherited registry-image startup, user and working-directory settings are not inspected by source-only checks.",
             "Passing admission does not establish equivalent task semantics or trajectory delivery.",
         ],
     }
@@ -223,8 +224,11 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
         readiness("verifier_identity", "verifier.user",
                   "The verifier identity declaration is preserved; execution requires a qualified task identity runtime.",
                   "supports_task_identity")
-    if "workdir" in env and env["workdir"] not in ("/app", "/workspace"):
-        add("workspace_path", "environment.workdir", "Profile would replace the declared workdir with /app.", 2047)
+    if "workdir" in env:
+        try:
+            validate_task_workdir(env["workdir"])
+        except ValueError as exc:
+            add("workspace_path", "environment.workdir", str(exc), 2047)
     if "mutable_paths" in env and "mutable_paths" not in EnvironmentConfig.model_fields:
         add("mutable_paths", "environment.mutable_paths", "Declared mutable paths have no supported transfer contract.", 2047)
     if env.get("services") or env.get("sidecars"):
@@ -276,6 +280,38 @@ def _bare_shell_cmd(value: str) -> bool:
                                "zsh", "/bin/zsh", "/usr/bin/zsh"})
 
 
+def _dockerfile_workdir(
+    instructions: tuple[DockerfileInstruction, ...],
+) -> tuple[str | None, DockerfileInstruction | None]:
+    """Resolve literal source cwd changes; registry defaults and variables stay unknown."""
+    stages: dict[str, tuple[str | None, DockerfileInstruction | None]] = {}
+    directory: str | None = None
+    effective: DockerfileInstruction | None = None
+    alias: str | None = None
+    for instruction in instructions:
+        if instruction.keyword == "FROM":
+            words = instruction.arguments.split()
+            while words and words[0].startswith("--"):
+                words.pop(0)
+            if not words:
+                return None, None
+            directory, effective = stages.get(words[0].lower(), (None, None))
+            alias = words[2].lower() if len(words) == 3 and words[1].upper() == "AS" else None
+        elif instruction.keyword == "WORKDIR":
+            effective = instruction
+            value = instruction.arguments.strip()
+            if (not re.fullmatch(r"/?(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+", value)
+                    or any(part in {".", ".."} for part in value.split("/"))):
+                directory = None
+            elif value.startswith("/"):
+                directory = value
+            else:
+                directory = str(PurePosixPath(directory) / value) if directory else None
+        if alias is not None:
+            stages[alias] = (directory, effective)
+    return directory, effective
+
+
 def _dockerfile_runtime_requirements(
     bundle: Path, task: TaskConfig, report: TaskCompatibilityReport, *, harbor_input: bool = False,
 ) -> None:
@@ -294,6 +330,14 @@ def _dockerfile_runtime_requirements(
         instructions = dockerfile_instructions(dockerfile.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return
+    directory, workdir_instruction = _dockerfile_workdir(instructions)
+    if workdir_instruction is not None and directory != str(task.environment.workdir):
+        report.add("unsupported_conversion", "dockerfile_workdir_overridden",
+                   f"Final authored WORKDIR {workdir_instruction.arguments!r} "
+                   f"resolves to {directory!r}; preparation selects {str(task.environment.workdir)!r}.",
+                   "Declare the supported original environment.workdir explicitly. Resolve variables or "
+                   "inherited registry working directories through image inspection; do not silently relocate task state.",
+                   source=f"{dockerfile}:{workdir_instruction.line}")
     stages: dict[str, dict[str, DockerfileInstruction]] = {}
     current: dict[str, DockerfileInstruction] = {}
     local_cmd = False

@@ -923,6 +923,10 @@ def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: s
         }
     )
     trial = _trial().model_copy(update={"agent_name": agent})
+    if agent == "terminus-2":
+        task = task.model_copy(update={"environment": task.environment.model_copy(
+            update={"workdir": PurePosixPath("/media/project")},
+        )})
     plan = compile_service_execution_plan(
         task=task,
         trial=trial,
@@ -933,6 +937,10 @@ def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: s
     assert plan.main.timeout_seconds == 900
     assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
     if agent == "terminus-2":
+        # A custom sandbox cwd must never move the trusted Python controller
+        # into task-controlled inputs or disable isolated import resolution.
+        assert plan.main.working_directory == plan.verifier.working_directory == "/app"
+        assert plan.main.argv[:3] == plan.verifier.argv[:3] == ("python", "-I", "-m")
         assert plan.canonical_payload()["verifier_after_agent_timeout"] is True
         assert plan.agent_image_ref == controller
         assert {sidecar.role_name for sidecar in plan.sidecars if sidecar.private_sandbox} == {

@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
+from loom.mutable_paths import validate_task_workdir
 from loom.sandbox_identity import SandboxIdentityV1, resolve_sandbox_identity
 
 OFFLINE_SCRIPT = "verifier/harbor-offline.sh"
@@ -563,9 +564,7 @@ def prepare_nebius_terminus_image(staged: Path, environment: dict[str, Any]) -> 
         raise ValueError(
             "nebius-terminus: selected Dockerfile build targets require explicit adaptation"
         )
-    workdir = str(environment.get("workdir", "/app"))
-    if workdir not in {"/app", "/workspace"}:
-        raise ValueError("nebius-terminus: unsupported preparation workdir")
+    workdir = validate_task_workdir(environment.get("workdir", "/app"))
     source_name = str(environment["dockerfile"])
     if source_name.endswith(_DOCKERFILE_SUFFIX):
         source_name = source_name.removesuffix(_DOCKERFILE_SUFFIX)
