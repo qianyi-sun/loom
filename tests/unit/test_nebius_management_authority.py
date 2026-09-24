@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tests.unit.test_nebius_environment_contract import foundation_from, registration_for
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 INSTALLATION = "30000000-0000-4000-8000-000000000001"
@@ -75,3 +76,30 @@ def test_namespace_authority_cannot_adopt_imported_bindings(platform_inputs):
     with pytest.raises(ValueError, match="authority cannot adopt imported"):
         render_environment(row, candidate, foundation, profile=profile, keyring={},
                            repo_root=Path(__file__).resolve().parents[2])
+
+
+def test_namespace_authority_cannot_silently_use_a_cloud_identity(management_inputs):
+    from loom_service.environment_management.installation import ManagementInstallation
+
+    installation = management_inputs[0]["installation"]
+    installation["foundation"]["namespace_authority"] = authority().model_dump(mode="json")
+    with pytest.raises(ValueError, match="namespace authority requires projected"):
+        ManagementInstallation.model_validate(installation)
+
+
+@pytest.mark.parametrize("change", [
+    {"installation_id": "30000000-0000-4000-8000-000000000002"},
+    {"namespace": "loom-nebius-management-other"},
+])
+def test_management_render_rejects_another_installations_namespace_authority(management_inputs, change):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    deployment = management_inputs[0]
+    deployment["installation"]["foundation"]["namespace_authority"] = {
+        **authority().model_dump(mode="json"), **change,
+    }
+    kube = deployment["installation"]["provider_runtime"]["kubernetes"]
+    kube.pop("credentials_file")
+    kube.update(kind="projected_service_account", token_file="/var/run/loom-management-kubernetes/token")
+    with pytest.raises(ValueError, match="namespace authority differs"):
+        ManagementDeployment.model_validate(deployment)
