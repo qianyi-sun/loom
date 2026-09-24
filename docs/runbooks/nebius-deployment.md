@@ -700,7 +700,12 @@ Configure the public metadata as protected `NEBIUS_MANAGEMENT_OPERATION_JSON` an
 the dedicated transport key as `NEBIUS_MANAGEMENT_SSH_KEY`.
 
 Run preflight before install. `preflight_qualified` is a read-only observation,
-not a reservation or installed result. `pending` records a database, migration,
+not a reservation or installed result. Backup credential qualification uses a
+bounded `ListObjectsV2` request (`MaxKeys=1`), after verifying the exact private,
+versioned bucket and object-only policy through IAM. Nebius can deny `HeadBucket`
+for that policy even when object access works; do not broaden the backup identity
+to work around it. A successful list is not backup write or restore evidence.
+`pending` records a database, migration,
 backup or service readiness barrier; a later invocation with identical inputs
 reconciles existing identities before advancing. A failed/unknown outcome is not
 permission to delete state or blindly repeat a write. Preserve the entire state,
