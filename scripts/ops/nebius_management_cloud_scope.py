@@ -128,8 +128,9 @@ async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, mater
                 groups = await _pages(api["memberships"].list_member_of, v1.ListMemberOfRequest, subject_id=account)
                 _require(len(groups) == 1)
                 _resource(groups[0], group, project)
-                # A nested tenant group must not smuggle broader inherited access.
-                _require(not await _pages(api["memberships"].list_member_of, v1.ListMemberOfRequest, subject_id=group))
+                # Nebius group members are accounts, not groups. ListMemberOf
+                # accepts only account subjects. Check all account memberships
+                # above; never query a fictional nested-group relationship.
                 permits = await _pages(api["permits"].list, v1.ListAccessPermitRequest, parent_id=group)
                 if prefix == "provisioning":
                     _require(len(permits) == 1 and permits[0]["metadata"]["parent_id"] == group
