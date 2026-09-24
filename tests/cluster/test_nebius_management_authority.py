@@ -6,20 +6,44 @@ import copy
 import os
 import ssl
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.ops.test_nebius_management_install import installation as installation
+from tests.ops.test_nebius_management_supplied import material as material
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires explicitly disposable Kubernetes")
 
 
 @pytest.mark.timeout(180)
-def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api():
+def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(tmp_path, installation):
     from kubernetes import client
+    from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
+    from scripts.ops.nebius_management_authority_stage import (
+        HTTPSManagementAuthorityAPI,
+        management_authority_ready,
+        stage_management_authority,
+    )
+    from scripts.ops.nebius_management_bootstrap import (
+        BootstrapBinding,
+        HTTPSBootstrapAPI,
+        bootstrap_management,
+    )
+    from scripts.ops.nebius_management_evidence import (
+        HTTPSManagementEvidenceAPI,
+        _matches_backup_template,
+    )
+    from scripts.ops.nebius_management_install import ManagementInstallError, render_installation
+    from scripts.ops.nebius_management_live import HTTPSManagementInstallationAPI
+    from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_stage import stage_management_resources
 
     from loom.nebius_management_authority import (
         ManagementNamespaceAuthority,
@@ -33,23 +57,60 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api()
     container = _start_k3s(ephemeral_storage_floor="2Gi")
     try:
         _, core, _ = _load_client(container)
-        rbac = client.RbacAuthorizationV1Api(core.api_client)
         admission = client.AdmissionregistrationV1Api(core.api_client)
-        for name in (authority.namespace, "loom-dev-foreign"):
-            core.create_namespace({"metadata": {"name": name}})
+        config = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
+        trust = ssl.create_default_context(cadata=base64.b64decode(
+            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
+        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
+        operator_trust = ssl.create_default_context(cadata=base64.b64decode(
+            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
+        user = config["users"][0]["user"]
+        certificate, key = tmp_path / "client.crt", tmp_path / "client.key"
+        certificate.write_bytes(base64.b64decode(user["client-certificate-data"]))
+        key.write_bytes(base64.b64decode(user["client-key-data"]))
+        key.chmod(0o600)
+        operator_trust.load_cert_chain(certificate, key)
+        bootstrap = BootstrapBinding(str(authority.installation_id), authority.namespace,
+                                     core.read_namespace("kube-system").metadata.uid)
+        with HTTPSBootstrapAPI(binding=bootstrap, api_server=endpoint, ssl_context=operator_trust) as api:
+            receipt = bootstrap_management(binding=bootstrap, api=api, state_dir=tmp_path / "bootstrap")
+        binding = ManagementBinding(bootstrap.installation_id, bootstrap.namespace,
+                                    receipt["namespace_uid"], bootstrap.kube_system_uid)
+        core.create_namespace({"metadata": {"name": "loom-dev-foreign"}})
         core.create_namespaced_secret("loom-dev-foreign", {"metadata": {"name": "private"}, "stringData": {"value": "foreign"}})
-        core.create_namespaced_service_account(authority.namespace, {"metadata": {"name": "loom-management-provisioner"}})
-        constructors = {
-            "ValidatingAdmissionPolicy": admission.create_validating_admission_policy,
-            "ValidatingAdmissionPolicyBinding": admission.create_validating_admission_policy_binding,
-            "ClusterRole": rbac.create_cluster_role,
-            "ClusterRoleBinding": rbac.create_cluster_role_binding,
-        }
-        policies = []
-        for document in render_namespace_authority(authority):
-            constructors[document["kind"]](document)
-            if document["kind"] == "ValidatingAdmissionPolicy":
-                policies.append(document["metadata"]["name"])
+        class ExternalPrerequisites:
+            def preflight(self, request, rendered):
+                raise AssertionError("cloud/route qualification is outside this disposable RBAC test")
+
+            def public_route(self, request):
+                raise AssertionError("no public route in disposable RBAC test")
+
+        request = replace(installation[0], binding=bootstrap)
+        live = HTTPSManagementInstallationAPI(request=request, api_server=endpoint, ssl_context=operator_trust,
+            runtime_ca_pem=base64.b64decode(config["clusters"][0]["cluster"]["certificate-authority-data"]).decode(),
+            checks=ExternalPrerequisites())
+        with live.resources(binding, "config") as api:
+            stage_management_resources(rendered=live.rendered, phase="10-config-network.yaml", binding=binding,
+                                       api=api, state_dir=tmp_path / "config")
+        # Real Pod-only admission defaults differ from Job-template defaults.
+        # Dry-runs prove compatibility without claiming a database backup ran.
+        batch = client.BatchV1Api(core.api_client)
+        job = core.api_client.sanitize_for_serialization(batch.create_namespaced_job(
+            binding.namespace, live.rendered.files["85-backup-verify.yaml"][0], dry_run="All"))
+        template = job["spec"]["template"]["spec"]
+        admitted = core.api_client.sanitize_for_serialization(core.create_namespaced_pod(binding.namespace, {
+            "apiVersion": "v1", "kind": "Pod", "metadata": {"generateName": "backup-evidence-"}, "spec": template,
+        }, dry_run="All"))
+        assert len(admitted["spec"]["tolerations"]) > len(template["tolerations"])
+        assert _matches_backup_template(admitted["spec"], template)
+        with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            arguments = dict(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
+            first = stage_management_authority(**arguments)
+            assert stage_management_authority(**arguments) == first
+            assert len(first["resource_uids"]) == 9
+        policies = [doc["metadata"]["name"] for doc in render_namespace_authority(authority)
+                    if doc["kind"] == "ValidatingAdmissionPolicy"]
         deadline = time.monotonic() + 20
         while True:
             observed = [admission.read_validating_admission_policy(name) for name in policies]
@@ -58,12 +119,31 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api()
                 break
             assert time.monotonic() < deadline, "admission policy was not type checked"
             time.sleep(0.1)
-        token = core.create_namespaced_service_account_token("loom-management-provisioner", authority.namespace,
-            client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[], expiration_seconds=600))).status.token
-        config = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
-        trust = ssl.create_default_context(cadata=base64.b64decode(
-            config["clusters"][0]["cluster"]["certificate-authority-data"]).decode())
-        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
+        with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            assert management_authority_ready(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
+        account_uid = core.read_namespaced_service_account("loom-management-provisioner", authority.namespace).metadata.uid
+        with HTTPSManagementEvidenceAPI(binding=binding, rendered=render_installation(installation[0]),
+                                        api_server=endpoint, ssl_context=operator_trust) as api:
+            token = api.runtime_token(service_account_uid=account_uid)
+        with HTTPSManagementAuthorityProbe(authority=authority, service_account_uid=account_uid,
+                                          api_server=endpoint, ssl_context=trust, token=token) as probe:
+            deadline = time.monotonic() + 20
+            while not probe.qualify():
+                assert time.monotonic() < deadline, "runtime authority did not qualify"
+                time.sleep(0.1)
+        # Exercise the connected caller, including the journal-bound account and
+        # a fresh trust-only context. Reusing operator mTLS would fail its actual
+        # SelfSubjectReview instead of silently qualifying cluster-admin.
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                live.qualify_authority(binding, tmp_path / "authority")
+                break
+            except ManagementInstallError as exc:
+                assert str(exc) == "management authority propagation pending"
+                assert time.monotonic() < deadline
+                time.sleep(0.1)
         with httpx.Client(base_url=endpoint, verify=trust, headers={"Authorization": "Bearer " + token},
                           trust_env=False, follow_redirects=False, timeout=20) as http:
             own = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "loom-dev-alice", "labels": {

@@ -390,6 +390,7 @@ def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_
     workflow = yaml.load((Path(__file__).resolve().parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == [
         "rollout", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
+        "management-preflight", "management-install",
     ]
     job = workflow["jobs"]["ingress"]
     assert job["environment"] == {"name": "nebius-integration", "deployment": "false"}
