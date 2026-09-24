@@ -333,10 +333,17 @@ Its read-only prerequisite adapter resolves exact candidate/profile bytes throug
 the protected publication catalog, verifies the dedicated provisioning key and
 project-only grants, and checks a separate object-only backup identity. It rejects
 inherited or broader IAM permissions and backup-group grants on another bucket.
-Live platform sizing counts controller rollout/HPA maxima, scheduled maintenance,
+Live platform sizing counts controller rollout/HPA maxima (including per-node
+DaemonSet surge), scheduled maintenance,
 pending/terminating Pods and the child allowance; UID-linked controller Pods are
-not counted twice. Storage-class identity, pending PVC demand and remaining
-provider disk quota are separate checks. Neither these observations nor an object
+not counted twice. Storage-class identity, pending/expanding PVC demand, missing
+StatefulSet claims (including HPA maxima), and remaining provider disk quota are
+separate checks. The backup bucket and regional object-storage quota must have
+headroom for one full database-sized dump, including current objects, noncurrent
+versions and inflight multipart parts. Zero bucket maximum retains the provider's
+unlimited meaning, not a bypass of provider quota. Initial recovery evidence uses
+a versioned bucket without enabled lifecycle deletion/transition rules; retention
+automation is not established by the installer. Neither these observations nor an object
 readback prove restoration or authorize infrastructure expansion. The protected
 workflow entrypoint and installed multi-owner acceptance must still be completed
 before this source-level installer can be described as an operational environment.

@@ -89,7 +89,7 @@ def _active_key(row: dict[str, Any], *, account: str, now: datetime) -> None:
 
 
 async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, material: dict[str, dict[str, str]],
-                                 bucket_name: str, clients: dict[str, Any] | None = None,
+                                 bucket_name: str, backup_bytes: int, clients: dict[str, Any] | None = None,
                                  now: datetime | None = None) -> dict[str, str]:
     """Prove exact, non-inherited project admin and separate object-only backup.
 
@@ -155,7 +155,21 @@ async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, mater
             _require(bucket["metadata"]["name"] == bucket_name and bucket["status"]["state"] == "ACTIVE"
                      and bucket["status"]["suspension_state"] == "NOT_SUSPENDED" and bucket["status"]["region"] == scope.region
                      and not bucket["status"].get("anonymous_access_enabled")
+                     and not bucket["status"].get("deleted_at") and not bucket["status"].get("purge_at")
                      and bucket["spec"]["versioning_policy"] == "ENABLED")
+            _require(type(backup_bytes) is int and backup_bytes > 0)
+            limit = int(bucket["spec"].get("max_size_bytes", 0))
+            sizes = [int(counters.get(section, {}).get(field, 0))
+                     for counters in bucket["status"].get("counters", [])
+                     for section, fields in (("counters", ("simple_objects_size", "multipart_objects_size", "inflight_parts_size")),
+                                             ("non_current_counters", ("simple_objects_size", "multipart_objects_size")))
+                     for field in fields]
+            _require(limit >= 0 and all(size >= 0 for size in sizes)
+                     and (limit == 0 or limit - sum(sizes) >= backup_bytes))
+            # Initial recovery evidence is retained. Do not silently accept
+            # lifecycle deletion/transition policy before restore qualification.
+            _require(all(rule.get("status") == "DISABLED" for rule in
+                         bucket["spec"].get("lifecycle_configuration", {}).get("rules", [])))
             rules = bucket["spec"]["bucket_policy"]["rules"]
             _require(len(rules) == 1 and rules[0] == {
                          "group_id": scope.backup_group_id, "paths": ["*"], "roles": ["storage.object-editor"]})

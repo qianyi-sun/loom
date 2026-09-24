@@ -44,6 +44,8 @@ class ManagementPrerequisiteSettings(BaseModel):
     storage_parameters: dict[str, str]
     storage_quota_name: str = Field(min_length=1, max_length=255)
     storage_quota_unit: str = Field(min_length=1, max_length=40)
+    backup_quota_name: str = Field(min_length=1, max_length=255)
+    backup_quota_unit: str = Field(min_length=1, max_length=40)
 
 
 class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
@@ -253,23 +255,27 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
         try:
             async with asyncio.timeout(180):
                 await qualify_cloud_material(sdk=sdk, scope=self.settings.cloud, material=request.material,
-                                             bucket_name=request.deployment.backup_bucket)
+                                             bucket_name=request.deployment.backup_bucket,
+                                             backup_bytes=request.deployment.postgres_storage_gi * 1024**3)
                 quotas = await _pages(v1.QuotaAllowanceServiceClient(sdk).list, v1.ListQuotaAllowancesRequest,
                                       parent_id=self.settings.cloud.tenant_id)
-                rows = [row for row in quotas if row["metadata"]["name"] == self.settings.storage_quota_name
-                        and row.get("spec", {}).get("region") == self.settings.cloud.region]
-                if len(rows) != 1 or self.settings.storage_quota_unit not in {"byte", "bytes", "B"}:
-                    raise ValueError()
-                row = rows[0]
-                if (row["metadata"]["parent_id"] != self.settings.cloud.tenant_id
-                        or row["status"]["state"] != "STATE_ACTIVE"
-                        or row["status"]["usage_state"] not in {"USAGE_STATE_USED", "USAGE_STATE_NOT_USED"}
-                        or row["status"]["service"] != "compute"
-                        or row["status"]["unit"] != self.settings.storage_quota_unit):
-                    raise ValueError()
-                limit, used = (int(row[part].get(field, 0)) for part, field in (("spec", "limit"), ("status", "usage")))
-                if min(limit, used) < 0 or limit - used < missing_storage_mib * 1024**2:
-                    raise ValueError()
+                for name, unit, service, required in (
+                    (self.settings.storage_quota_name, self.settings.storage_quota_unit, "compute", missing_storage_mib * 1024**2),
+                    (self.settings.backup_quota_name, self.settings.backup_quota_unit, "storage", request.deployment.postgres_storage_gi * 1024**3),
+                ):
+                    rows = [row for row in quotas if row["metadata"]["name"] == name
+                            and row.get("spec", {}).get("region") == self.settings.cloud.region]
+                    if len(rows) != 1 or unit not in {"byte", "bytes", "B"}:
+                        raise ValueError()
+                    row = rows[0]
+                    if (row["metadata"]["parent_id"] != self.settings.cloud.tenant_id
+                            or row["status"]["state"] != "STATE_ACTIVE"
+                            or row["status"]["usage_state"] not in {"USAGE_STATE_USED", "USAGE_STATE_NOT_USED"}
+                            or row["status"]["service"] != service or row["status"]["unit"] != unit):
+                        raise ValueError()
+                    limit, used = (int(row[part].get(field, 0)) for part, field in (("spec", "limit"), ("status", "usage")))
+                    if min(limit, used) < 0 or limit - used < required:
+                        raise ValueError()
                 if private_state._private_read(self.operator_cloud_credentials, limit=1024 * 1024) != before:
                     raise ValueError()
         finally:
