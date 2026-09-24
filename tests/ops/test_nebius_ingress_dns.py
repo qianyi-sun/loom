@@ -110,7 +110,7 @@ def test_dns_qualification_does_not_create_missing_tls_delivery(installed):
     assert not receipt.exists()
 
 
-@pytest.mark.parametrize("drift", ["cluster", "controller", "tls", "legacy", "public", "during_probe"])
+@pytest.mark.parametrize("drift", ["cluster", "controller", "origin", "tls", "legacy", "public", "during_probe"])
 def test_dns_qualification_requires_current_end_to_end_route(installed, monkeypatch, drift):
     arguments, tls = installed
     api = arguments["api"]
@@ -119,6 +119,9 @@ def test_dns_qualification_requires_current_end_to_end_route(installed, monkeypa
     elif drift == "controller":
         deployment = next(row for row in api.stage.resources.values() if row["kind"] == "Deployment")
         deployment["metadata"]["uid"] = str(uuid4())
+    elif drift == "origin":
+        origin = next(row for row in api.stage.resources.values() if row["kind"] == "Service")
+        origin["metadata"]["uid"] = str(uuid4())
     elif drift == "tls":
         monkeypatch.setattr(api, "probe_tls", lambda *args: "0" * 64)
     elif drift == "legacy":

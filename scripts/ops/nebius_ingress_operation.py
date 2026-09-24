@@ -18,7 +18,7 @@ from uuid import UUID
 from cryptography import x509
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops import nebius_ingress_probe as probes
-from scripts.ops.nebius_ingress_cutover import KubectlCutoverAPI, cutover, rollback
+from scripts.ops.nebius_ingress_cutover import MARKER, KubectlCutoverAPI, cutover, rollback
 from scripts.ops.nebius_ingress_cutover import _identity as resource_identity
 from scripts.ops.nebius_ingress_cutover import _stable as stable_resource
 from scripts.ops.nebius_ingress_gateway import (
@@ -192,6 +192,113 @@ def install_ingress(*, api: InstallationAPI, certificate_config: dict[str, Any],
         raise
     except Exception:
         raise OperationError("ingress installation incomplete; preserve journals and any owned rollout pause") from None
+
+
+def qualify_dns_target(*, api: InstallationAPI, certificate_config: dict[str, Any],
+                       state_dir: Path) -> dict[str, Any]:
+    """Observe an installed route; never deliver, stage, cut over or pause it.
+
+    Historical cutover owns the public allocation, not the current application
+    revision. The exact installed authority and fresh HTTPS probes bind the
+    current candidate, allowing ordinary approved application upgrades.
+    """
+    from scripts.ops.nebius_dns_publication import validate_target
+
+    try:
+        binding = api.binding
+        root = Path(certificate_config["state_dir"])
+        if (not state_dir.is_dir() or not root.is_dir()
+                or certificate_config["installation_id"] != binding.certificate_installation_id
+                or certificate_config["child_domain"] != binding.child_domain
+                or certificate_config["management_host"] != binding.management_host):
+            raise OperationError("installed ingress and certificate state required")
+        # Match installation's lock order. Never invoke its mutating entrypoint.
+        with private_state._locked_state(state_dir), private_state._locked_state(root):
+            if private_state.load_installation(root / "installation.json") != certificate_config:
+                raise OperationError("certificate installation state differs")
+            record = json.loads(private_state._private_read(state_dir / "cutover/cutover.json", limit=2 * 1024 * 1024))
+            identity = record["binding"]
+            if (record["phase"] != "complete"
+                    or identity != {"installation_id": binding.installation_id,
+                                    "namespace": binding.namespace, "candidate": identity["candidate"]}
+                    or not re.fullmatch(r"[0-9a-f]{40}", identity["candidate"])
+                    or str(UUID(record["owner"])) != record["owner"] or UUID(record["owner"]).int == 0):
+                raise OperationError("completed bound ingress cutover required")
+            stage = json.loads(private_state._private_read(
+                state_dir / "stage" / (binding.installation_id + ".json"), limit=1024 * 1024,
+            ))
+            if (stage["schema"] != "loom.nebius-ingress-stage.v1" or stage["status"] != "controller_staged"
+                    or stage["binding"] != asdict(binding)):
+                raise OperationError("completed bound controller staging required")
+            controller = stage["resources"][f"Deployment:{binding.namespace}:loom-shared-ingress"]
+            if controller["status"] != "created" or not controller["uid"]:
+                raise OperationError("recorded controller identity required")
+            selected = private_state._selected(root)
+            if selected is None:
+                raise OperationError("selected delivered certificate required")
+            tls = json.loads(private_state._private_read(
+                root / "deliveries" / (binding.installation_id + "-" + selected["generation"] + ".json"),
+            ))
+            if (tls["schema"] != "loom.nebius-ingress-tls.v1" or tls["binding"] != asdict(binding)
+                    or tls["status"] != "tls_delivered" or tls["certificate_generation"] != selected["generation"]
+                    or tls["fingerprint_sha256"] != selected["fingerprint_sha256"]
+                    or selected["sans"] != ["*." + binding.child_domain, binding.management_host]):
+                raise OperationError("selected certificate delivery is unqualified")
+
+            def observe() -> tuple[dict[str, Any], dict[str, Any]]:
+                api.verify_identity(binding)
+                service, config = api.read()
+                for current, key, kind, name in ((service, "service_after", "Service", "loom-web"),
+                                                 (config, "config_after", "ConfigMap", "loom-platform-config")):
+                    resource_identity(current, kind=kind, name=name, namespace=binding.namespace)
+                    if (current["metadata"]["uid"] != record[key]["metadata"]["uid"]
+                            or current["metadata"].get("annotations", {}).get(MARKER) != record["owner"]):
+                        raise OperationError("completed public routing ownership differs")
+                environment = json.loads(config["data"]["environment.json"])
+                previous = json.loads(record["config_before"]["data"]["environment.json"])
+                if (service["spec"] != record["service_after"]["spec"]
+                        or service["spec"]["type"] != "LoadBalancer"
+                        or service["spec"]["selector"] != {"app": "loom-shared-ingress"}
+                        or service["status"]["loadBalancer"] != record["service_before"]["status"]["loadBalancer"]
+                        or environment.get("shared_ingress_enabled") is not True
+                        or environment["public_host"] != previous["public_host"]
+                        or json.loads(config["data"]["profile.json"])["candidate_sha"] != api.candidate):
+                    raise OperationError("completed ingress allocation or live configuration differs")
+                return service, config
+
+            foundation = api.foundation()
+            before = observe()
+            addresses = before[0]["status"]["loadBalancer"]["ingress"]
+            if len(addresses) != 1 or set(addresses[0]) - {"ip", "ipMode"}:
+                raise OperationError("one retained public IPv4 allocation required")
+            target = {"installation_id": binding.installation_id, "service_uid": before[0]["metadata"]["uid"],
+                      "candidate": api.candidate, "fingerprint_sha256": tls["fingerprint_sha256"],
+                      "zone": certificate_config["zone"], "child_domain": binding.child_domain,
+                      "management_host": binding.management_host, "address": addresses[0]["ip"]}
+            validate_target(target)
+            proof = qualify_controller(binding=binding, api=api, deployment_uid=controller["uid"],
+                                       image=api.image, tls_receipt=tls)
+            pods = api.list_controller_pods(binding.namespace)
+            if [pod["metadata"]["uid"] for pod in pods] != proof["pod_uids"]:
+                raise OperationError("controller membership changed before legacy proof")
+            for pod in pods:
+                api.probe_legacy_pod(pod)
+            origin = stage["resources"][f"Service:{binding.namespace}:loom-web-origin"]
+            if origin["status"] != "created" or not origin["uid"] or not origin["observed"]:
+                raise OperationError("recorded legacy origin identity required")
+            api.probe_original_backend(origin)
+            api.probe_public(tls)
+            if (qualify_controller(binding=binding, api=api, deployment_uid=controller["uid"],
+                                   image=api.image, tls_receipt=tls) != proof
+                    or api.foundation() != foundation
+                    or tuple(map(stable_resource, observe())) != tuple(map(stable_resource, before))
+                    or private_state._selected(root) != selected):
+                raise OperationError("installed ingress changed during DNS qualification")
+            return target
+    except OperationError:
+        raise
+    except Exception:
+        raise OperationError("installed DNS target unavailable; preserve ingress and certificate state") from None
 
 
 class LiveIngressAPI(KubectlCutoverAPI):
