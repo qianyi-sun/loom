@@ -30,6 +30,7 @@ from loom.db.schema import (
     Artifact,
     LlmCall,
     ServiceExecutionLease,
+    ServiceExecutionLeaseHistory,
     Task,
     TaskImageMaterialization,
     Team,
@@ -541,6 +542,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 await session.rollback()
             assert not await materializer().run_once(lease_id=lease.id)
             assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=uuid4())
+            async with sessions() as session:
+                histories_before = {
+                    item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                    for item in (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                        ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                }
             requeues = await asyncio.gather(*(
                 materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
                 for _ in range(2)
@@ -549,6 +556,16 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
                 assert current.materialization_recovery_requested_at is not None
+                histories = (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                    ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                assert {item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                        for item in histories if item.id in histories_before} == histories_before
+                new_history = [item for item in histories if item.id not in histories_before]
+                assert len(new_history) == 1, "Recovery must append exactly one audit snapshot"
+                assert datetime.fromisoformat(new_history[0].snapshot_json[
+                    "materialization_recovery_requested_at"
+                ]) == current.materialization_recovery_requested_at
+                assert new_history[0].snapshot_json["materialization_state"] == "pending"
                 with pytest.raises(DBAPIError, match="archival recovery requires one diagnosed deleted verifier attempt"):
                     await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
                         "WHERE id=:id"), {"id": lease.id})
