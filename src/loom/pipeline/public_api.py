@@ -376,6 +376,25 @@ class PipelineArtifactDetailV1(PipelineArtifactSummaryV1):
     files: list[PipelineArtifactFileProjectionV1]
 
 
+class PipelineInputArtifactDetailV1(PipelineReadModel):
+    """Locator-free metadata for an existing imported/materialized input."""
+
+    id: UUID
+    name: str
+    artifact_type: str
+    source_kind: Literal["input_import", "recipe_input_materialization"]
+    source_id: UUID
+    state: Literal["committed"]
+    recipe_name: str
+    recipe_version: int
+    content_sha256: str
+    manifest_sha256: str | None
+    stored_size_bytes: NonNegativeSafeInt | None
+    file_count: NonNegativeSafeInt | None
+    safety_state: str
+    created_at: datetime
+
+
 class PipelineBudgetCounterV1(PipelineReadModel):
     limit: NonNegativeSafeInt
     reserved: NonNegativeSafeInt

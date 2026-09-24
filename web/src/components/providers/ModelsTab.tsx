@@ -11,7 +11,9 @@ import { api, type ProviderConnectionModelEntry } from "../../api";
 import { Button } from "../Button";
 import { Card } from "../Card";
 import CommandSnippet from "../CommandSnippet";
-import DocsCallout from "../DocsCallout";
+import { CommandActions } from "../CommandActions";
+import { providerTestAge } from "../../lib/providerDisplay";
+import { shellQuote } from "../../lib/shellQuote";
 import { Input } from "../Input";
 import LoadingState from "../LoadingState";
 import {
@@ -31,10 +33,11 @@ function PreflightStatus({ model }: { model: ProviderConnectionModelEntry }): JS
       <div className="space-y-1">
         <span
           className="rounded bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700"
-          title="The latest preflight call succeeded for this connection and model."
+          title="The latest preflight call succeeded for this connection and model. This is historical verification, not a current availability guarantee."
         >
           Callable
         </span>
+        <p className="text-xs text-slate-500">{providerTestAge(model.last_preflight_at)}</p>
         {model.last_preflight_http_status ? (
           <p className="text-xs text-slate-500">
             HTTP {model.last_preflight_http_status}
@@ -116,10 +119,10 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <Input placeholder="Filter models…" value={filter}
-          onChange={(e) => setFilter(e.target.value)} className="w-72" />
-        <div className="flex gap-2">
+          onChange={(e) => setFilter(e.target.value)} className="w-full sm:w-72" />
+        <div className="flex flex-wrap gap-2">
           <Button onClick={() => refresh.mutate()} disabled={refresh.isPending}>
             {refresh.isPending ? "Refreshing…" : "Refresh"}
           </Button>
@@ -142,17 +145,17 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
           </p>
         </div>
       ) : null}
-      <DocsCallout title="Model picker guidance" tone="info">
+      <CommandActions title="Model picker guidance" label="Model help and CLI">
         <p>
-          Refreshed visible models appear in New Batch. Hide noisy upstream
+          Discovery is a cached catalog, not a generation test or proof of current availability. Refreshed visible models appear in New Batch. Hide noisy upstream
           entries, or add a manual model ID when the provider omits it from
           discovery.
         </p>
         <CommandSnippet
           label="Refresh provider model cache"
-          command={`loom providers models ${cliConnection} --refresh`}
+          command={`loom providers models ${shellQuote(cliConnection)} --refresh`}
         />
-      </DocsCallout>
+      </CommandActions>
       <Card>
         {items.length === 0 ? (
           <Card.Body className="text-center text-sm text-slate-500">
@@ -167,7 +170,7 @@ export default function ModelsTab({ id, connectionName }: ModelsTabProps): JSX.E
                 <th scope="col" className="px-4 py-2">Source</th>
                 <th scope="col" className="px-4 py-2">Preflight</th>
                 <th scope="col" className="px-4 py-2">Hidden</th>
-                <th scope="col" className="px-4 py-2"><span className="sr-only">Actions</span></th>
+                <th scope="col" className="relative px-4 py-2"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>

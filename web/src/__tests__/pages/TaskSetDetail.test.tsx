@@ -62,6 +62,14 @@ describe("TaskSetDetail tabs", () => {
   beforeEach(() => window.localStorage.setItem("loom_token", "t"));
   afterEach(() => vi.restoreAllMocks());
 
+  it("identifies a capped error sample without claiming it is the total", async () => {
+    const data = { ...TASK_SET, display_name: "Readable source", task_preview: ["example/one"], error_summary: Array.from({ length: 50 }, (_, i) => ({ instance_index: i, code: "invalid", message: `Sample ${i}` })) };
+    renderPage("/task-sets/detail?id=task-set-1&tab=errors", async () => new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } }));
+    expect(await screen.findByRole("heading", { name: "Readable source" })).toBeInTheDocument();
+    expect(screen.getByText(/sample limit has been reached/)).toHaveTextContent("not a total error count");
+    expect(screen.getByRole("link", { name: /Configure a batch/ })).toHaveAttribute("href", "/batches/new?taskSet=task-set-1");
+  });
+
   it("links panels and supports keyboard activation without changing task-set behavior", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -70,7 +78,7 @@ describe("TaskSetDetail tabs", () => {
       await screen.findByRole("heading", { name: "task-set-1" }),
     ).toBeInTheDocument();
     const overviewTab = screen.getByRole("tab", { name: "Overview" });
-    const errorsTab = screen.getByRole("tab", { name: "Errors (1)" });
+    const errorsTab = screen.getByRole("tab", { name: "Error samples (1)" });
     expect(
       screen.getByRole("tablist", { name: "Task set sections" }),
     ).toContainElement(overviewTab);
@@ -96,7 +104,7 @@ describe("TaskSetDetail tabs", () => {
     renderPage("/task-sets/task-set-1?tab=errors");
 
     await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "Errors (1)" })).toHaveAttribute(
+      expect(screen.getByRole("tab", { name: "Error samples (1)" })).toHaveAttribute(
         "aria-selected",
         "true",
       );
@@ -181,7 +189,7 @@ describe("TaskSet detail links", () => {
       `/api/v1/tasksets/${id.split("/").map(encodeURIComponent).join("/")}`,
       expect.any(Object),
     );
-    await user.click(screen.getByRole("tab", { name: "Errors (1)" }));
+    await user.click(screen.getByRole("tab", { name: "Error samples (1)" }));
     expect(screen.getByRole("tabpanel")).toHaveTextContent("Task is invalid");
   });
 

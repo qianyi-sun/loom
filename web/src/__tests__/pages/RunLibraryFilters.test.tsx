@@ -46,9 +46,12 @@ describe("Run Library filters", () => {
     await user.click(screen.getByText("Advanced filters"));
     expect(screen.getByRole("textbox", { name: "Pipeline Recipe" })).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "Agent" })).toBeDisabled();
-    await user.click(screen.getByRole("checkbox", { name: "Pipeline artifacts only" }));
+  });
+  it("retains run filters from the URL outside Pipeline mode", async () => {
+    const user = userEvent.setup(); mount("/library?q=retained&pipeline_recipe=research");
     expect(screen.getByRole("textbox", { name: "Search" })).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "Search" })).toHaveValue("retained");
+    await user.click(screen.getByText("Advanced filters"));
     expect(screen.getByRole("textbox", { name: "Pipeline Recipe" })).toBeDisabled();
   });
 });

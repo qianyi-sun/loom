@@ -192,8 +192,8 @@ export const adminApi = {
       method: "POST",
       headers: actor ? { "X-Loom-Admin-Actor": actor } : undefined,
     }),
-  listAdminAuditEvents: (limit = 50, cursor?: string) =>
+  listAdminAuditEvents: (limit = 50, cursor?: string, filters: { scope?: "access" | "all"; actor?: string; action?: string; start?: string; end?: string } = {}) =>
     apiFetch<{ items: AdminAuditEvent[]; next_cursor: string | null }>(
-      `/api/v1/admin/audit-events${qs({ limit, cursor })}`,
+      `/api/v1/admin/audit-events${qs({ limit, cursor, ...filters })}`,
     ),
 };

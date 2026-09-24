@@ -669,6 +669,64 @@ describe("NewBatch", () => {
     expect(screen.queryByText("Advanced options")).not.toBeInTheDocument();
   });
 
+  it("explains incomplete input before calculating planned trials", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    expect(screen.getByRole("button", { name: /Submit/ })).toHaveAttribute("title", "Choose a task source and complete the configuration before submitting.");
+    expect(screen.queryByText("Trial count is still being calculated.")).not.toBeInTheDocument();
+    expect(screen.getByText("Choose a task source to plan trials.")).toBeInTheDocument();
+  });
+
+  it("opens a TaskSet configuration from its detail link", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    renderWithProviders(<NewBatch />, { route: "/batches/new?taskSet=ts%2Fteam-uuid%2Fsample-tasks" });
+    expect(await screen.findByRole("radio", { name: /Trajectory generation/i })).toBeChecked();
+    expect(await screen.findByRole("checkbox", { name: /Select TaskSet ts\/team-uuid\/sample-tasks/i })).toBeChecked();
+    expect(screen.getByText("2026-07-08 · ts/team-uuid/sample-tasks")).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.type(screen.getByRole("searchbox", { name: "Search TaskSet sources" }), "2026-07-08");
+    expect(screen.getByRole("checkbox", { name: /Select TaskSet ts\/team-uuid\/sample-tasks/i })).toBeChecked();
+  });
+
+  it("focuses the invalid second combination when exporting", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await user.click(screen.getByRole("button", { name: /Add combination/ }));
+    await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Combination 2:");
+    await vi.waitFor(() => expect(document.getElementById("batch-combination-2")).toContainElement(document.activeElement as HTMLElement));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
+  });
+
+  it("opens collapsed advanced settings and focuses the invalid timeout when exporting", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    const summary = screen.getByText("Advanced trial settings");
+    const details = summary.closest("details")!;
+    await user.click(summary);
+    const timeout = screen.getByRole("spinbutton", { name: "Agent timeout override (s)" });
+    await user.type(timeout, "-1");
+    await user.click(summary);
+    expect(details.open).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Advanced options: Override agent timeout must be ≥ 0.001.");
+    await vi.waitFor(() => expect(timeout).toHaveFocus());
+    expect(details.open).toBe(true);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
+  });
+
   it("shows model-first controls without exposing the default agent selector", async () => {
     mockEndpoints({ matchingTasks: 12 });
     renderWithProviders(<NewBatch />);
@@ -766,7 +824,7 @@ describe("NewBatch", () => {
     await waitForNewBatchReady();
     await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Pick at least one native benchmark.");
-    expect(screen.getByRole("dialog").querySelector("pre")).toBeNull();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await user.keyboard("{Escape}");
     await pickBenchmark();
     await pickDefaultModel(user);
@@ -774,7 +832,7 @@ describe("NewBatch", () => {
     await user.type(screen.getByLabelText(/Name suffix/i), "export's $(literal)");
     await user.click(screen.getByRole("button", { name: "Export CLI / API" }));
     const dialog = await screen.findByRole("dialog");
-    const snapshot = JSON.parse(dialog.querySelector("pre")!.textContent!);
+    const snapshot = JSON.parse(dialog.querySelector("details pre")!.textContent!);
     expect(dialog).toHaveTextContent("Set LOOM_USERNAME and LOOM_PASSWORD");
     expect(dialog).not.toHaveTextContent("Set LOOM_TOKEN");
     await user.click(within(dialog).getByRole("button", { name: "API" }));

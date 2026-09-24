@@ -7,8 +7,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, insert, text
 
+from loom.db.schema import Task
 from loom_service.taskset_intake import get_latest_job
 from tests.integration.taskset_fixtures import _manifest_bytes
 
@@ -376,3 +377,24 @@ async def test_list_tasksets_excludes_soft_deleted(tasksets_setup) -> None:
         list_resp = await client.get("/api/v1/tasksets", headers=headers)
     assert list_resp.status_code == 200
     assert list_resp.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_taskset_detail_preview_is_bounded_and_team_scoped(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+        post = await client.post("/api/v1/tasksets", headers=headers,
+                                 files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")})
+        task_set_id = post.json()["task_set_id"]
+        ids = [f"{task_set_id}/task-{index}" for index in range(7)]
+        engine = create_engine(str(app.state.settings.db_url))
+        with engine.begin() as connection:
+            connection.execute(insert(Task), [{"id": task_id, "checksum": "preview-fixture", "config": {}, "task_set_id": task_set_id} for task_id in ids])
+        engine.dispose()
+        response = await client.get(f"/api/v1/tasksets/{task_set_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["display_name"] == "Sample Tasks"
+        assert response.json()["task_preview"] == ids[:5]
+        denied = await client.get(f"/api/v1/tasksets/{task_set_id}", headers={"Authorization": f"Bearer {tokens['team_b']}"})
+        assert denied.status_code == 404

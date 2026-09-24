@@ -27,7 +27,7 @@ test("member can distinguish image preparation and shared-node scheduling", asyn
     overrides: [
       { name: "native summary", method: "GET", path: "/api/v1/monitor/summary?view=trials",
         response: { kind: "json", status: 200, body: summary } },
-      { name: "authorized node placement", method: "GET", path: "/api/v1/monitor/placement?target_id=primary",
+      { name: "authorized node placement", method: "GET", path: "/api/v1/monitor/placement?target_id=primary&view=trials",
         response: { kind: "json", status: 200, body: {
           available: true, is_fresh: true, observed_at: new Date().toISOString(),
           build_concurrency_limit: 16, pending: [], pending_builds: 1, pending_executions: 0,
@@ -43,6 +43,7 @@ test("member can distinguish image preparation and shared-node scheduling", asyn
   await expect(page.getByRole("heading", { name: "Task progress" })).toBeVisible();
   await expect(page.getByText("2 trials waiting for images.", { exact: false })).toBeVisible();
   expect(fixture.ledger.some((row) => row.path.includes("/monitor/placement"))).toBe(false);
+  await page.getByText("Nodes, scheduling and capacity diagnostics", { exact: true }).click();
   await page.getByText("Shared nodes and scheduling", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Node 1 · Ready" })).toBeVisible();
   await expect(page.getByText("1 build Pods · 1 execution Pods")).toBeVisible();

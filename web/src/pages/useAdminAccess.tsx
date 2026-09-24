@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   api,
   type AccountActionApproval,
@@ -29,7 +30,13 @@ import {
 export function useAdminAccess() {
   const { isAdmin, isLoading, me } = useAuth();
 
-  const [section, setSection] = useState<AccessSection>("requests");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const section = (searchParams.get("tab") ?? "requests") as AccessSection;
+  const setSection = (next: AccessSection): void => {
+    const params = new URLSearchParams(searchParams);
+    params.set("tab", next);
+    setSearchParams(params);
+  };
 
   const [actor, setActor] = useState("");
 

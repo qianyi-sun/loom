@@ -29,6 +29,7 @@ import {
 import {
   allowedModelsSummary,
   providerStatusSummary,
+  providerTestAge,
 } from "../lib/providerDisplay";
 import { formatLocalDateTime } from "../lib/dateTime";
 
@@ -233,7 +234,7 @@ function OverviewTab({
           {conn.last_validated_at && (
             <>
               <dt className="font-medium text-slate-600">Last tested</dt>
-              <dd>{formatLocalDateTime(conn.last_validated_at)}</dd>
+              <dd>{formatLocalDateTime(conn.last_validated_at)} · {providerTestAge(conn.last_validated_at)}</dd>
             </>
           )}
         </dl>

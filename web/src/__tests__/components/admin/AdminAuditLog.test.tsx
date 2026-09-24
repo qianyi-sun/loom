@@ -1,9 +1,16 @@
-import { act, screen } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { Route, Routes, useLocation, useNavigate, Link } from "react-router-dom";
+
 import AdminAuditLog from "../../../components/admin/AdminAuditLog";
 import { renderWithProviders } from "../../../test-utils/renderWithProviders";
+
+function AuditRouteProbe() {
+  const location = useLocation(); const navigate = useNavigate();
+  return <><div aria-label="Current URL">{location.pathname}{location.search}</div><Link to="/away">Leave audit</Link><button onClick={() => navigate(-1)}>Browser back</button><Routes><Route path="/admin/access" element={<AdminAuditLog />} /><Route path="/away" element={<p>Away</p>} /></Routes></>;
+}
 
 const adminMe = {
   user: {
@@ -121,6 +128,31 @@ describe("AdminAuditLog", () => {
     vi.restoreAllMocks();
   });
 
+  it("restores the audit scope and page from a shared URL", async () => {
+    const mock = mockAuditPages();
+    renderWithProviders(<AdminAuditLog />, { route: "/admin/access?tab=audit&auditScope=all&cursor=audit-page-2&cursor_history=%5Bnull%5D" });
+    await screen.findByText("audit.second");
+    expect(screen.getByLabelText("Audit scope")).toHaveValue("all");
+    expect(mock.requests[0]?.searchParams.get("cursor")).toBe("audit-page-2");
+    expect(screen.getByRole("status")).toHaveTextContent("Page 2");
+  });
+
+  it("filters all records server-side and resets pagination before requesting a new scope", async () => {
+    const mock = mockAuditPages();
+    const user = userEvent.setup();
+    renderWithProviders(<AdminAuditLog />, { route: "/admin/access?tab=audit&actor=qianyi&action=team&start=2026-07-01&end=2026-07-31" });
+    await screen.findByText("audit.first");
+    expect(screen.getByLabelText("Actor")).toHaveValue("qianyi");
+    expect(mock.requests[0]?.searchParams.get("scope")).toBe("access");
+    expect(mock.requests[0]?.searchParams.get("start")).toBe("2026-07-01T00:00:00Z");
+    await user.click(screen.getByRole("button", { name: /next page/i }));
+    await screen.findByText("audit.second");
+    await user.selectOptions(screen.getByLabelText("Audit scope"), "all");
+    await waitFor(() => expect(mock.requests.at(-1)?.searchParams.get("scope")).toBe("all"));
+    expect(mock.requests.at(-1)?.searchParams.has("cursor")).toBe(false);
+    expect(screen.getByRole("status")).toHaveTextContent("Page 1");
+  });
+
   it("traverses forward and backward with loading and terminal states", async () => {
     const mock = mockAuditPages({ deferSecond: true });
     const user = userEvent.setup();
@@ -205,4 +237,34 @@ describe("AdminAuditLog", () => {
       "Page 1, more results available",
     );
   });
+  it("traverses three pages and restores the scoped middle page after leaving and browser back", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname.endsWith("/auth/me")) return jsonResponse(adminMe);
+      const cursor = url.searchParams.get("cursor");
+      const index = cursor === "middle" ? 2 : cursor === "last" ? 3 : 1;
+      return jsonResponse({ items: [{ ...auditPageOne.items[0], id: `audit-${index}`, action: `access.page-${index}` }], next_cursor: index === 3 ? null : index === 1 ? "middle" : "last" });
+    });
+    renderWithProviders(<AuditRouteProbe />, { route: "/admin/access?tab=audit&auditScope=access&actor=qianyi" });
+    await screen.findByText("access.page-1");
+    expect(screen.getByRole("button", { name: "previous page" })).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "next page" }));
+    await screen.findByText("access.page-2");
+    expect(screen.getByRole("status")).toHaveTextContent("Page 2, more results");
+    await user.click(screen.getByRole("link", { name: "Leave audit" }));
+    await user.click(screen.getByRole("button", { name: "Browser back" }));
+    await screen.findByText("access.page-2");
+    expect(screen.getByLabelText("Audit scope")).toHaveValue("access");
+    expect(screen.getByLabelText("Actor")).toHaveValue("qianyi");
+    expect(screen.getByLabelText("Current URL")).toHaveTextContent("tab=audit");
+    expect(screen.getByLabelText("Current URL")).toHaveTextContent("cursor=middle");
+    await user.click(screen.getByRole("button", { name: "next page" }));
+    await screen.findByText("access.page-3");
+    expect(screen.getByRole("status")).toHaveTextContent("Page 3, end of results");
+    expect(screen.getByRole("button", { name: "next page" })).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("button", { name: "previous page" }));
+    await screen.findByText("access.page-2");
+  });
+
 });

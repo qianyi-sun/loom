@@ -296,7 +296,7 @@ describe("Settings", () => {
     expect(screen.queryByRole("button", { name: "Revoke" })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Create CLI token" })).toHaveAttribute(
       "href",
-      "/admin/access",
+      "/admin/access?tab=tokens",
     );
   });
 });

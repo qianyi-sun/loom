@@ -195,7 +195,7 @@ export default function AdminAccess(): JSX.Element {
         </p>
       </header>
 
-      {isAdmin ? (
+      {isAdmin && !["audit", "tokens"].includes(activeSection) ? (
         <Card>
           <Card.Header
             title="Admin actor"
@@ -338,7 +338,7 @@ export default function AdminAccess(): JSX.Element {
 
             {isAdmin && activeSection === "accounts" ? (
               <div className="grid gap-4 xl:grid-cols-2">
-                {accountRequestsCard}
+                <p className="text-sm text-slate-600">Accounts handles password recovery for existing accounts. Review new account and team applications under Requests.</p>
 
                 <Card
                   data-loom-query="password-reset-requests"

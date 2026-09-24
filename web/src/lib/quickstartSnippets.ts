@@ -33,11 +33,12 @@ export function usageCommand(
   end: string,
   teamId?: string,
   includeBatches = false,
+  groupBy: "day" | "week" | "month" = "day",
 ): string {
   const trimmedTeamId = teamId?.trim();
   const teamFlag = trimmedTeamId ? ` --team-id ${argument(trimmedTeamId)}` : "";
   const batchesFlag = includeBatches ? " --include-batches" : "";
-  return `loom eval usage --start ${argument(start)} --end ${argument(end)}${teamFlag}${batchesFlag}`;
+  return `loom eval usage --start ${argument(start)} --end ${argument(end)} --group-by ${groupBy}${teamFlag}${batchesFlag}`;
 }
 
 export function rateCardExampleJson(): string {

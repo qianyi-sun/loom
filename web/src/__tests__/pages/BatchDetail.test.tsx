@@ -24,6 +24,7 @@ const BATCH_BODY: BatchBody = {
     team_name: "Dev",
   },
   name: "qwen2.5-litellm",
+  purpose: "evaluation",
   description: null,
   task_filter: { subset_kind: "all", benchmark_ids: ["humaneval"] },
   trial_config: {},
@@ -274,6 +275,18 @@ describe("BatchDetail run plan", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [{ combinations: [], n_per_task: 3, expected_trial_count: 6 }, "2 tasks"],
+    [{ combinations: [], n_per_task: 3, expected_trial_count: 12, required_worker_pools: ["one", "two"] }, "2 tasks"],
+    [{ combinations: [], n_per_task: 3, expected_trial_count: 12, resolved_task_ids: ["resolved-one"] }, "1 task"],
+  ])("counts TaskSet tasks separately from sampling and worker-pool expansion", async (overrides, expected) => {
+    mockBatch({ ...BATCH_BODY, ...overrides, purpose: "trajectory_generation", task_filter: { task_set_ids: ["ts/team/source"] } });
+    renderBatchDetail();
+    expect(await screen.findByText(`1 task set / all runnable tasks / ${expected}`)).toBeInTheDocument();
+    expect(screen.getByText("Purpose: Generate trajectories")).toBeInTheDocument();
+    expect(screen.queryByText("Unrecognized field: task_set_ids")).not.toBeInTheDocument();
+  });
+
   it("distinguishes combinations using different Harbor versions of the same model", async () => {
     mockBatch({ ...BATCH_BODY, backend: "nebius", combinations: ["harbor-v1", "harbor-v2"].map((agent_version) => ({
       agent_name: "terminus-2", agent_version, agent_model: { provider: "openai", name: "glm-5.2" }, n_per_task: 1,
@@ -288,6 +301,7 @@ describe("BatchDetail run plan", () => {
     renderBatchDetail();
 
     expect(await screen.findByText(/Run plan/i)).toBeInTheDocument();
+    expect(screen.getByText("Purpose: Evaluate task performance")).toBeInTheDocument();
     expect(screen.queryByText(`loom eval batch show ${BATCH_ID}`)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Inspect with CLI" }));
     expect(screen.getByText(`loom eval batch show ${BATCH_ID}`)).toBeInTheDocument();

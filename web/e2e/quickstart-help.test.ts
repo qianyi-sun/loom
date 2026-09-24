@@ -52,7 +52,7 @@ async function expectAccessible(page: Page): Promise<void> {
 }
 
 async function expectKeyboardContained(page: Page, dialog: Locator): Promise<void> {
-  const focusable = dialog.locator('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]');
+  const focusable = dialog.locator('summary, a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]').filter({ visible: true });
   const first = focusable.first();
   const last = focusable.last();
   await last.focus();
@@ -70,6 +70,8 @@ for (const role of ["user", "admin"] as const) {
     });
     await page.goto(`${browserHarness.baseURL}/monitor`);
     const navigation = page.getByRole("navigation", { name: "Primary" });
+    await expect(navigation).toBeVisible();
+    if (await navigation.getByRole("button", { name: "Menu", exact: true }).isVisible()) await navigation.getByRole("button", { name: "Menu", exact: true }).click();
     for (const name of coreNavigation) await expect(navigation.getByRole("link", { name, exact: true })).toBeVisible();
     for (const name of ["Team access", "Rate cards"]) {
       if (role === "admin") await expect(navigation.getByRole("link", { name, exact: true })).toBeVisible();
@@ -123,11 +125,13 @@ test("member goes from Home to guide and exports the current form without submit
   await page.getByRole("link", { name: "Use the web app", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Getting started", exact: true })).toBeVisible();
   await expectRepoDocs(page.locator("main"));
+  const menu = page.getByRole("button", { name: "Menu", exact: true });
+  if (await menu.isVisible()) await menu.click();
   await page.getByRole("navigation", { name: "Primary" }).getByRole("link", { name: "New batch", exact: true }).click();
   await page.getByRole("button", { name: "Export CLI / API", exact: true }).click();
-  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
-  await expect(page.getByRole("dialog").locator("pre")).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  await expect(page.getByRole("alert")).toContainText("Pick at least one native benchmark");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Task selection", exact: true })).toBeFocused();
   await page.getByRole("radio", { name: "Explicit task ids (paste)" }).check();
   await page.getByRole("textbox", { name: "Explicit task ids", exact: true }).fill("Example/one\nExample/two");
   await page.getByRole("textbox", { name: "Name suffix" }).fill("quickstart-browser");
