@@ -408,6 +408,41 @@ def test_target_replacement_rechecks_its_source_after_lock(rendered, monkeypatch
     assert not any(command[0] in {"apply", "create", "delete"} for command in kube.commands)
 
 
+@pytest.mark.parametrize("changed", ["cluster_id", "namespace", "execution_namespace", "environment",
+                                     "regional_execution_targets"])
+def test_target_replacement_rejects_foreign_or_regional_source(rendered, changed):
+    args, config, _, files = rendered
+    args.retire_target = "previous-primary"
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    current = kube.objects["configmap", "loom-platform-config"]["data"]
+    environment = json.loads(current["environment.json"])
+    environment[changed] = [{}] if changed == "regional_execution_targets" else "foreign"
+    current["environment.json"] = json.dumps(environment)
+    with pytest.raises(deploy.DeploymentError, match="target"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("status", ["skipped_busy", "skipped_locked", "planned"])
+def test_target_replacement_plan_and_unavailable_guard_do_not_retire(rendered, monkeypatch, status):
+    args, config, _, files = rendered
+    args.apply = status != "planned"
+    args.retire_target = "previous-primary"
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, "previous-primary")
+    calls = []
+
+    def guard(_kube, _ns, action, _owner, _candidate):
+        calls.append(action)
+        return {"status": status}
+
+    monkeypatch.setattr(deploy, "rollout_guard", guard)
+    assert deploy.deploy(args, kube=kube)["status"] == status
+    assert calls == ([] if status == "planned" else ["acquire"])
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
 @pytest.mark.parametrize("failure", [None, "backup", "retire", "apply"])
 def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendered, monkeypatch, failure):
     args, config, _, files = rendered
@@ -467,6 +502,7 @@ def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendere
 def test_retirement_program_calls_admin_api_without_exposing_credentials(tmp_path, response_mode):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from threading import Thread
+    from urllib.error import HTTPError
 
     secret = tmp_path / "secret.toml"
     token = "local-fixture-admin-token"
@@ -497,17 +533,18 @@ def test_retirement_program_calls_admin_api_without_exposing_credentials(tmp_pat
     namespace = {"__name__": "retirement_fixture"}
     try:
         exec(deploy.TARGET_RETIRE_PROGRAM, namespace)
-        invoke = lambda: namespace["retire_target"](
-            "previous-primary", secret_file=secret,
-            origin=f"http://127.0.0.1:{server.server_port}",
-        )
+        def invoke():
+            return namespace["retire_target"](
+                "previous-primary", secret_file=secret,
+                origin=f"http://127.0.0.1:{server.server_port}",
+            )
         if response_mode == "ok":
             result = invoke()
             assert result == {"target_id": "previous-primary", "desired_state": "retired",
                               "observed_state": "retired", "health_status": "unknown"}
             assert token not in json.dumps(result)
         else:
-            with pytest.raises(Exception):
+            with pytest.raises(ValueError if response_mode == "wrong-target" else HTTPError):
                 invoke()
         assert len(requests) == 1
         path, authorization, body = requests[0]
