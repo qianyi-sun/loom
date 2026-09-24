@@ -64,6 +64,7 @@ def _report(root: Path, capsys: pytest.CaptureFixture[str], *, profile: bool = T
 @pytest.mark.parametrize("writer", [
     "echo 'if uvx -p 3.13 -w pytest==8.4.1 pytest /tests/test_outputs.py -rA; then' >> /app/check.sh",
     "printf '%s\\n' 'python3 -m pytest /tests/test_outputs.py' > /app/check.sh",
+    "printf '%s\\n' 'set -e' 'pytest /tests/test_outputs.py' > /app/check.sh",
 ])
 def test_report_blocks_image_authored_public_script_using_private_pytest(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
@@ -91,6 +92,9 @@ def test_report_blocks_image_authored_public_script_using_private_pytest(
     "echo 'pytest /app/public_tests.py' > /app/check.sh",
     "echo 'pytest /tests/test_outputs.py' > /opt/verifier/check.sh",
     "pytest /tests/test_outputs.py",
+    "printf '%s\\n' 'pytest /app/test_public.py' 'echo /tests/test_outputs.py' > /app/check.sh",
+    "echo 'pytest --ignore /tests/test_outputs.py /app/test_public.py' > /app/check.sh",
+    "echo 'pytest -k /tests/test_outputs.py /app/test_public.py' > /app/check.sh",
 ])
 def test_report_does_not_infer_private_runtime_dependency_from_unrelated_text(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], writer: str,
@@ -101,6 +105,21 @@ def test_report_does_not_infer_private_runtime_dependency_from_unrelated_text(
     _, payload = _report(tmp_path, capsys)
     report, = payload["compatibility_report"]["tasks"]
     assert not any(d["code"] == "agent_private_verifier_dependency" for d in report["diagnostics"])
+
+
+@pytest.mark.parametrize(("final_base", "blocked"), [("builder", True), ("ubuntu:24.04", False)])
+def test_private_script_diagnostic_follows_local_stage_inheritance(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], final_base: str, blocked: bool,
+) -> None:
+    bundle = _write_bundle(tmp_path, "staged-checker")
+    (bundle / "environment/Dockerfile").write_text(
+        "FROM ubuntu:24.04 AS builder\nWORKDIR /app\n"
+        "RUN echo 'pytest /tests/test_outputs.py' > /app/check.sh\n"
+        f"FROM {final_base}\nWORKDIR /app\n")
+    rc, payload = _report(tmp_path, capsys)
+    report, = payload["compatibility_report"]["tasks"]
+    assert rc == int(blocked)
+    assert any(d["code"] == "agent_private_verifier_dependency" for d in report["diagnostics"]) is blocked
 
 
 @pytest.mark.parametrize(("source", "declared", "blocked", "line"), [
