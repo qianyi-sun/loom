@@ -106,8 +106,9 @@ async def test_invalid_installation_fails_startup_without_logging_its_contents(
     assert not hasattr(app.state, "environment_manager")
 
 
+@pytest.mark.parametrize("authentication", ["nebius", "projected"])
 async def test_provider_runtime_is_supervised_and_closed_before_database_shutdown(
-    isolated_migration_postgres_url, installation_file, connection, monkeypatch,
+    isolated_migration_postgres_url, installation_file, connection, monkeypatch, authentication,
 ):
     import nebius.sdk
 
@@ -127,6 +128,14 @@ async def test_provider_runtime_is_supervised_and_closed_before_database_shutdow
         "cloud_credentials_file": str(connection.credentials_file),
         "poll_seconds": 1,
     }
+    if authentication == "projected":
+        token = connection.credentials_file.parent / "token"
+        token.write_text("explicit-projected-token")
+        token.chmod(0o440)
+        data["provider_runtime"]["kubernetes"] = {
+            "kind": "projected_service_account", "endpoint": connection.endpoint,
+            "ca_file": str(connection.ca_file), "token_file": str(token),
+        }
     installation_file.write_text(json.dumps(data))
     app = create_app(LoomServiceSettings(
         _env_file=None, service_mode="management", db_url=isolated_migration_postgres_url,
@@ -150,7 +159,8 @@ async def test_provider_runtime_is_supervised_and_closed_before_database_shutdow
             assert (await client.get("/api/v1/health")).status_code == 200
     assert runtime.task.done()
     assert runtime.kubernetes.http.is_closed
-    assert len(created) == 2 and all(instance.closed for instance in created)
+    assert len(created) == (1 if authentication == "projected" else 2)
+    assert all(instance.closed for instance in created)
     assert not hasattr(app.state, "environment_runtime")
     assert not hasattr(app.state, "session_factory")
 
