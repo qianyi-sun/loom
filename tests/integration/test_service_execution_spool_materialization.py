@@ -20,7 +20,8 @@ from uuid import UUID, uuid4
 import pytest
 import urllib3
 from minio import Minio
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
@@ -131,10 +132,14 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery",
-    [(False, False, False, False, False), (True, False, False, False, False),
-     (True, True, False, False, False), (True, True, True, False, False),
-     (True, False, False, True, False), (True, False, False, False, True)],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery",
+    [pytest.param(False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, id="verifier-archive-corrupt")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
@@ -142,6 +147,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     prepared_snapshot: bool,
     typed_failure: bool,
     archival_recovery: bool,
+    corrupt_recovery: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -527,6 +533,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                                                   trial.failure_reason, trial.failure_message, trial.attempt_count))
                 original_execution = (current.desired_state, current.observed_state, current.deleted_at,
                                       current.finalized_at, current.output_manifest_sha256, current.output_marker_sha256)
+            # No general reopening: the database requires the one-use audited transition.
+            async with sessions() as session:
+                with pytest.raises(DBAPIError, match="terminal materialization state is immutable"):
+                    await session.execute(text("UPDATE execution_leases SET materialization_state='pending', "
+                        "materialization_next_attempt_at=now() WHERE id=:id"), {"id": lease.id})
+                await session.rollback()
             assert not await materializer().run_once(lease_id=lease.id)
             assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=uuid4())
             requeues = await asyncio.gather(*(
@@ -534,6 +546,32 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 for _ in range(2)
             ))
             assert sorted(requeues) == [False, True]
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current.materialization_recovery_requested_at is not None
+                with pytest.raises(DBAPIError, match="archival recovery requires one diagnosed deleted verifier attempt"):
+                    await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
+                        "WHERE id=:id"), {"id": lease.id})
+                await session.rollback()
+            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+
+        if corrupt_recovery:
+            verifier_key = next(key for key in source_keys if key.endswith("/verifier/output.json"))
+            await source_store.put_object(bucket="artifacts", key=verifier_key,
+                                          body=payloads["verifier/output.json"].replace(b"0.0", b"1.0"))
+            assert await materializer().run_once(lease_id=lease.id)
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                trial = await session.get(Trial, trial_id)
+                assert current.materialization_state == "unavailable"
+                assert current.materialization_error_code == "source_object_digest_mismatch"
+                assert current.canonical_trajectory_sha256 is None
+                assert current.source_cleanup_state == "not_ready"
+                assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
+                        trial.failure_message, trial.attempt_count) == original_outcome
+            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+            assert not await materializer().cleanup_source_once()
+            return
 
         # Crash after object copies but before DB ACK. A fresh worker reclaims the
         # expired persisted claim, re-copies idempotently, and owns the only ACK.

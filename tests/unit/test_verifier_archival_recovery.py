@@ -7,8 +7,17 @@ import pytest
 
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom.models.result import ExceptionInfo
-from loom_control_plane.service_execution_materializer import MaterializationIntegrityError, build_canonical_events
-from tests.unit.test_service_execution_materialization import _REVISION, _RUNTIME_IMAGE, _TASK_IMAGE, _task, _trial
+from loom_control_plane.service_execution_materializer import (
+    MaterializationIntegrityError,
+    build_canonical_events,
+)
+from tests.unit.test_service_execution_materialization import (
+    _REVISION,
+    _RUNTIME_IMAGE,
+    _TASK_IMAGE,
+    _task,
+    _trial,
+)
 
 
 def legacy_result():
