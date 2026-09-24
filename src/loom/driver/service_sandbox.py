@@ -302,6 +302,39 @@ class ServiceSandboxDriver:
         finally:
             self._requests.discard(task)
 
+    async def inspect_reference_symlink(self, path: PurePosixPath) -> str:
+        """Read bounded literal link text without following the image alias."""
+        client = self._running_client()
+        task = asyncio.current_task()
+        assert task is not None
+        self._requests.add(task)
+        try:
+            async with client.stream(
+                "GET", "/readlink", params={"path": str(path)}, timeout=120,
+            ) as response:
+                response.raise_for_status()
+                try:
+                    size = int(response.headers["Content-Length"])
+                    if not 0 < size <= 4096:
+                        raise ValueError("invalid size")
+                except (KeyError, ValueError) as exc:
+                    raise DriverError("symlink inspection size invalid") from exc
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(data) + len(chunk) > size:
+                        raise DriverError("symlink target exceeds declared size")
+                    data.extend(chunk)
+                if len(data) != size or b"\x00" in data:
+                    raise DriverError("symlink target invalid")
+                try:
+                    return data.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise DriverError("symlink target encoding invalid") from exc
+        except httpx.HTTPError as exc:
+            raise DriverError("sandbox symlink inspection failed") from exc
+        finally:
+            self._requests.discard(task)
+
     async def set_network_policy(self, policy: NetworkPolicy) -> None:
         if policy != self._network_policy:
             raise DriverError("native sandbox network policy is fixed by its Pod")
@@ -345,6 +378,7 @@ class ServiceSandboxDriver:
     async def import_workspace_archive(
         self, src: Path, dst: PurePosixPath, *, policy: WorkspaceStagingPolicy | None = None,
         preserve_acls: bool = False,
+        external_reference_files: frozenset[PurePosixPath] = frozenset(),
     ) -> None:
         # workspace_snapshot validates/strips the archive in the trusted agent
         # before invoking this hook. The sandbox never chooses verifier inputs.
@@ -356,7 +390,8 @@ class ServiceSandboxDriver:
         if policy is not None:
             from loom.trial.workspace_snapshot import _prepare_workspace_import
 
-            await _prepare_workspace_import(self, src, dst, policy)
+            await _prepare_workspace_import(self, src, dst, policy,
+                                            external_reference_files=external_reference_files)
         remote = PurePosixPath(f"/tmp/loom-workspace-{uuid4().hex}.tar")
         destination, archive = shlex.quote(str(dst)), shlex.quote(str(remote))
         try:

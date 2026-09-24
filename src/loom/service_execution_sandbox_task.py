@@ -40,6 +40,10 @@ from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_term
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+from loom.trial.workspace_references import (
+    export_workspace_references,
+    import_workspace_with_references,
+)
 from loom.trial.workspace_snapshot import (
     _export_workspace_archive,
     _import_workspace_archive,
@@ -241,6 +245,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                         await asyncio.to_thread(
                             _validate_workspace_archive, archive, _POLICY,
                             root=task.environment.workdir,
+                            external_reference_files=frozenset(task.environment.workspace_reference_files),
                         )
                         if task.environment.mutable_paths:
                             await export_mutable_paths(
@@ -248,6 +253,13 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 workdir=task.environment.workdir,
                                 preserve_acls=task.environment.preserve_acls,
                                 reference_files=task.environment.mutable_path_reference_files,
+                                reference_symlinks=task.environment.reference_file_symlinks,
+                            )
+                        if task.environment.workspace_reference_files:
+                            await export_workspace_references(
+                                driver, archive, root=task.environment.workdir, policy=_POLICY,
+                                reference_files=task.environment.workspace_reference_files,
+                                reference_symlinks=task.environment.reference_file_symlinks,
                             )
                         for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
@@ -343,16 +355,25 @@ async def _run_verifier(
         archive = workspace / ".loom/workspace.tar"
         # The archive was validated by the agent phase before durable capture;
         # it stays in the private controller workspace between phases.
-        await _import_workspace_archive(
-            driver, archive, task.environment.workdir, policy=_POLICY,
-            preserve_acls=task.environment.preserve_acls,
-        )
+        if task.environment.workspace_reference_files:
+            await import_workspace_with_references(
+                driver, archive, task.environment.workdir, policy=_POLICY,
+                preserve_acls=task.environment.preserve_acls,
+                reference_files=task.environment.workspace_reference_files,
+                reference_symlinks=task.environment.reference_file_symlinks,
+            )
+        else:
+            await _import_workspace_archive(
+                driver, archive, task.environment.workdir, policy=_POLICY,
+                preserve_acls=task.environment.preserve_acls,
+            )
         if task.environment.mutable_paths:
             await import_mutable_paths(
                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
                 workdir=task.environment.workdir,
                 preserve_acls=task.environment.preserve_acls,
                 reference_files=task.environment.mutable_path_reference_files,
+                reference_symlinks=task.environment.reference_file_symlinks,
             )
         remote_output = (
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs

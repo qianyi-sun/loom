@@ -55,3 +55,32 @@ def validate_mutable_reference_files(
         for other in (workdir, *paths, *_PROTECTED):
             if reference.is_relative_to(other) or other.is_relative_to(reference):
                 raise ValueError("mutable_path_reference_files overlaps transferred or protected state")
+
+
+def validate_workspace_reference_files(
+    references: tuple[PurePosixPath, ...], *, paths: tuple[PurePosixPath, ...], workdir: PurePosixPath,
+) -> None:
+    """A workspace reference grants only an exact external executable leaf."""
+    validate_mutable_reference_files(references, paths=(workdir, *paths), workdir=workdir)
+
+
+def validate_reference_file_symlinks(
+    aliases: dict[str, str], *, groups: tuple[tuple[PurePosixPath, ...], ...],
+) -> None:
+    """Require literal one-hop aliases to regular leaves in the same reference group."""
+    references = {str(path) for group in groups for path in group}
+    if len(aliases) > 16 or not set(aliases) <= references:
+        raise ValueError("reference_file_symlinks requires at most 16 declared references")
+    for path, raw_target in aliases.items():
+        if (not re.fullmatch(r"/(?:[-A-Za-z0-9._]+/)*[-A-Za-z0-9._]+", path)
+                or any(part in {".", ".."} for part in path.split("/"))):
+            raise ValueError("reference_file_symlinks requires canonical absolute aliases")
+        target = PurePosixPath(raw_target)
+        if not target.is_absolute():
+            if not re.fullmatch(r"[-A-Za-z0-9_][-A-Za-z0-9._]*", raw_target):
+                raise ValueError("reference_file_symlinks relative targets must be a single basename")
+            target = PurePosixPath(path).parent / target
+        elif (str(target) != raw_target or ".." in target.parts or target.anchor != "/"):
+            raise ValueError("reference_file_symlinks requires canonical absolute targets")
+        if str(target) in aliases or any(PurePosixPath(path) in group and target not in group for group in groups):
+            raise ValueError("reference_file_symlinks target must be a declared regular leaf in the same group")

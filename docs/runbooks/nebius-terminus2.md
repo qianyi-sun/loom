@@ -646,6 +646,31 @@ limit is 256 MiB and 100,000 entries, across at most 16 roots. Declare all state
 needed by private verification, including installation metadata when relevant;
 undeclared system mutations do not appear in the fresh verifier.
 
+For an ordinary Python virtual environment with an image-owned interpreter,
+declare the actual executable and any single-hop image alias it references:
+
+```toml
+[environment]
+workspace_reference_files = ["/usr/local/bin/python3", "/usr/local/bin/python3.11"]
+
+[environment.reference_file_symlinks]
+"/usr/local/bin/python3" = "python3.11"
+```
+
+Inspect the original image first; these are examples, not portable Python paths.
+Keep the literal link targets created by the task. Each reference group admits
+at most 16 exact external leaves, outside all transferred and protected paths.
+Alias targets are either canonical absolute paths or a single relative basename;
+chains and cycles are rejected. Each group containing an alias must also list
+its regular target. The same alias declaration can accompany
+`mutable_path_reference_files` for external interpreters in mutable roots.
+Reference inspection shares a 256 MiB executable-byte budget per group.
+Workspaces with references also have a 256 MiB/100,000-entry archive budget.
+The required `artifacts/workspace-references.json` binds the archive to the
+observed references. A changed alias, executable, mode or owner fails handoff
+before workspace replacement; inspection is repeated after extraction. This
+does not transfer system executables or preinstall task-requested packages.
+
 For a task whose agent must start an HTTP service:
 
 ```toml

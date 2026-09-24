@@ -129,6 +129,7 @@ func (s runtimeServer) handler() http.Handler {
 	mux.HandleFunc("POST /exec", s.execute)
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
+	mux.HandleFunc("GET /readlink", s.readlink)
 	var pauseMu sync.Mutex
 	var paused pausedProcesses
 	mux.HandleFunc("POST /pause-processes", func(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +306,17 @@ func (s runtimeServer) download(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-File-UID", strconv.FormatUint(uint64(metadata.Uid), 10))
 	w.Header().Set("X-File-GID", strconv.FormatUint(uint64(metadata.Gid), 10))
 	_, _ = io.CopyN(w, f, info.Size())
+}
+
+func (s runtimeServer) readlink(w http.ResponseWriter, r *http.Request) {
+	target, err := readSymlink(r.URL.Query().Get("path"))
+	if err != nil {
+		http.Error(w, "symlink inspection rejected", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.Itoa(len(target)))
+	_, _ = io.WriteString(w, target)
 }
 
 func checkSocket(path string) error {

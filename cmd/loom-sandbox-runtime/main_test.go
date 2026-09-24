@@ -293,3 +293,59 @@ func TestDownloadDescriptorMetadataAndBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestReadlinkReturnsLiteralTargetWithoutFollowing(t *testing.T) {
+	c := testClient(t)
+	dir := t.TempDir()
+	for _, target := range []string{"python3.11", "/missing/image/python3.11"} {
+		path := filepath.Join(dir, "alias")
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		req, _ := http.NewRequest("GET", "http://sandbox/readlink", nil)
+		query := req.URL.Query()
+		query.Set("path", path)
+		req.URL.RawQuery = query.Encode()
+		response, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != 200 || string(data) != target {
+			t.Fatalf("literal alias read: status=%d data=%q error=%v", response.StatusCode, data, err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestReadlinkRejectsRegularAndUnsafePaths(t *testing.T) {
+	c := testClient(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "regular"), []byte("secret"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir, filepath.Join(dir, "parent-alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("regular", filepath.Join(dir, "leaf-alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dir, dir + "/regular", dir + "/missing", dir + "/parent-alias/leaf-alias", dir + "/../leaf-alias", "relative", dir + "//leaf-alias"} {
+		req, _ := http.NewRequest("GET", "http://sandbox/readlink", nil)
+		query := req.URL.Query()
+		query.Set("path", path)
+		req.URL.RawQuery = query.Encode()
+		response, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != 400 || strings.Contains(string(data), "secret") {
+			t.Fatalf("unsafe alias accepted: path=%q status=%d", path, response.StatusCode)
+		}
+	}
+}
