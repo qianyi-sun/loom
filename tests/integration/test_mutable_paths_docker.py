@@ -1,5 +1,6 @@
 """Directory handoff against real, disposable containers; no model calls."""
 import json
+import tarfile
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -113,9 +114,8 @@ async def test_multiple_absolute_roots_preserve_changes_deletions_and_attributes
     "mkdir -p /data; ln -s /tests/private /data/escape",
     "mkdir -p /other; ln -s /other /data",
     "mkdir -p /data; mkfifo /data/pipe",
-    "true",
 ])
-async def test_unrepresentable_or_missing_state_fails_explicitly(docker_drivers, tmp_path, setup):  # noqa: F811
+async def test_unrepresentable_state_fails_explicitly(docker_drivers, tmp_path, setup):  # noqa: F811
     from loom.trial.mutable_snapshot import export_mutable_paths
 
     agent, _ = docker_drivers
@@ -241,3 +241,140 @@ async def test_declared_workdir_symlink_cannot_redirect_private_handoff(sandboxe
             policy=WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ()),
         )
     assert (await verifier.exec("cat /tests/secret")).stdout == b"trusted"
+@pytest.mark.parametrize("baseline", [False, True])
+async def test_absent_mutable_root_stays_absent_in_fresh_verifier(docker_drivers, tmp_path, baseline):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/home/task/jupyter"), PurePosixPath("/data"))
+    for driver in (agent, verifier):
+        result = await driver.exec("mkdir -p /data; echo baseline > /data/value", user="root")
+        assert result.return_code == 0
+        if baseline:
+            result = await driver.exec("mkdir -p /home/task/jupyter; echo old > /home/task/jupyter/kernel", user="root")
+            assert result.return_code == 0
+    assert (await agent.exec("rm -rf /home/task/jupyter; echo changed > /data/value", user="root")).return_code == 0
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        "test ! -e /home/task/jupyter && test ! -L /home/task/jupyter && cat /data/value", user="root")
+    assert result.return_code == 0 and result.stdout.strip() == b"changed"
+    if not baseline:
+        assert (await verifier.exec("test ! -e /home/task", user="root")).return_code == 0
+
+
+@pytest.mark.parametrize("setup", [
+    "ln -s /missing /data",
+    "mkdir /other; ln -s /other /data",
+    "touch /data",
+    "mkdir /data; ln -s /missing /data/new",
+])
+async def test_missing_root_with_invalid_ancestor_is_rejected(docker_drivers, tmp_path, setup):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths
+
+    agent, _ = docker_drivers
+    assert (await agent.exec(setup, user="root")).return_code == 0
+    with pytest.raises(RuntimeError, match="directory"):
+        await export_mutable_paths(agent, (PurePosixPath("/data/new"),), tmp_path,
+                                   workdir=PurePosixPath("/workspace"))
+    assert not (tmp_path / "manifest.json").exists()
+
+
+async def test_new_export_replaces_stale_archive_when_root_is_deleted(docker_drivers, tmp_path):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/data"),)
+    assert (await agent.exec("mkdir /data; echo old > /data/value", user="root")).return_code == 0
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (tmp_path / "0.tar").is_file()
+    assert (await agent.exec("rm -rf /data", user="root")).return_code == 0
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    with tarfile.open(tmp_path / "0.tar") as stream:
+        assert stream.getmembers() == []
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (await verifier.exec("test ! -e /data", user="root")).return_code == 0
+
+
+@pytest.mark.parametrize("corruption", ["path", "state", "archive", "schema", "extra-field"])
+async def test_absence_manifest_is_validated_before_any_destination_changes(docker_drivers, tmp_path, corruption):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/data"), PurePosixPath("/home/task"))
+    assert (await agent.exec("mkdir /data; echo changed > /data/value", user="root")).return_code == 0
+    assert (await verifier.exec("mkdir -p /data /home/task; echo baseline > /data/value", user="root")).return_code == 0
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    if corruption == "path":
+        manifest["paths"][1]["path"] = "/tests"
+    elif corruption == "state":
+        manifest["paths"][1]["state"] = "present"
+    elif corruption == "schema":
+        manifest["schema_version"] = 1
+    elif corruption == "extra-field":
+        manifest["paths"][1]["unexpected"] = "value"
+    else:
+        (tmp_path / "1.tar").write_bytes((tmp_path / "0.tar").read_bytes())
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError):
+        await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec("test -d /home/task && cat /data/value", user="root")
+    assert result.return_code == 0 and result.stdout.strip() == b"baseline"
+
+
+async def test_absence_restore_rejects_symlink_before_deleting_any_root(docker_drivers, tmp_path):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/data"), PurePosixPath("/home/task"))
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        "mkdir -p /data /tests; echo trusted > /tests/private; ln -s /tests /home/task", user="root")
+    assert result.return_code == 0
+    with pytest.raises(RuntimeError, match="directory"):
+        await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec("test -d /data && cat /tests/private", user="root")
+    assert result.return_code == 0 and result.stdout.strip() == b"trusted"
+
+
+@pytest.mark.parametrize("mode", ["0555", "0000"])
+async def test_absence_restore_can_remove_nonwritable_empty_leaf_as_task_user(docker_drivers, tmp_path, monkeypatch, mode):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/data/state"),)
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        f"mkdir -p /data/state; chown -R 1000:1000 /data; chmod {mode} /data/state", user="root")
+    assert result.return_code == 0
+    execute = verifier.exec
+
+    async def as_task(command, **kwargs):
+        return await execute(command, **{**kwargs, "user": "1000:1000"})
+
+    monkeypatch.setattr(verifier, "exec", as_task)
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (await execute("test ! -e /data/state", user="root")).return_code == 0
+
+
+async def test_absence_restore_checks_parent_permissions_before_removing_roots(docker_drivers, tmp_path, monkeypatch):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/home/task"), PurePosixPath("/data/state"))
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        "mkdir -p /home/task /data/state; chown -R 1000:1000 /home/task /data; chmod 0777 /home; chmod 0555 /data",
+        user="root")
+    assert result.return_code == 0
+    execute = verifier.exec
+
+    async def as_task(command, **kwargs):
+        return await execute(command, **{**kwargs, "user": "1000:1000"})
+
+    monkeypatch.setattr(verifier, "exec", as_task)
+    with pytest.raises(RuntimeError):
+        await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (await execute("test -d /home/task && test -d /data/state", user="root")).return_code == 0
