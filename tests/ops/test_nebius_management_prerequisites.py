@@ -250,11 +250,11 @@ def connected_checks(checks, installation, publication, cloud, monkeypatch):
     def object_client(name, **kwargs):
         assert name == "s3" and kwargs["aws_access_key_id"] == "aws-backup"
         assert kwargs["aws_secret_access_key"] == "never-print-secret"
-        def head_bucket(**kwargs):
-            assert kwargs == {"Bucket": "loom-management-backup"}
+        def list_objects_v2(**kwargs):
+            assert kwargs == {"Bucket": "loom-management-backup", "MaxKeys": 1}
             events.append("backup-read")
             return {"ResponseMetadata": {"HTTPStatusCode": 200}}
-        return SimpleNamespace(head_bucket=head_bucket, close=lambda: events.append("backup-closed"),
+        return SimpleNamespace(list_objects_v2=list_objects_v2, close=lambda: events.append("backup-closed"),
                                meta=SimpleNamespace(events=HierarchicalEmitter()))
     monkeypatch.setattr(boto3, "client", object_client)
     monkeypatch.setattr(module, "qualify_dns_target", lambda **kwargs: {
@@ -270,6 +270,37 @@ def test_connected_preflight_qualifies_publication_iam_capacity_storage_and_rout
     client.preflight(request, render_installation(request))
     assert events.count("cloud-opened") == events.count("cloud-closed") == 1
     assert "public-route" in events and "backup-read" in events and "backup-closed" in events
+
+
+@pytest.mark.parametrize("allowed", [True, False])
+def test_backup_probe_uses_bounded_object_access_without_bucket_metadata_permission(connected_checks, monkeypatch, allowed):
+    import boto3
+    from botocore.stub import Stubber
+    from scripts.ops.nebius_management_install import render_installation
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+
+    client, request, _, _, events = connected_checks
+    # Nebius bucket-policy object-editor permits ListObjectsV2 but returns 403
+    # for HeadBucket. Stub only the external response, keeping boto's request
+    # validation and the composed preflight/lifecycle real.
+    objects = boto3.session.Session().client("s3", region_name="eu-north1",
+        aws_access_key_id="test-access", aws_secret_access_key="test-secret")
+    monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: objects)
+    with Stubber(objects) as stub:
+        params = {"Bucket": "loom-management-backup", "MaxKeys": 1}
+        if allowed:
+            stub.add_response("list_objects_v2", {"Name": "loom-management-backup", "MaxKeys": 1,
+                "KeyCount": 0, "IsTruncated": False, "ResponseMetadata": {"HTTPStatusCode": 200}}, params)
+            client.preflight(request, render_installation(request))
+            assert "public-route" in events
+        else:
+            stub.add_client_error("list_objects_v2", service_error_code="AccessDenied",
+                service_message="private-provider-detail", http_status_code=403, expected_params=params)
+            with pytest.raises(ManagementPrerequisiteError) as error:
+                client.preflight(request, render_installation(request))
+            assert "private-provider-detail" not in str(error.value)
+            assert "public-route" not in events
+        stub.assert_no_pending_responses()
 
 
 @pytest.mark.parametrize("shortfall", ["quota", "platform", "pending_volume"])
