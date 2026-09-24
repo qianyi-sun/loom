@@ -8,13 +8,13 @@ import pytest
 
 from loom.models.trajectory import TrialEndEvent
 from loom_service.delivery_export import (
-    ObjectRef,
     SelectedTrial,
-    TerminalStateMismatchError,
     _select_trials,
     _validate_atif_terminal_evidence,
     _validate_typed_terminal_evidence,
 )
+from loom_service.delivery_export_errors import TerminalStateMismatchError
+from loom_service.trial_bundles import ObjectRef
 
 
 def _item() -> SelectedTrial:
@@ -205,10 +205,10 @@ def test_explicit_trial_ids_skip_unresolved_sibling_coordinates() -> None:
 
 
 def test_explicit_trial_ids_reject_unknown_and_ineligible() -> None:
-    from loom_service.delivery_export import (
+    from loom_service.delivery_export import _select_trials_by_ids
+    from loom_service.delivery_export_errors import (
         InvalidDeliveryBatchFamilyError,
         UnresolvedDeliveryTrialsError,
-        _select_trials_by_ids,
     )
 
     team_id = uuid4()

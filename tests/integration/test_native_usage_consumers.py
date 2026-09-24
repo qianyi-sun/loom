@@ -17,6 +17,7 @@ from loom.data_lifecycle_gc_sql import ExecutionMetadataPurger
 from loom.db.schema import (
     Batch,
     DataLifecycleAuthority,
+    ServiceExecutionClass,
     ServiceExecutionLease,
     ServiceExecutionTarget,
     Trial,
@@ -28,12 +29,8 @@ from loom.resource_usage_store import report_values
 from loom_control_plane.service_execution import persist_execution_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
-from loom_service.delivery_export import (
-    ObjectRef,
-    SelectedTrial,
-    _build_archive,
-    _resource_usage_for_selected,
-)
+from loom_service.delivery_export import SelectedTrial, _build_archive, _resource_usage_for_selected
+from loom_service.trial_bundles import ObjectRef
 from tests.integration.test_service_execution_leases import _target
 from tests.integration.test_trial_resource_usage import resource_seed  # noqa: F401
 
@@ -46,6 +43,9 @@ async def native_usage(postgres_url: str, resource_seed: dict[str, Any]):  # noq
     now = datetime.now(UTC)
     lease_id, authority_id = uuid4(), uuid4()
     async with sessions() as session, session.begin():
+        created_execution_class = (
+            await session.get(ServiceExecutionClass, target.execution_class_id) is None
+        )
         await persist_execution_catalog(
             session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1, targets=(target,)
         )
@@ -150,6 +150,12 @@ async def native_usage(postgres_url: str, resource_seed: dict[str, Any]):  # noq
             await session.execute(
                 delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target.target_id)
             )
+            if created_execution_class:
+                await session.execute(
+                    delete(ServiceExecutionClass).where(
+                        ServiceExecutionClass.id == target.execution_class_id
+                    )
+                )
         await engine.dispose()
 
 
