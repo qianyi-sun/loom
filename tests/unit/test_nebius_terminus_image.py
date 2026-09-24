@@ -590,3 +590,37 @@ def test_noncanonical_foreign_agent_cache_requires_explicit_adaptation(tmp_path,
         prepare_nebius_terminus_image(tmp_path, env)
     assert source.read_text() == original
     assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
+
+
+def test_foreign_cache_adaptation_retains_parser_directives():
+    from loom.dockerfile_instructions import dockerfile_instructions
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    directives = '# syntax=docker/dockerfile:1\n# escape=`\n'
+    task = 'FROM ubuntu:22.04\nRUN echo hello`\nworld\n'
+    result = _without_packaged_openhands_runtime(directives + OPENHANDS_STAGE + task + OPENHANDS_COPIES)
+    assert result.startswith(directives)
+    assert [(i.keyword, i.arguments) for i in dockerfile_instructions(result)] == [
+        (i.keyword, i.arguments) for i in dockerfile_instructions(directives + task)]
+
+
+@pytest.mark.parametrize('dependency', [
+    'COPY --from=TERMINALWORLD_OPENHANDS_RUNTIME_CACHE /other /other\n',
+    'COPY --from=terminalworld-openhands-sdk-cache:1.34.0-py312-musl-v3 /other /other\n',
+    'COPY --from="0" /other /other\n',
+    'COPY <<EOF /entrypoint.sh\n#!/bin/sh\nexec /opt/openhands-python/bin/python /task.py\nEOF\n',
+])
+def test_hidden_foreign_runtime_dependencies_are_not_removed(dependency):
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + dependency + OPENHANDS_COPIES
+    with pytest.raises(ValueError, match='OpenHands.*explicit'):
+        _without_packaged_openhands_runtime(original)
+
+
+def test_runtime_copies_cannot_precede_implicit_task_dependencies():
+    from loom.nebius_terminus_image import _without_packaged_openhands_runtime
+
+    original = OPENHANDS_STAGE + 'FROM ubuntu:22.04\n' + OPENHANDS_COPIES + 'RUN cp -a /opt /task-input\n'
+    with pytest.raises(ValueError, match='OpenHands.*explicit'):
+        _without_packaged_openhands_runtime(original)
