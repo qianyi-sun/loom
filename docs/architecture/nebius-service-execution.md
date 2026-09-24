@@ -558,6 +558,25 @@ commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
 errors return the lease to the persisted queue without rerunning the Pod;
 missing or contradictory source evidence fails with `output_unavailable`.
+Migration `0157` permits one audited archival retry for the diagnosed legacy
+verifier projection defect. The old runtime could read the captured verifier
+exception diagnostic before `verifier/output.json`, retaining a null runtime
+reward despite a valid source score. Only a failed partial verifier with that
+exact captured-output ordering, a failed verifier phase, and its original typed
+exception can preserve the score as a separate `VerifierEnd` event. `TrialEnd`
+and the immutable runtime result keep their original null reward. Other score
+drift remains an integrity error.
+
+The [archival recovery command](../runbooks/nebius-verifier-archive-recovery.md)
+selects an owning team and deleted, finalized current-attempt lease with committed
+source and `verifier_reward_drift`. It records a one-use timestamp in lease
+history and requeues only archival work. Database guards reject other terminal
+reopenings or changes to execution identity/state. Normal claim fencing, source
+validation and canonical acknowledgement still apply. Recovery, including a
+failed recovery, preserves the Trial's original outcome, failure and finish time.
+The recovered bundle can be downloadable while the historical Trial still reports
+`output_unavailable`; its archive state separately reports `committed`.
+
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
 Control Plane replicas mutually exclusive without imposing a serial transfer

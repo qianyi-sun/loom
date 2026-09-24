@@ -153,6 +153,7 @@ class MaterializationResult:
     failure_reason: str | None
     accounting_call_count: int | None = None
     exception_info: ExceptionInfo | None = None
+    preserve_trial_outcome: bool = False
 
 
 def _digest(body: bytes) -> str:
@@ -450,7 +451,7 @@ def build_canonical_events(
                 ),
             )
         )
-    elif runtime_result.verifier_rewards is not None:
+    elif runtime_result.verifier_rewards is not None or _legacy_verifier_reward_projection(runtime_result):
         raise MaterializationIntegrityError("verifier_output_missing")
     final_state = (
         "succeeded"
@@ -550,6 +551,62 @@ class ServiceExecutionMaterializer:
         self._retry_max = retry_max_seconds
         self._source_retention = timedelta(seconds=max(0, source_retention_seconds))
         self._accounting_retry_after: dict[UUID, datetime] = {}
+
+    async def retry_legacy_verifier_archive(self, *, lease_id: UUID, team_id: UUID) -> bool:
+        """Requeue one diagnosed historical archive, without rerunning its execution."""
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
+            if lease is None or lease.team_id != team_id:
+                return False
+            trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+            if (
+                trial is None or trial.team_id != team_id or trial.attempt_count != lease.attempt
+                or trial.state != "failed" or trial.failure_reason != "output_unavailable"
+                or lease.execution_role != "attempt" or lease.finalized_at is None
+                or lease.desired_state != "deleted" or lease.observed_state != "deleted"
+                or lease.deleted_at is None or lease.cleanup_state != "complete"
+                or lease.output_commit_state != "committed"
+                or lease.output_generation != lease.resource_generation
+                or lease.materialization_state != "unavailable"
+                or lease.materialization_error_code != "verifier_reward_drift"
+                or lease.materialization_recovery_requested_at is not None
+                or lease.canonical_trajectory_sha256 is not None or lease.canonical_atif_sha256 is not None
+                or lease.source_cleanup_state != "not_ready"
+            ):
+                return False
+            try:
+                runtime = ExecutionRuntimeResultV1.model_validate((trial.result or {}).get("runtime_result"))
+            except ValidationError:
+                return False
+            if not _legacy_verifier_reward_projection(runtime):
+                return False
+            artifact = await session.scalar(select(Artifact).where(
+                Artifact.control_producer_kind == "service_execution",
+                Artifact.control_producer_id == lease.id,
+            ).with_for_update())
+            if artifact is None or artifact.team_id != team_id or artifact.trial_id != trial.id:
+                return False
+            metadata = artifact.artifact_metadata or {}
+            if "legacy_verifier_archival_recovery" in metadata:
+                return False
+            artifact.artifact_metadata = {
+                **metadata,
+                "legacy_verifier_archival_recovery": {
+                    "requested_at": now.isoformat(),
+                    "error_code": lease.materialization_error_code,
+                    "error_message": lease.materialization_error_message,
+                    "output_manifest_sha256": lease.output_manifest_sha256,
+                },
+            }
+            lease.materialization_state = "pending"
+            lease.materialization_next_attempt_at = now
+            lease.materialization_recovery_requested_at = now
+            lease.materialization_claim_id = None
+            lease.materialization_claim_expires_at = None
+            lease.updated_at = now
+            await session.commit()
+            return True
 
     async def claim_one(
         self, *, now: datetime | None = None, lease_id: UUID | None = None,
@@ -1013,6 +1070,7 @@ class ServiceExecutionMaterializer:
             ),
             accounting_call_count=len(gateway_calls) if gateway_calls is not None else None,
             exception_info=exception_info,
+            preserve_trial_outcome=_legacy_verifier_reward_projection(runtime_result),
         )
 
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
@@ -1182,7 +1240,7 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = None
             elif trial.state != result.final_trial_state:
                 raise MaterializationIntegrityError("terminal_trial_state_drift")
-            if result.exception_info is not None:
+            if result.exception_info is not None and not result.preserve_trial_outcome:
                 trial.result = {**(trial.result or {}),
                                 "exception_info": result.exception_info.model_dump(mode="json")}
                 trial.failure_message = (
@@ -1253,10 +1311,12 @@ class ServiceExecutionMaterializer:
             lease.materialization_error_code = exc.code[:120]
             lease.materialization_error_message = str(exc)[:2000]
             lease.updated_at = now
-            trial.state = "failed"
-            trial.failure_reason = "output_unavailable"
-            trial.failure_message = f"canonical materialization failed: {exc.code}"
-            trial.finished_at = now
+            # A recovery failure belongs to the archive audit, not a new Trial outcome.
+            if lease.materialization_recovery_requested_at is None:
+                trial.state = "failed"
+                trial.failure_reason = "output_unavailable"
+                trial.failure_message = f"canonical materialization failed: {exc.code}"
+                trial.finished_at = now
             await session.commit()
             SERVICE_EXECUTION_MATERIALIZATION_FAILURES_TOTAL.labels(exc.code).inc()
 
