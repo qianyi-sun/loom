@@ -286,6 +286,9 @@ execution namespace, cloud resource, public LoadBalancer or Secret is emitted.
 ordinary `loom_service` database role, without collector/batch-runner tokens.
 The Service mounts its own database CA/admin/master-key material, a read-only
 publication credential, and separate Kubernetes/cloud provider credentials.
+The Kubernetes credential can be an explicit projected service-account token,
+mounted only into this Deployment under `loom-management-provisioner`; database,
+migration and backup retain the separate unprivileged `loom-platform` account.
 Migration and backup Pods receive none of the provisioning/publication credentials;
 backup dump and upload containers retain their separate database/storage access.
 Management database keys are newly generated once, persisted privately and reused
@@ -317,12 +320,19 @@ from developer input. The budget supplies nonnegative `cpu_millis`, `memory_mib`
 management headroom. Startup inserts an absent budget or verifies an exact match;
 a changed allowance is rejected, not silently resized.
 
-Optional `provider_runtime` starts the worker. It supplies a `kubernetes` object
-with explicit HTTPS `endpoint`, CA `ca_file` and private Nebius `credentials_file`,
-plus a separate private `cloud_credentials_file`. Both credential files are bounded
-regular files, with no world access or group write; projected read-only Secret
-files are supported. No ambient kubeconfig, login, proxy or insecure transport is
-used. Native SDK token renewal stays pinned to the configured origin. `concurrency`
+Optional `provider_runtime` starts the worker. Its `kubernetes` object requires
+an explicit HTTPS `endpoint` and CA `ca_file`, plus one closed authentication mode:
+private Nebius `credentials_file`, or `kind: projected_service_account` with an
+explicit `token_file`. The latter reopens the bounded private token file on every
+request, following Kubernetes projected-volume rotation without caching old bytes.
+The renderer projects a one-hour renewable token and namespace root CA only into
+the management API. This establishes authentication, not namespace permissions;
+the protected installer must separately qualify and install scoped RBAC.
+A separate private `cloud_credentials_file` is required in both modes.
+Credential files are bounded regular files with no world access or group write;
+projected read-only files are supported. No ambient kubeconfig, login, proxy or
+insecure transport is used. Both modes stay pinned to the configured origin.
+`concurrency`
 defaults to four provisioning operations (range 1–16), and `poll_seconds` defaults
 to five (range 1–60); these are not task-capacity shares. Shutdown cancels operations
 and lease heartbeats before closing HTTP/SDK/database clients. Database outages

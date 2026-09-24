@@ -16,6 +16,10 @@ from loom.nebius_kubernetes import NebiusKubernetesConnection, NebiusKubernetesC
 from loom_service.environment_management.child_client import ChildEnvironmentClient
 from loom_service.environment_management.cloud_provider import NebiusEnvironmentCloudProvider
 from loom_service.environment_management.credentials import EnvironmentCredentialProvider
+from loom_service.environment_management.kubernetes_credentials import (
+    ProjectedKubernetesConnection,
+    ProjectedKubernetesCredentials,
+)
 from loom_service.environment_management.kubernetes_provider import KubernetesEnvironmentProvider
 from loom_service.environment_management.nebius_api import NebiusSdkEnvironmentApi
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError
@@ -30,14 +34,15 @@ class ProviderRuntimeSettings(BaseModel):
     """Protected installation input, never an owner-request or ambient kubeconfig."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    kubernetes: NebiusKubernetesConnection
+    kubernetes: NebiusKubernetesConnection | ProjectedKubernetesConnection
     cloud_credentials_file: Path
     concurrency: int = Field(default=4, ge=1, le=16, strict=True)
     poll_seconds: int = Field(default=5, ge=1, le=60, strict=True)
 
 
 class NebiusManagementAuth(httpx.Auth):
-    def __init__(self, connection: NebiusKubernetesConnection, credentials: NebiusKubernetesCredentials):
+    def __init__(self, connection: NebiusKubernetesConnection | ProjectedKubernetesConnection,
+                 credentials: NebiusKubernetesCredentials | ProjectedKubernetesCredentials):
         self.origin = httpx.URL(connection.endpoint)
         self.credentials = credentials
 
@@ -90,7 +95,9 @@ class EnvironmentRuntime:
                 if (not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o027
                         or not 0 < metadata.st_size <= 1024 * 1024):
                     raise ValueError("invalid credential file")
-                credentials = NebiusKubernetesCredentials(settings.kubernetes)
+                credentials = (ProjectedKubernetesCredentials(settings.kubernetes)
+                               if isinstance(settings.kubernetes, ProjectedKubernetesConnection)
+                               else NebiusKubernetesCredentials(settings.kubernetes))
                 resources.push_async_callback(credentials.close)
                 sdk = SDK(credentials_file_name=str(settings.cloud_credentials_file),
                           user_agent_prefix="loom-environment-management/1.0")

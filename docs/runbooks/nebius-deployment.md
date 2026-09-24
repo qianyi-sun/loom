@@ -527,10 +527,17 @@ Prepare the protected `loom.nebius-management-deployment.v1` JSON described in
 [the management architecture](../architecture/nebius-primary-platform.md#management-deployment-manifests)
 outside the repository. Its nested `installation.provider_runtime` is mandatory
 for this deployment. Set its Kubernetes endpoint to the foundation's exact API
-origin, `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`,
-`credentials_file` to `/var/run/loom-management-kubernetes/credentials.json`, and
-`cloud_credentials_file` to `/var/run/loom-management-cloud/credentials.json`.
-These are explicit projected-file paths, not an ambient operator login.
+origin and `ca_file` to `/var/run/loom-management-kubernetes/ca.crt`.
+For native projected identity, set `kubernetes.kind` to
+`projected_service_account` and `token_file` to
+`/var/run/loom-management-kubernetes/token`; omit `credentials_file`.
+Kubernetes supplies and renews that token only for the management API's separate
+`loom-management-provisioner` ServiceAccount. The protected installer must qualify
+its namespace permissions before activation; rendering installs no RBAC grants.
+For the retained explicit Nebius SDK mode, omit `kind`/`token_file` and set
+`credentials_file` to `/var/run/loom-management-kubernetes/credentials.json`.
+Both modes require `cloud_credentials_file` at
+`/var/run/loom-management-cloud/credentials.json`. None uses an ambient operator login.
 
 Set `installation.foundation.provisioning_project_id` to the dedicated project
 qualified for management-owned IAM and object storage, separate from the cluster
@@ -571,7 +578,7 @@ All referenced Secrets belong only to the management namespace:
 `loom-platform-db` (admin/service credentials and database CA),
 `loom-management-db-tls`, `loom-platform-auth` (secret-store master key),
 `loom-admin-secret`, `loom-management-publications` (`token`, read-only GitHub),
-`loom-management-kubernetes` (`ca.crt`, `credentials.json`),
+`loom-management-kubernetes` (`ca.crt`, `credentials.json`, SDK mode only),
 `loom-management-cloud` (`credentials.json`), and `loom-platform-storage`
 (`backup-access-key`, `backup-secret-key`). Identical names in another namespace
 do not authorize copying that namespace's values. Preserve generated keys and

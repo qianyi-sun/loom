@@ -30,6 +30,7 @@ from loom.nebius_platform_render import (
     digest,
 )
 from loom_service.environment_management.installation import ManagementInstallation
+from loom_service.environment_management.kubernetes_credentials import ProjectedKubernetesConnection
 
 _LABEL = "loom.nebius/management-installation"
 _CONFIG_PATH = "/var/run/loom-management"
@@ -71,7 +72,9 @@ class ManagementDeployment(BaseModel):
             raise ValueError("management deployment requires an explicit provider runtime")
         if (runtime.kubernetes.endpoint != config["kubernetes_api_server"].rstrip("/")
                 or runtime.kubernetes.ca_file != Path(_KUBERNETES_PATH + "/ca.crt")
-                or runtime.kubernetes.credentials_file != Path(_KUBERNETES_PATH + "/credentials.json")
+                or (runtime.kubernetes.token_file != Path(_KUBERNETES_PATH + "/token")
+                    if isinstance(runtime.kubernetes, ProjectedKubernetesConnection)
+                    else runtime.kubernetes.credentials_file != Path(_KUBERNETES_PATH + "/credentials.json"))
                 or runtime.cloud_credentials_file != Path(_CLOUD_PATH + "/credentials.json")):
             raise ValueError("management provider must use the bound cluster and mounted credentials")
         return self
@@ -163,12 +166,28 @@ def render_management(
         "name": cm["metadata"]["name"], "items": [{"key": "installation.json", "path": "installation.json"}],
     }})
     container["volumeMounts"].append({"name": "management-config", "mountPath": _CONFIG_PATH, "readOnly": True})
-    _mount_secret(pod, "management-kubernetes", "loom-management-kubernetes", _KUBERNETES_PATH)
+    runtime = deployment.installation.provider_runtime
+    assert runtime is not None  # Validated by ManagementDeployment.
+    if isinstance(runtime.kubernetes, ProjectedKubernetesConnection):
+        provisioner = _obj("ServiceAccount", "loom-management-provisioner", ns)
+        provisioner["automountServiceAccountToken"] = False
+        files["10-config-network.yaml"].append(provisioner)
+        pod["serviceAccountName"] = "loom-management-provisioner"
+        pod["volumes"].append({"name": "management-kubernetes", "projected": {
+            "defaultMode": 0o440, "sources": [
+                {"serviceAccountToken": {"path": "token", "expirationSeconds": 3600}},
+                {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+            ],
+        }})
+        container["volumeMounts"].append({"name": "management-kubernetes", "mountPath": _KUBERNETES_PATH,
+                                         "readOnly": True})
+    else:
+        _mount_secret(pod, "management-kubernetes", "loom-management-kubernetes", _KUBERNETES_PATH)
+        pod["volumes"][-1]["secret"]["items"] = [
+            {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
+        ]
     _mount_secret(pod, "management-cloud", "loom-management-cloud", _CLOUD_PATH)
     pod["volumes"][-1]["secret"]["items"] = [{"key": "credentials.json", "path": "credentials.json"}]
-    pod["volumes"][-2]["secret"]["items"] = [
-        {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
-    ]
     migration = files["30-migrate.yaml"][0]
     migration["metadata"]["name"] = "loom-management-migrate-" + revision.removeprefix("sha256:")[:12]
     migration_pod = migration["spec"]["template"]["spec"]
