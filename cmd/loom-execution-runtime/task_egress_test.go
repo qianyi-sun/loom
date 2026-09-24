@@ -57,7 +57,12 @@ func TestTaskEgressRealHTTPAndTLSAndRedirectDenial(t *testing.T) {
 				protocol = "https"
 			}
 			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/internal/service-execution/task-egress" || r.Header.Get("Authorization") != "Bearer pod-token" || r.Header.Get("X-Loom-Execution-Lease-Id") != "lease-one" || r.Header.Get("X-Loom-Runtime-Contract-SHA256") != "sha256:bound" {
+				if r.URL.Path != "/internal/service-execution/task-egress" {
+					t.Errorf("unexpected task-egress path: %s", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				if r.Header.Get("Authorization") != "Bearer pod-token" || r.Header.Get("X-Loom-Execution-Lease-Id") != "lease-one" || r.Header.Get("X-Loom-Runtime-Contract-SHA256") != "sha256:bound" {
 					t.Error("missing authoritative identity")
 				}
 				ws, err := websocket.Accept(w, r, nil)
@@ -89,7 +94,8 @@ func TestTaskEgressRealHTTPAndTLSAndRedirectDenial(t *testing.T) {
 				<-done
 			}))
 			defer gateway.Close()
-			root, _ := url.Parse(gateway.URL)
+			// The actuator supplies the service-execution base, not the gateway origin.
+			root, _ := url.Parse(gateway.URL + "/internal/service-execution")
 			tokenFile := filepath.Join(t.TempDir(), "pod-token")
 			if err := os.WriteFile(tokenFile, []byte("pod-token"), 0600); err != nil {
 				t.Fatal(err)
