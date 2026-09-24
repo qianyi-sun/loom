@@ -31,7 +31,8 @@ class TaskEgressConfig(BaseModel):
     # explicitly inventory platform destinations before enabling this listener.
     protected_cidrs: tuple[str, ...] = Field(min_length=1, max_length=256)
     maximum_connections: int = Field(default=64, ge=1, le=256)
-    maximum_connections_per_lease: int = Field(default=8, ge=1, le=32)
+    # Parallel package downloads also retain metadata and redirect connections.
+    maximum_connections_per_lease: int = Field(default=32, ge=1, le=32)
 
     @field_validator("protected_cidrs")
     @classmethod

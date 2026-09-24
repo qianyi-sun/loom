@@ -170,7 +170,9 @@ func (b *workloadBroker) startTaskEgress(parent context.Context, policy *webAllo
 		return "", nil, err
 	}
 	lifetime, stop := context.WithCancel(parent)
-	slots := make(chan struct{}, 8)
+	// Package clients retain metadata and redirect sockets alongside downloads.
+	// Match Gateway's per-lease ceiling; its configured and global caps still apply.
+	slots := make(chan struct{}, 32)
 	audit := taskEgressAudit{output: evidence, limit: 1024 * 1024}
 	for _, limit := range evidenceLimits {
 		if limit < audit.limit {

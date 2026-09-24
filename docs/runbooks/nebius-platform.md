@@ -162,7 +162,13 @@ Drain and disable the old targets through the operator API before switching;
 never overwrite catalog rows or reuse their IDs with new capabilities.
 The object uses the Gateway schema: a required nonempty `protected_cidrs` list
 and optional `maximum_connections` (1–256, default 64) and
-`maximum_connections_per_lease` (1–32, default 8). Inventory this deployment's
+`maximum_connections_per_lease` (1–32, default 32). Limits apply per Gateway
+process; the runtime proxy also caps each task at 32 simultaneous tunnels.
+Package clients can hold metadata and redirect sockets alongside parallel
+downloads. Existing explicit lower limits are preserved: review and change
+the environment configuration through the guarded rollout before qualifying
+those downloads. Keep the global connection budget bounded and rerun the
+actual package-download probe after activation. Inventory this deployment's
 actual platform, control-plane and public ingress addresses in those CIDRs;
 do not copy example addresses. Rendering checks configured literal API and
 public Gateway addresses against the inventory. DNS-named infrastructure and
