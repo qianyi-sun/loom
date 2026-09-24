@@ -92,7 +92,7 @@ def test_missing_or_invalid_harbor_reward_still_fails_without_result(run_wrapper
 
 
 @pytest.mark.timeout(600)
-def test_prepared_image_preserves_task_shell_and_python_alias(tmp_path: Path):
+def test_prepared_image_preserves_task_tools_and_records_resolved_dependencies(tmp_path: Path):
     import docker
 
     shell_setup = (
@@ -109,7 +109,7 @@ def test_prepared_image_preserves_task_shell_and_python_alias(tmp_path: Path):
     (tmp_path / "Dockerfile").write_text(original)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test.sh").write_text(
-        "pip install pytest==8.4.1\npytest /tests/test_example.py\n"
+        "pip install pytest==8.4.1 packaging\npytest /tests/test_example.py\n"
     )
     environment = {"dockerfile": "Dockerfile", "docker_build_context": ".", "workdir": "/app"}
     prepare_nebius_terminus_image(tmp_path, environment)
@@ -130,7 +130,12 @@ def test_prepared_image_preserves_task_shell_and_python_alias(tmp_path: Path):
                 'test "$(cat /authored-shell.log)" = called; '
                 'test "$(readlink /usr/bin/python)" = /usr/local/bin/python; '
                 'test "$(python -c \'import sys; print(sys.version_info[:2])\')" = "(3, 11)"; '
-                '/opt/verifier/bin/python -m pytest --version'
+                '/opt/verifier/bin/python -m pytest --version; '
+                '/opt/verifier/bin/python -c \'import importlib.metadata as m; '
+                'from pathlib import Path; '
+                'resolved = Path("/opt/verifier/resolved-requirements.txt").read_text().splitlines(); '
+                'assert all(name + "==" + m.version(name) in resolved '
+                'for name in ("pytest", "packaging"))\''
             )],
             network_mode="none", cap_drop=["ALL"],
             security_opt=["no-new-privileges"], detach=True,
