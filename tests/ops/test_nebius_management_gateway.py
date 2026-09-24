@@ -112,9 +112,26 @@ def test_public_report_strips_all_private_material_and_binds_operation(tmp_path,
     report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
     report.update(status=status, phase="database", namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391",
                   revision="sha256:" + "d" * 64, material="must-never-transfer")
+    report["backup"] = {"job_uid": "52f5b18c-7dd3-4095-bd7e-49f6a6330391", "sha256": "f" * 64,
+        "bytes": 1234, "key": "loom-nebius-management/2026/09/24/120000-" + "f" * 12 + ".dump", "private": "must-never-transfer"}
     safe = module().safe_report(json.dumps(report).encode(), metadata)
     assert safe["status"] == status and "must-never-transfer" not in json.dumps(safe)
+    if status == "management_installed":
+        assert safe["backup"] == {key: value for key, value in report["backup"].items() if key != "private"}
     report["candidate"] = "e" * 40
+    with pytest.raises(module().GatewayError):
+        module().safe_report(json.dumps(report).encode(), metadata)
+
+
+@pytest.mark.parametrize("field,value", [("key", "outside/private-input.json"), ("bytes", -1),
+    ("job_uid", "private diagnostic"), ("sha256", "unbounded-output")])
+def test_backup_receipt_rejects_malformed_or_private_fields(tmp_path, field, value):
+    metadata = operation(tmp_path)
+    report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
+    report.update(status="management_installed", namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391", revision="sha256:" + "d" * 64,
+        backup={"job_uid": "52f5b18c-7dd3-4095-bd7e-49f6a6330391", "sha256": "f" * 64, "bytes": 1234,
+                "key": "loom-nebius-management/2026/09/24/120000-" + "f" * 12 + ".dump"})
+    report["backup"][field] = value
     with pytest.raises(module().GatewayError):
         module().safe_report(json.dumps(report).encode(), metadata)
 

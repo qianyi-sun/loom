@@ -42,6 +42,9 @@ def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_p
     report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
     report.update(status=status, private="never-transfer", phase="database", revision="sha256:" + "d" * 64,
                   namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391")
+    if status == "management_installed":
+        report["backup"] = {"job_uid": "52f5b18c-7dd3-4095-bd7e-49f6a6330391", "sha256": "f" * 64, "bytes": 1234,
+            "key": "loom-nebius-management/2026/09/24/120000-" + "f" * 12 + ".dump"}
     calls = []
     def run(args, **kwargs):
         calls.append(args)
