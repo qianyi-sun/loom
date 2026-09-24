@@ -16,11 +16,12 @@ from loom.trajectory.storage import MinioObjectStore
 from loom.trajectory.writer import TrajectoryWriter
 from loom_benchmark_tool.upload import upload_task_dir
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+from tests.support.minio_images import prepare_test_image
 
 
 @pytest.fixture(scope="module")
 def minio() -> Iterator[MinioContainer]:
-    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
+    with MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

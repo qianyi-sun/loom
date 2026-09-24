@@ -31,6 +31,7 @@ from loom.nebius_restore import (
     verify_restored_records,
 )
 from tests.support.minio import MINIO_TEST_IMAGE
+from tests.support.minio_images import prepare_test_image
 
 pytestmark = pytest.mark.docker
 
@@ -49,7 +50,7 @@ def test_real_acl_dump_restores_without_source_roles_and_verifies_s3(tmp_path, m
     root = Path(__file__).resolve().parents[2]
     with (
         PostgresContainer("postgres:16") as source,
-        MinioContainer(MINIO_TEST_IMAGE).waiting_for(
+        MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).waiting_for(
             HttpWaitStrategy(9000, "/minio/health/cluster")
         ) as storage,
     ):

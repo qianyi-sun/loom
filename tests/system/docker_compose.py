@@ -34,6 +34,8 @@ from sqlalchemy import create_engine, select
 
 from loom.db.schema import TaskImageMaterialization
 from loom.security.redaction import redact_text
+from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+from tests.support.minio_images import prepare_test_image
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = REPO_ROOT / "deploy" / "docker-compose.test.yml"
@@ -134,10 +136,11 @@ def _stack_up(
     timeout_sec: float,
 ) -> tuple[str, str]:
     """Ordered system-stack bootstrap. Returns (team_token, worker_token)."""
+    minio_env = {"LOOM_SYSTEM_MINIO_IMAGE": prepare_test_image(MINIO_TEST_IMAGE)}
     # Stage 1: start stateful dependencies, then apply migrations explicitly.
     # Long-running services validate schema-at-head and intentionally never
     # auto-migrate, so they must not be started against a blank database.
-    _compose("up", "-d", "postgres", "minio", "registry")
+    _compose("up", "-d", "postgres", "minio", "registry", env_extra=minio_env)
     _wait_services_healthy(["postgres", "minio", "registry"], timeout_sec=timeout_sec)
     migration_env = os.environ.copy()
     migration_env["LOOM_DB_URL"] = DB_URL
@@ -157,7 +160,7 @@ def _stack_up(
     )
 
     # Stage 2: start application services. Worker remains excluded by profile.
-    _compose("up", "-d", "--build")
+    _compose("up", "-d", "--build", env_extra=minio_env)
     _wait_services_healthy(
         ["postgres", "minio", "registry", "llm-gateway", "control-plane"],
         timeout_sec=timeout_sec,
@@ -183,7 +186,7 @@ def _stack_up(
         "--build",
         "--no-deps",
         "task-image-builder",
-        env_extra={"LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
+        env_extra={**minio_env, "LOOM_TASK_IMAGE_BUILDER_TOKEN": builder_token},
     )
     _wait_task_image_materialization_ready(task_id, timeout_sec=timeout_sec)
 
@@ -196,7 +199,7 @@ def _stack_up(
         "--build",
         "--no-deps",
         "worker",
-        env_extra={"LOOM_WORKER_TOKEN": worker_token},
+        env_extra={**minio_env, "LOOM_WORKER_TOKEN": worker_token},
     )
     _wait_services_healthy(["worker"], timeout_sec=60.0)
     _verify_worker_claim_canary(team_token, timeout_sec=_CANARY_MAX_TIMEOUT_SEC)

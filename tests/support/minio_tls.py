@@ -17,7 +17,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from tests.support.minio_images import MINIO_TLS_IMAGE
+from tests.support.minio_images import MINIO_TLS_IMAGE, prepare_test_image
 
 IMAGE = MINIO_TLS_IMAGE
 KEYS = ("revision/task.toml", "revision/a space+%.toml", "revision/café.toml", "revision/literal%2Fkey")
@@ -52,7 +52,7 @@ def minio_tls(tmp_path_factory):
     docker_client, container, admin = docker.from_env(), None, None
     try:
         container = docker_client.containers.run(
-            IMAGE, ["server", "/data", "--address", ":9000", "--certs-dir", "/certs"],
+            prepare_test_image(IMAGE), ["server", "/data", "--address", ":9000", "--certs-dir", "/certs"],
             detach=True, user=f"{os.getuid()}:{os.getgid()}",
             environment={"MINIO_ROOT_USER": credentials.access_key, "MINIO_ROOT_PASSWORD": credentials.secret_key, "MINIO_BROWSER": "off"},
             volumes={str(certs): {"bind": "/certs", "mode": "ro"}, str(data): {"bind": "/data", "mode": "rw"}},

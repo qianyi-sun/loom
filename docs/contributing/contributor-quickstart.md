@@ -257,6 +257,22 @@ LOOM_RUN_MODAL_INTEGRATION=1 \
   uv run --no-sync pytest tests/integration/test_modal_driver_live.py -v
 ```
 
+MinIO fixtures preserve two pinned releases: the Testcontainers 2022 release
+and the 2025 TLS fixture. Run `uv run --no-sync python -m tests.support.minio_images`
+to prepare them before test deadlines. A cached original image is reused. If
+Quay rejects a cold pull, preparation verifies the exact upstream source archive
+checksum and builds the same release commit with its pinned original Go compiler.
+The rebuilt image has an explicit `loom-minio-test-source` local tag and source /
+recipe labels; it does not claim the original image digest. Invalid downloads,
+failed builds, and version mismatches fail setup. Cold builds can take several
+minutes and require public GitHub, Docker Hub, Go modules, and Alpine package
+access. Registry timeouts still fail without an unbounded retry.
+
+Fixture resolution is lazy. System smoke prepares the image before Compose and
+passes `LOOM_SYSTEM_MINIO_IMAGE` to every startup phase. This override belongs to
+`docker-compose.test.yml`; ordinary developer Compose and its existing storage
+volumes keep their current image and are not modified by fixture preparation.
+
 On GitHub, selected non-Docker integration tests are split into four disjoint,
 contiguous ranges of the manifest-owned filename order. Contiguous ordering
 preserves the suite's session-scoped Postgres setup/cleanup contract while the
