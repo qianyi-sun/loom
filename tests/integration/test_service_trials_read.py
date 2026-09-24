@@ -1586,7 +1586,7 @@ async def test_trial_detail_carries_ready_flags(
 ) -> None:
     """Audit M1: ready flags so the SPA can skip rendering a download
     link that would 404. trajectory_ready iff started_at is not null;
-    atif_ready iff state terminal + finished_at not null."""
+    ATIF's legacy fallback requires a started and finished terminal trial."""
     app, raw, _team_id, trial_ids = trials_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
