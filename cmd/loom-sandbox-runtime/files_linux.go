@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"unsafe"
 )
 
 // Every directory is pinned by descriptor before traversing the next component.
@@ -62,6 +63,30 @@ func readFile(path string) (*os.File, error) {
 		return nil, errors.New("regular file required")
 	}
 	return f, nil
+}
+
+// Read only the literal link text. Pin its parent using the same no-follow
+// traversal as file transfers; readlinkat never dereferences the leaf.
+func readSymlink(path string) (string, error) {
+	dir, name, err := fileParent(path, false)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.Close(dir)
+	leaf, err := syscall.BytePtrFromString(name)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, 4097)
+	n, _, errno := syscall.Syscall6(syscall.SYS_READLINKAT, uintptr(dir),
+		uintptr(unsafe.Pointer(leaf)), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
+	if errno != 0 {
+		return "", errno
+	}
+	if n == 0 || n > 4096 {
+		return "", errors.New("symlink target exceeds limit")
+	}
+	return string(buf[:n]), nil
 }
 
 func writeFile(path string, body io.Reader, mode uint32) error {
