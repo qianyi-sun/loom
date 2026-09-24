@@ -130,6 +130,7 @@ func (s runtimeServer) handler() http.Handler {
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
 	mux.HandleFunc("GET /readlink", s.readlink)
+	mux.HandleFunc("POST /restore-directory", s.restoreDirectory)
 	var pauseMu sync.Mutex
 	var paused pausedProcesses
 	mux.HandleFunc("POST /pause-processes", func(w http.ResponseWriter, r *http.Request) {

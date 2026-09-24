@@ -277,6 +277,13 @@ async def import_mutable_paths(
             if result.return_code or result.stderr or result.truncated:
                 raise WorkspaceSnapshotError(f"cannot remove absent verifier mutable directory: {root}")
             continue
+        replacement = getattr(driver, "replace_workspace_archive", None)
+        if replacement is not None:
+            # All archives/references/owners have already been checked. A native
+            # sandbox must stage before clearing a directory that may contain
+            # the extraction shell's own loader or shared libraries.
+            await replacement(directory / f"{index}.tar", root, preserve_acls=preserve_acls)
+            continue
         # A fresh verifier has image-owned baseline files. Replace the declared
         # contents, so agent deletions cannot silently reappear during grading.
         result = await driver.exec(

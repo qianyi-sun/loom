@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer",
                    "/stop-processes": "stop_processes", "/pause-processes": "pause_processes",
-                   "/resume-processes": "resume_processes"}
+                   "/resume-processes": "resume_processes", "/restore-directory": "directory_restore"}
 _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
     "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
@@ -64,6 +64,8 @@ class SandboxRPCError(DriverError):
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
             allowed_reasons = (
                 _EXEC_REASONS if path == "/exec" else
+                frozenset({"restore_request_invalid", "directory_restore_failed"})
+                if path == "/restore-directory" else
                 _CLEANUP_REASONS if path in {"/stop-processes", "/pause-processes", "/resume-processes"}
                 else frozenset()
             )
@@ -404,6 +406,38 @@ class ServiceSandboxDriver:
                 raise DriverError("unable to restore workspace archive")
         finally:
             await self.exec(f"rm -f {archive}")
+
+    async def replace_workspace_archive(
+        self, src: Path, dst: PurePosixPath, *, preserve_acls: bool = False,
+    ) -> None:
+        """Replace a validated mutable root without executing from a cleared tree.
+
+        Extract while the original shell/toolchain is present, then let the
+        static runtime promote staged entries. The controller's mutable-path
+        manifest, archive, reference and ownership checks precede this hook.
+        """
+        stage = dst / (".loom-restore-" + uuid4().hex)
+        destination, staged = shlex.quote(str(dst)), shlex.quote(str(stage))
+        promotion_started = False
+        try:
+            result = await self.exec(f"mkdir -p {destination} && mkdir -m 0700 {staged}")
+            if result.return_code or result.stderr or result.truncated:
+                raise DriverError("unable to stage mutable directory restore")
+            await self.import_workspace_archive(src, stage, preserve_acls=preserve_acls)
+            promotion_started = True
+            await self._request(
+                "POST", "/restore-directory", json={"root": str(dst), "stage": stage.name}, timeout=120,
+            )
+        finally:
+            if not promotion_started:
+                # The baseline remains intact. After promotion starts, an
+                # ambiguous RPC may still be moving entries: never race it with
+                # shell cleanup. The native operation removes its stage on
+                # success; authoritative sandbox teardown cleans any failure.
+                try:
+                    await self.exec(f"rm -rf -- {staged}")
+                except DriverError:
+                    pass
 
     async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:
         if hc is None:

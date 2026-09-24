@@ -755,6 +755,19 @@ Ownership that the verifier cannot
 restore is an explicit handoff failure. This does not copy an entire writable
 container layer or expose private verifier dependencies to task mutations.
 
+For present mutable roots, the native sandbox extracts each validated archive
+into a fresh staging directory inside its destination before removing baseline
+entries. The static runtime's `/restore-directory` RPC then promotes the staged
+children without starting a shell while the old tree is incomplete. This permits
+restoring declared loader and shared-library directories. Descriptor-pinned,
+no-follow traversal rejects protected roots, symlink ancestors and staging-name
+collisions before deletion. Promotion preserves deletions, links, ownership,
+root mode, timestamps and declared POSIX ACLs, including read-only final roots.
+The destination's parent need not be writable. Promotion is not crash-atomic;
+an ambiguous RPC failure is a preparation failure, and sandbox teardown owns
+cleanup so a shell cleanup cannot race an in-progress promotion. Drivers without
+native directory promotion retain the existing extraction path.
+
 For a mutable-directory virtualenv that links to an unchanged image interpreter,
 the task may declare exact `environment.mutable_path_reference_files`, such as
 `["/usr/local/bin/python3.9"]`. This default-empty declaration permits at most
