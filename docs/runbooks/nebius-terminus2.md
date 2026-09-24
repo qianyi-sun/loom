@@ -395,7 +395,9 @@ venv/activation/pip/run forms. Combined apt update/install commands are handled
 only when their package list is explicit. Supported derived bases include
 official Debian-based Python and numeric Node tags (full or slim, including
 Bullseye, Bookworm and Trixie variants), and numeric `rootproject/root` versions
-with an explicit Ubuntu 20.04, 22.04 or 24.04 suffix. Preparation retains the
+with an explicit Ubuntu 20.04, 22.04 or 24.04 suffix. Versioned official PHP CLI
+tags are also accepted, with optional Stretch, Buster, Bullseye, Bookworm or
+Trixie suffixes. Preparation retains the
 original application interpreter and PATH; plain pip verifiers inherit system
 packages so compiled PyROOT dependencies remain available. Validate the actual
 image and original verifier before execution; accepting a tag does not qualify
@@ -421,7 +423,10 @@ mocks, and it does not validate every Dockerfile instruction in place of
 BuildKit. Such package defects require an explicit, reviewable source repair.
 The build uses Loom's pinned uv provisioner and installs an explicitly declared
 verifier Python under `/opt/verifier-python`, preserving the task interpreter
-and PATH even when the task image uses an older Python. Incompatible dependency
+and PATH even when the task image uses an older Python. An unpinned `uvx pytest`
+bootstrap uses uv's tool resolver, which can select a compatible managed Python
+from the verifier dependencies. Its isolated tool environment lives under
+`/opt/verifier-tools`, with `/opt/verifier` pointing to it. Incompatible dependency
 pins still fail the image build; they are never silently omitted or relaxed.
 Authored HOME caches are retained because they can contain required offline
 dependencies. Only the verifier preparation commands disable uv caching; that
@@ -597,7 +602,7 @@ mutable_paths = ["/data", "/home/agent/.local/share/jupyter"]
 
 These roots must exist at handoff and cannot overlap the workdir, another root,
 or runtime/private verifier paths (including `/opt/verifier`,
-`/opt/verifier-python` and `/opt/verifier-assets`). The bundle retains per-root
+`/opt/verifier-python`, `/opt/verifier-assets` and `/opt/verifier-tools`). The bundle retains per-root
 archives and `artifacts/mutable-paths/manifest.json`. Restore replaces directory
 contents to preserve deletions. Files, modes, ownership and internal links are
 preserved; cross-root hardlinks and special files fail explicitly. The aggregate

@@ -641,6 +641,24 @@ Empty startup resets and unused build stages do not introduce requirements.
 Registry base-image metadata, named-user resolution and script behavior remain
 outside these source-only checks; no startup command or user is inferred.
 
+The explicit Nebius Terminus image preparation also accepts versioned official
+Debian PHP CLI bases, including `php:7.1-cli` and `php:8.3-cli-bookworm`.
+Optional Debian suffixes are `stretch`, `buster`, `bullseye`, `bookworm`, and
+`trixie`. It retains the original Dockerfile and PHP toolchain, adding the
+independent verifier interpreter and dependencies to a derived image. Alpine,
+unversioned PHP tags, other PHP image variants, and custom repositories require
+an explicit supported preparation path. Older distribution packages and task
+build commands still need successful image-build verification.
+
+For `uvx pytest` without a Python declaration, preparation uses uv's isolated
+tool resolver. A compatible managed interpreter may be installed when the image
+Python cannot satisfy the verifier dependencies. The task's interpreter and PATH
+remain unchanged. Explicit verifier Python versions are retained, and plain
+`pip install` bootstraps keep the image interpreter and its system packages.
+Resolved verifier dependency versions are recorded in the prepared image.
+The verifier tool directory is protected from mutable state transfers and
+mutable reference declarations, including references to its descendants.
+
 Literal local `COPY`/`ADD` sources are checked against their declared build
 context. Dockerfile heredoc bodies and `COPY --from` references are not mistaken
 for local files. Build-argument expansion, remote sources, `.dockerignore`

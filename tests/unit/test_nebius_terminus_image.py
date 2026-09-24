@@ -430,6 +430,9 @@ def test_pinned_uv_bootstraps_preserve_requirements_and_pytest_arguments(version
         'FROM python:3.9-slim\nCOPY <<-"FIRST" <<SECOND /tmp/\n\tFROM alpine:3.20\n\tFIRST\nSHELL []\nSECOND\n',
         "FROM node:18\nWORKDIR /app\n",
         "FROM node:22-bookworm-slim AS base\nFROM base AS task\n",
+        "FROM php:7.1-cli\nWORKDIR /app\n",
+        "FROM php:7.4.33-cli-buster\nWORKDIR /app\n",
+        "FROM php:8.3-cli-bookworm AS base\nFROM base AS task\n",
         "FROM rootproject/root:6.30.06-ubuntu22.04\nWORKDIR /app\n",
         "FROM rootproject/root:6.24.06-ubuntu20.04\nWORKDIR /app\n",
         "FROM --platform=linux/amd64 \\\n python:3.9-slim AS base\nFROM base AS task\n",
@@ -456,6 +459,11 @@ def test_preparation_identifies_final_stage_without_changing_task_python(
         ("FROM python:3.13-slim\nSHELL bash -c\n", "SHELL"),
         ("ARG BASE=ubuntu:24.04\nFROM ${BASE}\n", "Debian/Ubuntu"),
         ("FROM node:18-alpine\n", "Debian/Ubuntu"),
+        ("FROM php:8.3-cli-alpine\n", "Debian/Ubuntu"),
+        ("FROM php:cli\n", "Debian/Ubuntu"),
+        ("FROM php:8.3-fpm\n", "Debian/Ubuntu"),
+        ("FROM custom/php:7.1-cli\n", "Debian/Ubuntu"),
+        ("FROM php:8.3-cli-unknown\n", "Debian/Ubuntu"),
         ("FROM rootproject/root:6.30.06-fedora39\n", "Debian/Ubuntu"),
         ("FROM rootproject/root:latest\n", "Debian/Ubuntu"),
     ],
@@ -523,7 +531,7 @@ def test_apt_cleanup_does_not_hide_arbitrary_task_commands(suffix):
                                                "apt-get install -y curl primer3" + suffix))
 
 
-def test_uvx_without_python_pin_uses_base_interpreter_in_isolated_venv(tmp_path):
+def test_uvx_without_python_pin_resolves_its_isolated_tool_interpreter(tmp_path):
     environment = bundle(tmp_path)
     script = SCRIPT.replace('  -p 3.13 \\\n', '')
     (tmp_path / "tests/test.sh").write_text(script)
@@ -531,7 +539,13 @@ def test_uvx_without_python_pin_uses_base_interpreter_in_isolated_venv(tmp_path)
     assert result.python_version is None
     prepare_nebius_terminus_image(tmp_path, environment)
     derived = (tmp_path / environment["dockerfile"]).read_text()
-    assert '--python "$(command -v python3)" /opt/verifier' in derived
+    assert "loom-nebius-uv tool install" in derived
+    assert "UV_PYTHON_INSTALL_DIR=/opt/verifier-python" in derived
+    assert "--with pandas==2.3.3" in derived
+    assert "--with pytest-json-ctrf==0.3.5" in derived
+    assert "pytest==8.4.1" in derived
+    assert "ln -s /opt/verifier-tools/pytest /opt/verifier" in derived
+    assert '--python "$(command -v python3)"' not in derived
     assert "--system-site-packages" not in derived
     assert "/opt/verifier/bin/pytest --ctrf /logs/verifier/ctrf.json /tests/test_outputs.py -rA" in result.script
     assert result.script.endswith(script[script.index("if [ $? -eq 0 ]"):])

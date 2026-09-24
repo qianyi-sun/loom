@@ -436,6 +436,7 @@ def _preparation_dockerfile(
         r"|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?"
         r"|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?)"
         r"|node:[0-9]+(?:\.[0-9]+){0,2}(?:-(?:bookworm|bullseye|trixie)(?:-slim)?|-slim)?"
+        r"|php:[0-9]+\.[0-9]+(?:\.[0-9]+)?-cli(?:-(?:stretch|buster|bullseye|bookworm|trixie))?"
         r"|rootproject/root:[0-9]+\.[0-9]+\.[0-9]+-ubuntu(?:20\.04|22\.04|24\.04))",
         final_base,
     ):
@@ -475,16 +476,32 @@ def _preparation_dockerfile(
         }
     )
     requirements = shlex.join((*bootstrap.index_args, *bootstrap.requirements))
-    if bootstrap.python_version is None:
-        # No Python override uses the image interpreter. uvx still isolates its
-        # tool environment; plain pip scripts see the base task dependencies.
-        inherit = " --system-site-packages" if bootstrap.system_site_packages else ""
-        python_setup = f'loom-nebius-uv venv --python "$(command -v python3)"{inherit} /opt/verifier'
+    unpinned_tool = bootstrap.python_version is None and not bootstrap.system_site_packages
+    if unpinned_tool:
+        # Match uvx's tool resolution, including a managed Python when the
+        # image interpreter cannot satisfy the tool's Requires-Python metadata.
+        # Keep the tool and its interpreter outside the authored task PATH.
+        pytest_pin = next(item for item in bootstrap.requirements if item.startswith("pytest=="))
+        extras = tuple(
+            value for item in bootstrap.requirements if item != pytest_pin
+            for value in ("--with", item)
+        )
+        tool_args = shlex.join((*bootstrap.index_args, *extras, pytest_pin))
+        python_setup = (
+            "UV_PYTHON_INSTALL_DIR=/opt/verifier-python UV_TOOL_DIR=/opt/verifier-tools "
+            "UV_TOOL_BIN_DIR=/opt/verifier-tools/bin loom-nebius-uv tool install "
+            f"{tool_args} && ln -s /opt/verifier-tools/pytest /opt/verifier"
+        )
+    elif bootstrap.python_version is None:
+        # Plain pip scripts inherit the image interpreter and its dependencies.
+        python_setup = 'loom-nebius-uv venv --python "$(command -v python3)" --system-site-packages /opt/verifier'
     else:
         python_setup = (
             f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv python install {bootstrap.python_version} && "
             f"UV_PYTHON_INSTALL_DIR=/opt/verifier-python loom-nebius-uv venv --python {bootstrap.python_version} /opt/verifier"
         )
+    if not unpinned_tool:
+        python_setup += f" && loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements}"
     assets = "".join(
         run(f"mkdir -p /opt/verifier-assets && curl --fail --location {shlex.quote(url)} -o /opt/verifier-assets/{name} && chmod 644 /opt/verifier-assets/{name}")
         for url, name in bootstrap.downloads
@@ -514,7 +531,6 @@ def _preparation_dockerfile(
     # Disable only our uv download cache; never delete the image's HOME cache.
     preparation = run(f"""export UV_NO_CACHE=1 && apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
     {python_setup} && \\
-    loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
     {identity_setup} && \\
     {workspace_setup} && \\

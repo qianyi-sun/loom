@@ -30,6 +30,7 @@ def test_declared_paths_round_trip_and_become_required_execution_outputs():
     ["/data", "/data"], ["/app"], ["/app/tests"], ["/loom"], ["/proc"],
     ["/run"], ["/var"], ["/tests"], ["/solution"], ["/tmp"],
     ["/opt"], ["/opt/verifier"], ["/opt/verifier-python"], ["/opt/verifier-assets"],
+    ["/opt/verifier-tools"], ["/opt/verifier-tools/pytest/lib"],
     ["/data\x00bad"], [f"/data{i}" for i in range(17)],
 ])
 def test_unsafe_or_ambiguous_path_declarations_are_rejected(paths):
@@ -55,6 +56,7 @@ def test_exact_mutable_reference_files_round_trip_without_changing_defaults():
 @pytest.mark.parametrize("references", [
     ["/"], ["relative"], ["/usr/../tests/private"], ["/app/tool"], ["/cache/tool"],
     ["/tests/private"], ["/loom/tool"], ["/opt/verifier/bin/python"], ["/run/tool"],
+    ["/opt/verifier-tools"], ["/opt/verifier-tools/pytest/lib/python3.13/site-packages/_pytest/main.py"],
     ["/usr/bin/python", "/usr/bin/python"], [f"/usr/bin/ref{i}" for i in range(17)],
 ])
 def test_reference_files_cannot_overlap_transferred_or_private_state(references):

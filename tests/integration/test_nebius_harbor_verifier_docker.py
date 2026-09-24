@@ -152,3 +152,52 @@ def test_prepared_image_preserves_task_tools_and_records_resolved_dependencies(t
         except docker.errors.ImageNotFound:
             pass
         client.close()
+
+
+@pytest.mark.timeout(600)
+def test_unpinned_uvx_resolves_verifier_python_without_replacing_old_task_tools(tmp_path: Path):
+    import docker
+
+    original = (
+        "FROM php:7.1-cli\n"
+        "RUN sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g; "
+        "s|security.debian.org/debian-security|archive.debian.org/debian-security|g; "
+        "/buster-updates/d' /etc/apt/sources.list\nWORKDIR /app\n"
+    )
+    (tmp_path / "Dockerfile").write_text(original)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test.sh").write_text(
+        "uvx --with pytest==8.4.1 --with requests pytest /tests/test_example.py\n"
+    )
+    environment = {"dockerfile": "Dockerfile", "docker_build_context": ".", "workdir": "/app"}
+    prepare_nebius_terminus_image(tmp_path, environment)
+    tag = "loom-preparation-php-test:" + uuid4().hex
+    client = docker.from_env()
+    container = None
+    try:
+        result = subprocess.run(
+            ["docker", "build", "--tag", tag, "--file", str(tmp_path / environment["dockerfile"]), str(tmp_path)],
+            capture_output=True, text=True, timeout=480,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        container = client.containers.run(
+            tag, entrypoint="/bin/sh", command=["-exc", (
+                'php -r "exit(PHP_MAJOR_VERSION === 7 && PHP_MINOR_VERSION === 1 ? 0 : 1);"; '
+                'python3 -c "import sys; assert sys.version_info[:2] == (3, 7)"; '
+                '/opt/verifier/bin/python -c "import sys, pytest, requests; '
+                'assert sys.version_info >= (3, 9); assert pytest.__version__ == \'8.4.1\'"; '
+                '/opt/verifier/bin/pytest --version'
+            )],
+            network_mode="none", cap_drop=["ALL"],
+            security_opt=["no-new-privileges"], detach=True,
+        )
+        assert container.wait(timeout=30)["StatusCode"] == 0, container.logs().decode(errors="replace")
+        assert (tmp_path / "Dockerfile").read_text() == original
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        try:
+            client.images.remove(tag, force=True)
+        except docker.errors.ImageNotFound:
+            pass
+        client.close()
