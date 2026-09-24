@@ -38,6 +38,8 @@ from loom.nebius_environment_contract import FoundationBinding
 from loom.nebius_shared_ingress import SharedIngressInstallation
 from loom_execution_capacity_collector import kubernetes as accounting
 
+LIVE_POD_FIELD_SELECTOR = "status.phase!=Succeeded,status.phase!=Failed"
+
 
 class OperationError(RuntimeError):
     """Payload-free installation failure; never expose inventory or credentials."""
@@ -432,8 +434,15 @@ class LiveIngressAPI(KubectlCutoverAPI):
         try:
             self.verify_identity(self.binding)
             rows = []
-            for kind, arguments in (("Node", ["get", "nodes"]), ("Pod", ["get", "pods", "--all-namespaces"])):
-                listing = self._get(arguments)
+            # Terminal Pods are already excluded by qualify_capacity. Exclude
+            # them at the API too: retained Job history must not consume the
+            # bounded response budget needed to observe current workloads.
+            for kind, arguments in (("Node", ["get", "nodes"]),
+                                    ("Pod", ["get", "pods", "--all-namespaces", "--field-selector", LIVE_POD_FIELD_SELECTOR])):
+                # --ignore-not-found suppresses the entire JSON response for
+                # an empty filtered collection. Require the actual List so an
+                # empty inventory stays distinguishable from a missing read.
+                listing = json.loads(self._run([*arguments, "-o", "json"]))
                 if (listing is None or listing.get("kind") not in {"List", kind + "List"} or listing.get("apiVersion") != "v1"
                         or listing.get("metadata", {}).get("continue") or not isinstance(listing.get("items"), list)
                         or any(not isinstance(item, dict) or item.get("kind") != kind or item.get("apiVersion") != "v1"

@@ -96,6 +96,13 @@ unverified even when these checks pass. Reconcile retained journals before any
 mutating retry; this diagnostic does not authorize one or establish historical
 failure-time state.
 
+The capacity read excludes only `Succeeded` and `Failed` Pods at the API, matching
+the accounting rule that already ignores terminal Pods. All nonterminal Pods
+across all namespaces remain in scope, including pending and terminating foreign
+workloads. This keeps retained completed Job history out of the response budget
+without deleting it. The 4 MiB response limit, complete-list checks and capacity
+envelope remain enforced; an oversized live inventory still blocks installation.
+
 `observed` means inventory succeeded, not that personal environments are ready.
 The configured candidate is read from the platform ConfigMap, which rollout can
 update before migrations and workload replacement complete. It is not proof of
