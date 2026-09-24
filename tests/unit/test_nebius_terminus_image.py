@@ -428,6 +428,10 @@ def test_pinned_uv_bootstraps_preserve_requirements_and_pytest_arguments(version
     [
         "FROM python:3.9-slim\nWORKDIR /app\nRUN python3 <<'PY'\nfrom datetime import datetime\nPY\n",
         'FROM python:3.9-slim\nCOPY <<-"FIRST" <<SECOND /tmp/\n\tFROM alpine:3.20\n\tFIRST\nSHELL []\nSECOND\n',
+        "FROM node:18\nWORKDIR /app\n",
+        "FROM node:22-bookworm-slim AS base\nFROM base AS task\n",
+        "FROM rootproject/root:6.30.06-ubuntu22.04\nWORKDIR /app\n",
+        "FROM rootproject/root:6.24.06-ubuntu20.04\nWORKDIR /app\n",
         "FROM --platform=linux/amd64 \\\n python:3.9-slim AS base\nFROM base AS task\n",
     ],
 )
@@ -451,6 +455,9 @@ def test_preparation_identifies_final_stage_without_changing_task_python(
         ("FROM ubuntu:24.04 AS base\nFROM alpine:3.20\n", "Debian/Ubuntu"),
         ("FROM python:3.13-slim\nSHELL bash -c\n", "SHELL"),
         ("ARG BASE=ubuntu:24.04\nFROM ${BASE}\n", "Debian/Ubuntu"),
+        ("FROM node:18-alpine\n", "Debian/Ubuntu"),
+        ("FROM rootproject/root:6.30.06-fedora39\n", "Debian/Ubuntu"),
+        ("FROM rootproject/root:latest\n", "Debian/Ubuntu"),
     ],
 )
 def test_ambiguous_or_unsupported_image_preparation_does_not_write_outputs(
