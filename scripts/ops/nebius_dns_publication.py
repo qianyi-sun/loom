@@ -3,15 +3,24 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol, Self
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import dns.exception
+import dns.flags
+import dns.message
+import dns.name
+import dns.query
+import dns.rcode
+import dns.rdatatype
 import httpx
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_dns_challenge import _validate_token
+from scripts.ops.nebius_dns_challenge import _authorities, _validate_token
 
 _HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+")
 _ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -149,6 +158,83 @@ def _selected(provider: DNSProvider, name: str, address: str) -> dict[str, Any] 
             raise PublicationError("foreign DNS record at publication name")
         selected = row
     return selected
+
+
+def _dns_deadline(target: dict[str, Any], timeout: float) -> float:
+    validate_target(target)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 600:
+        raise PublicationError("invalid DNS observation deadline")
+    return time.monotonic() + timeout
+
+
+def _observe_addresses(target: dict[str, Any], names: tuple[str, str], servers: list[str], *,
+                       deadline: float, require_address: bool) -> bool:
+    complete = True
+    for server in servers:
+        for host in names:
+            wanted = dns.name.from_text(host)
+            for kind in (dns.rdatatype.A, dns.rdatatype.AAAA):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PublicationError("DNS observation deadline")
+                request = dns.message.make_query(wanted, kind)
+                request.flags &= ~dns.flags.RD
+                try:
+                    response = dns.query.udp(request, server, timeout=min(3, remaining))
+                    if response.flags & dns.flags.TC:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise PublicationError("DNS observation deadline")
+                        response = dns.query.tcp(request, server, timeout=min(3, remaining))
+                except dns.exception.DNSException:
+                    if not require_address:
+                        raise PublicationError("DNS authority unavailable before publication") from None
+                    complete = False
+                    continue
+                if (not response.flags & dns.flags.AA or response.flags & dns.flags.TC
+                        or any(row.rdtype in {dns.rdatatype.CNAME, dns.rdatatype.DNAME} for row in response.answer)):
+                    raise PublicationError("DNS alias or delegation requires separate qualification")
+                code = response.rcode()
+                values = [str(item) for row in response.answer if row.name == wanted and row.rdtype == kind for item in row]
+                if kind == dns.rdatatype.AAAA and values:
+                    raise PublicationError("IPv6 DNS route is outside the qualified IPv4 ingress")
+                if not require_address:
+                    if code not in {dns.rcode.NOERROR, dns.rcode.NXDOMAIN} or (values and values != [target["address"]]):
+                        raise PublicationError("DNS authority conflicts with the qualified ingress")
+                elif code != dns.rcode.NOERROR or (kind == dns.rdatatype.A and values != [target["address"]]):
+                    complete = False
+    return complete
+
+
+def qualify_authority(target: dict[str, Any], *, timeout: float = 30) -> None:
+    """Pre-write authority proof permits absent names, never aliases/delegation."""
+    deadline = _dns_deadline(target, timeout)
+    try:
+        servers = _authorities(target["zone"], deadline)
+        names = ("*." + target["child_domain"], target["management_host"])
+        _observe_addresses(target, names, servers, deadline=deadline, require_address=False)
+    except PublicationError:
+        raise
+    except Exception:
+        raise PublicationError("DNS authority unavailable before publication") from None
+
+
+def wait_for_addresses(target: dict[str, Any], *, timeout: float = 600) -> None:
+    """Prove wildcard synthesis and management A on every selected authority."""
+    deadline = _dns_deadline(target, timeout)
+    try:
+        servers = _authorities(target["zone"], deadline)
+        label = uuid4().hex[:min(32, 252 - len(target["child_domain"]))]
+        names = (label + "." + target["child_domain"], target["management_host"])
+        while time.monotonic() < deadline:
+            if _observe_addresses(target, names, servers, deadline=deadline, require_address=True):
+                return
+            time.sleep(min(5, max(0, deadline - time.monotonic())))
+        raise PublicationError("DNS propagation deadline")
+    except PublicationError:
+        raise
+    except Exception:
+        raise PublicationError("authoritative DNS propagation unavailable") from None
 
 
 def publish_dns(provider: DNSProvider, *, target: dict[str, Any], state_dir: Path,
