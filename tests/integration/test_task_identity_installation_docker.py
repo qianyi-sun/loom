@@ -264,3 +264,30 @@ echo '{}' > /logs/verifier/ctrf.json
     await run_verifier(controller, task, trial)
     result = json.loads((controller / ".loom/verifier/output.json").read_bytes())
     assert result["rewards"] == {"resolved": 1, "passed": 1}
+
+
+async def test_native_virtualenv_handoff_preserves_external_interpreter_and_aliases(sandboxes, tmp_path):
+    agent, verifier, _ = sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec("mkdir -p /app /root/.cache/task")).return_code == 0
+    made = await agent.exec(
+        "/usr/local/bin/python3.11 -m venv --without-pip /root/.cache/task/venv && "
+        "echo cache-state > /root/.cache/task/marker && "
+        "find /root/.cache/task/venv/bin -type l -exec readlink {} \\;"
+    )
+    assert made.return_code == 0, made.stderr
+    assert b"/usr/local/bin/python3.11" in made.stdout
+    await agent.stop_processes()
+    paths = (PurePosixPath("/root/.cache/task"),)
+    options = {"workdir": PurePosixPath("/app"),
+               "reference_files": (PurePosixPath("/usr/local/bin/python3.11"),)}
+    await export_mutable_paths(agent, paths, tmp_path / "snapshot", **options)
+    await import_mutable_paths(verifier, paths, tmp_path / "snapshot", **options)
+    links = await verifier.exec("find /root/.cache/task/venv/bin -type l -exec readlink {} \\;")
+    assert links.return_code == 0 and links.stdout == made.stdout
+    executed = await verifier.exec(
+        "/root/.cache/task/venv/bin/python -c 'import sys; from pathlib import Path; "
+        "assert sys.prefix == \"/root/.cache/task/venv\"; "
+        "assert Path(\"/root/.cache/task/marker\").read_text() == \"cache-state\\n\"; print(\"preserved\")'"
+    )
+    assert executed.return_code == 0 and executed.stdout.strip() == b"preserved"

@@ -243,18 +243,29 @@ def _validate_workspace_archive(
     policy: WorkspaceStagingPolicy,
     *,
     root: PurePosixPath | None = None,
+    external_reference_files: frozenset[PurePosixPath] = frozenset(),
 ) -> None:
     """Fail closed unless every archive entry is safe to overlay.
 
     Validation rejects ambiguous duplicate entries, traversal/absolute paths,
     every private path or link target, special files, hardlinks without a
     regular in-archive target, and entries nested below an archived symlink.
-    Absolute symlink targets require a declared root and must stay inside it.
+    Absolute symlink targets require a declared root and must stay inside it,
+    except exact external leaves whose fingerprints the mutable caller checks.
     Targets are checked without changing the archived strings.
     """
 
     if root is not None and (root.anchor != "/" or len(root.parts) < 2 or ".." in root.parts):
         raise WorkspaceSnapshotError("workspace destination must be an absolute non-root directory")
+    if external_reference_files:
+        from loom.mutable_paths import validate_mutable_reference_files
+
+        if root is None:
+            raise WorkspaceSnapshotError("external references require an absolute snapshot root")
+        try:
+            validate_mutable_reference_files(tuple(external_reference_files), paths=(root,), workdir=root)
+        except ValueError as exc:
+            raise WorkspaceSnapshotError("unsafe external snapshot reference") from exc
 
     from loom.trial.workspace_acls import validate_acl_headers
 
@@ -302,7 +313,8 @@ def _validate_workspace_archive(
                 )
 
     for path in symlink_targets:
-        _resolve_symlink_chain(path, symlink_targets, policy, root=root)
+        _resolve_symlink_chain(path, symlink_targets, policy, root=root,
+                               external_reference_files=external_reference_files)
 
     for path, target in hardlink_targets.items():
         seen = {path}
@@ -386,6 +398,7 @@ def _resolve_symlink_chain(
     policy: WorkspaceStagingPolicy,
     *,
     root: PurePosixPath | None,
+    external_reference_files: frozenset[PurePosixPath] = frozenset(),
 ) -> PurePosixPath:
     """Follow components in filesystem order, including links preceding ``..``.
 
@@ -393,6 +406,9 @@ def _resolve_symlink_chain(
     visited again after a parent component. Check each intermediate path so
     entering private state or leaving the root cannot be hidden by ``..``.
     """
+    raw_target = PurePosixPath(links[start])
+    if links[start] == str(raw_target) and raw_target in external_reference_files:
+        return raw_target
     absolute, parts = _symlink_components(links[start], root)
     stack = [] if absolute else list(start.parent.parts)
     pending = deque(parts)
@@ -415,6 +431,11 @@ def _resolve_symlink_chain(
                 raise WorkspaceSnapshotError(
                     f"workspace symlink cycle or chain exceeds 40 links: {start}",
                 )
+            raw_target = PurePosixPath(links[current])
+            if links[current] == str(raw_target) and raw_target in external_reference_files:
+                if pending:
+                    raise WorkspaceSnapshotError("external snapshot reference must be a terminal file")
+                return raw_target
             absolute, parts = _symlink_components(links[current], root)
             if absolute:
                 stack.clear()

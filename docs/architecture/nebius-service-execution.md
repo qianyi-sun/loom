@@ -749,6 +749,20 @@ Ownership that the verifier cannot
 restore is an explicit handoff failure. This does not copy an entire writable
 container layer or expose private verifier dependencies to task mutations.
 
+For a mutable-directory virtualenv that links to an unchanged image interpreter,
+the task may declare exact `environment.mutable_path_reference_files`, such as
+`["/usr/local/bin/python3.9"]`. This default-empty declaration permits at most
+16 executable regular-file leaves, outside the workdir, mutable directories,
+runtime mounts and private verifier paths. No component of a reference path may
+be a symlink. Source and fresh-verifier SHA-256, size, mode and numeric ownership
+must match before any mutable directory is cleared. Reference inspection is
+bounded to 256 MiB in total. A version-2 mutable manifest binds those fingerprints;
+tasks without references retain version 1. Original link strings and internal
+aliases are preserved, but an external reference must terminate the link chain:
+suffix traversal, external hardlinks and archived entries below links remain
+invalid. This declaration applies only to mutable-directory archives; it does
+not relax workdir snapshot validation or transfer edits to the referenced file.
+
 The workdir snapshot also replaces public image and bundle contents rather than
 overlaying them, so files and symlinks removed by the agent stay absent during
 grading. Freshly staged private verifier inputs and their ancestors survive.

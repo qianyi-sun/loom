@@ -12,6 +12,7 @@ pytestmark = pytest.mark.docker
 @pytest.fixture
 async def reference_drivers():
     import docker
+
     from loom.driver.base import StartOptions
     from loom.driver.docker import DockerDriver
 

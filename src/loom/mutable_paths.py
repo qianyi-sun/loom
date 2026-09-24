@@ -25,3 +25,20 @@ def validate_mutable_paths(paths: tuple[PurePosixPath, ...], *, workdir: PurePos
             if path.is_relative_to(other) or other.is_relative_to(path):
                 raise ValueError(f"mutable_paths overlap a workspace, protected or declared path: {path}")
         previous.append(path)
+
+
+def validate_mutable_reference_files(
+    references: tuple[PurePosixPath, ...], *, paths: tuple[PurePosixPath, ...], workdir: PurePosixPath,
+) -> None:
+    """Exact external leaves never grant authority over an ancestor directory."""
+    if not references:
+        return
+    if not paths or len(references) > 16 or len(set(references)) != len(references):
+        raise ValueError("mutable_path_reference_files requires mutable roots and at most 16 unique files")
+    for reference in references:
+        if (reference.anchor != "/" or len(reference.parts) < 2 or ".." in reference.parts
+                or "\x00" in str(reference) or len(str(reference)) > 4096):
+            raise ValueError("mutable_path_reference_files requires canonical absolute files")
+        for other in (workdir, *paths, *_PROTECTED):
+            if reference.is_relative_to(other) or other.is_relative_to(reference):
+                raise ValueError("mutable_path_reference_files overlaps transferred or protected state")

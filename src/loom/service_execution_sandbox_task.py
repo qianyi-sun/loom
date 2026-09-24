@@ -247,6 +247,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
                                 workdir=task.environment.workdir,
                                 preserve_acls=task.environment.preserve_acls,
+                                reference_files=task.environment.mutable_path_reference_files,
                             )
                         for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
@@ -351,6 +352,7 @@ async def _run_verifier(
                 driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
                 workdir=task.environment.workdir,
                 preserve_acls=task.environment.preserve_acls,
+                reference_files=task.environment.mutable_path_reference_files,
             )
         remote_output = (
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
