@@ -17,6 +17,7 @@ from loom.data_lifecycle_gc_sql import ExecutionMetadataPurger
 from loom.db.schema import (
     Batch,
     DataLifecycleAuthority,
+    ServiceExecutionClass,
     ServiceExecutionLease,
     ServiceExecutionTarget,
     Trial,
@@ -42,6 +43,9 @@ async def native_usage(postgres_url: str, resource_seed: dict[str, Any]):  # noq
     now = datetime.now(UTC)
     lease_id, authority_id = uuid4(), uuid4()
     async with sessions() as session, session.begin():
+        created_execution_class = (
+            await session.get(ServiceExecutionClass, target.execution_class_id) is None
+        )
         await persist_execution_catalog(
             session, execution_class=NEBIUS_CPU_EXECUTION_CLASS_V1, targets=(target,)
         )
@@ -146,6 +150,12 @@ async def native_usage(postgres_url: str, resource_seed: dict[str, Any]):  # noq
             await session.execute(
                 delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target.target_id)
             )
+            if created_execution_class:
+                await session.execute(
+                    delete(ServiceExecutionClass).where(
+                        ServiceExecutionClass.id == target.execution_class_id
+                    )
+                )
         await engine.dispose()
 
 
