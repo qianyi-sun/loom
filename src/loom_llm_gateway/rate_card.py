@@ -41,12 +41,15 @@ class CostEstimate:
     pricing_source: str | None = None
     rate_card_provider: str | None = None
     unpriced_reason: str | None = None
+    price_basis: dict[str, Any] | None = None
 
     def provider_extras(self) -> dict[str, Any]:
         extras: dict[str, Any] = {
             COST_META_SOURCE_KEY: self.source,
             COST_META_CONFIDENCE_KEY: self.confidence,
         }
+        if self.price_basis is not None:
+            extras["_loom_price_basis"] = self.price_basis
         if self.currency:
             extras[COST_META_CURRENCY_KEY] = self.currency
         if self.pricing_source:

@@ -76,7 +76,7 @@ export default function UsageDashboard(): JSX.Element {
         <h1 className="text-2xl font-bold text-slate-900">Usage</h1>
         <p className="mt-1 text-sm text-slate-500">
           Trials, tokens, and estimated LLM cost per bucket over the selected
-          range. Cost is derived from recorded LLM calls and active rate cards.
+          range. Estimates use the prices recorded when each LLM call was made.
         </p>
       </header>
 

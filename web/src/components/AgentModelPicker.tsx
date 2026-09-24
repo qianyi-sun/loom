@@ -1,3 +1,4 @@
+import ModelPriceNotice from "./providers/ModelPriceNotice";
 import { Link } from "react-router-dom";
 import { agentReadinessMessage, agentServiceModeReady } from "../lib/agentReadiness";
 import { Button } from "./Button";
@@ -92,6 +93,8 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
           ))}
         </select>
       </label>
+
+      <ModelPriceNotice connection={connectionList.find(c => c.id === value.providerConnectionId)} model={value.modelName} />
 
       {connectionList.length === 0 && !providerConnections.isPending ? (
         <div className="rounded border border-slate-200 bg-slate-50 p-4 text-center text-sm">

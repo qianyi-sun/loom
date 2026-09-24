@@ -117,16 +117,29 @@ def usage_reporting_extras(
     return extras
 
 
+def _openai_cache_usage(u: dict[str, Any], key: str) -> dict[str, Any]:
+    details = u.get(key)
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    valid = isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0
+    output_details = u.get("completion_tokens_details") or u.get("output_tokens_details") or {}
+    audio_used = (isinstance(details, dict) and bool(details.get("audio_tokens"))) or (
+        isinstance(output_details, dict) and bool(output_details.get("audio_tokens")))
+    return {
+        "_loom_unsupported_billing": bool(audio_used),
+        "_loom_input_includes_cache": True,
+        "_loom_cache_usage_known": valid,
+        **({"cache_read_input_tokens": cached} if valid else {}),
+    }
+
+
 def _openai_chat(r: dict[str, Any]) -> TokenUsage:
     raw = r.get("usage")
     u = raw if isinstance(raw, dict) else {}
     return TokenUsage(
         input_tokens=_coerce_token_count(u.get("prompt_tokens")),
         output_tokens=_coerce_token_count(u.get("completion_tokens")),
-        provider_extras=usage_reporting_extras(
-            raw,
-            required_keys=("prompt_tokens", "completion_tokens"),
-        ),
+        provider_extras={**usage_reporting_extras(raw, required_keys=("prompt_tokens", "completion_tokens")),
+                         **_openai_cache_usage(u, "prompt_tokens_details")},
     )
 
 
@@ -137,6 +150,7 @@ def _openai_responses(r: dict[str, Any]) -> TokenUsage:
         raw,
         required_keys=("input_tokens", "output_tokens"),
     )
+    extras.update(_openai_cache_usage(u, "input_tokens_details"))
     details = u.get("output_tokens_details") or {}
     rt = details.get("reasoning_tokens")
     if rt is not None:
@@ -154,6 +168,10 @@ def _anthropic(r: dict[str, Any]) -> TokenUsage:
     extras: dict[str, Any] = usage_reporting_extras(
         raw,
         required_keys=("input_tokens", "output_tokens"),
+    )
+    extras["_loom_cache_usage_known"] = all(
+        isinstance(u.get(key), int) and not isinstance(u[key], bool) and u[key] >= 0
+        for key in ("cache_creation_input_tokens", "cache_read_input_tokens")
     )
     for k in ("cache_creation_input_tokens", "cache_read_input_tokens"):
         v = u.get(k)
@@ -173,6 +191,9 @@ def _gemini(r: dict[str, Any]) -> TokenUsage:
         raw,
         required_keys=("promptTokenCount", "candidatesTokenCount"),
     )
+    extras["_loom_input_includes_cache"] = True
+    cached = u.get("cachedContentTokenCount")
+    extras["_loom_cache_usage_known"] = isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0
     for k in ("cachedContentTokenCount", "thoughtsTokenCount"):
         v = u.get(k)
         if v is not None:

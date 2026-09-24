@@ -24,7 +24,7 @@ Trust boundary:
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -42,6 +42,7 @@ from loom.db.schema import (
     Team,
     TeamQuota,
 )
+from loom.provider_pricing import ModelPrice
 from loom.security.secret_store import (
     InvalidRefError,
     LocalEncryptedSecretStore,
@@ -53,21 +54,23 @@ from loom_service.auth_guards import is_admin, require_scope
 from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connections_service import (
     InvalidBaseUrlError,
-    InvalidPricingError,
     ModelPreflightResult,
     ProbeResult,
     SsrfRejectedError,
     UpstreamModelFetchError,
-    default_pricing_source_for,
-    default_rate_card_provider_for,
     fetch_upstream_models,
     preflight_failure_kind,
     preflight_model,
     probe_connection,
     resolve_and_validate,
-    validate_pricing,
 )
 from loom_service.provider_model_classifier import classify_model_id
+from loom_service.provider_pricing import (
+    apply_config,
+    ensure_catalog_share_compatible,
+    pricing_response,
+    resolve_config,
+)
 from loom_service.provider_secret_gc import retire_provider_secret
 
 router = APIRouter()
@@ -100,15 +103,10 @@ class ProviderConnectionCreate(BaseModel):
     # raw secret; the route encrypts via SecretStore before persisting.
     api_key: str = Field(min_length=1)
     allowed_models: list[str] | None = Field(default=None)
-    # If omitted, defaults per provider_type:
-    #   anthropic, google → rate-card
-    #   openai-compatible, custom → tokens-only
-    pricing_source: str | None = Field(default=None)
-    # Required if pricing_source='operator-supplied'; rejected otherwise.
-    pricing_data: dict[str, float] | None = Field(default=None)
-    # Optional rate-card provider namespace used by facade-routed calls
-    # when pricing_source='rate-card' (e.g. openai, together, fireworks).
-    rate_card_provider: str | None = Field(default=None, min_length=1, max_length=128)
+    pricing_mode: Literal["usage_only", "catalog", "custom"] | None = None
+    custom_pricing: dict[str, ModelPrice] | None = None
+    supplier_id: str | None = Field(default=None, max_length=128)
+    catalog_id: str | None = Field(default=None, max_length=256)
 
 
 class ProviderConnectionUpdate(BaseModel):
@@ -123,9 +121,10 @@ class ProviderConnectionUpdate(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     allowed_models: list[str] | None = None
-    pricing_source: str | None = None
-    pricing_data: dict[str, float] | None = None
-    rate_card_provider: str | None = Field(default=None, min_length=1, max_length=128)
+    pricing_mode: Literal["usage_only", "catalog", "custom"] | None = None
+    custom_pricing: dict[str, ModelPrice] | None = None
+    supplier_id: str | None = Field(default=None, max_length=128)
+    catalog_id: str | None = Field(default=None, max_length=256)
 
 
 class ProviderConnectionResponse(BaseModel):
@@ -142,9 +141,11 @@ class ProviderConnectionResponse(BaseModel):
     status: str
     last_validated_at: datetime | None
     last_validation_error: str | None
-    pricing_source: str
-    pricing_data: dict[str, float] | None
-    rate_card_provider: str | None
+    pricing_mode: Literal["usage_only", "catalog", "custom"]
+    custom_pricing: dict[str, ModelPrice] | None
+    supplier_id: str | None
+    catalog_id: str | None
+    legacy_pricing: dict[str, Any] | None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -306,9 +307,7 @@ def _row_to_response(row: ProviderConnection) -> ProviderConnectionResponse:
         status=row.status,
         last_validated_at=row.last_validated_at,
         last_validation_error=row.last_validation_error,
-        pricing_source=row.pricing_source,
-        pricing_data=row.pricing_data,
-        rate_card_provider=row.rate_card_provider,
+        **pricing_response(row),
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -532,17 +531,10 @@ async def create_connection(
             detail=f"type must be one of {_PROVIDER_TYPES}",
         )
 
-    # Pricing defaults by provider type if not explicitly set.
-    pricing_source = payload.pricing_source or default_pricing_source_for(payload.type)
-    rate_card_provider = (
-        payload.rate_card_provider
-        if payload.rate_card_provider is not None
-        else default_rate_card_provider_for(payload.type)
-    )
-    try:
-        validate_pricing(pricing_source, payload.pricing_data)
-    except InvalidPricingError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    pricing = await resolve_config(session, team_id, payload.model_dump(
+        include={"pricing_mode", "custom_pricing", "supplier_id", "catalog_id"},
+        exclude_unset=True, mode="json",
+    ))
 
     # SSRF defense layer 3: resolve + classify the upstream IPs against
     # the team's policy. Failure here is a 400; the user can fix the
@@ -583,9 +575,8 @@ async def create_connection(
         encrypted_api_key_ref=encrypted_ref,
         allowed_models=payload.allowed_models,
         status="pending",  # /test route flips to 'valid' / 'invalid'
-        pricing_source=pricing_source,
-        pricing_data=payload.pricing_data,
-        rate_card_provider=rate_card_provider,
+        pricing_source="tokens-only",
+        pricing_config=pricing.model_dump(mode="json"),
         # Per spec audit format: "<token-type>:<token-id-suffix>".
         # token_hash is bytes (sha256 digest); hex-encode the prefix
         # for a stable printable suffix without leaking the full hash.
@@ -616,8 +607,8 @@ async def create_connection(
         metadata=_provider_audit_metadata(
             row,
             extra={
-                "pricing_source": pricing_source,
-                "rate_card_provider": rate_card_provider,
+                "pricing_mode": pricing.pricing_mode,
+                "catalog_id": pricing.catalog_id,
                 "allowed_models_present": payload.allowed_models is not None,
             },
         ),
@@ -707,8 +698,14 @@ async def share_connection(
 ) -> ProviderConnectionShareResponse:
     session, ctx = sc
     _require_provider_management(ctx)
-    row = await _get_active_connection(session, connection_id, ctx)
+    row = await _get_active_connection(session, connection_id, ctx, for_update=True)
     _require_provider_owner_or_admin(ctx, row)
+    if row.pricing_config and row.pricing_config.get("catalog_id"):
+        from loom.db.schema import PriceCatalog
+        catalog = await session.get(PriceCatalog, row.pricing_config["catalog_id"])
+        if catalog is not None and catalog.team_id is not None:
+            raise HTTPException(400, "Connections using team-private price catalogs cannot be shared across teams.")
+
 
     if payload.target_team_id == row.team_id:
         raise HTTPException(
@@ -843,28 +840,21 @@ async def update_connection(
         # `test` route (Phase 2 follow-up) will flip back to 'valid'.
         row.status = "pending"
 
-    # Pricing change: re-validate the combined source + data.
-    if payload.pricing_source is not None or payload.pricing_data is not None:
+    pricing_fields = {"pricing_mode", "custom_pricing", "supplier_id", "catalog_id"}
+    if payload.model_fields_set & pricing_fields:
+        changes = payload.model_dump(include=pricing_fields, exclude_unset=True, mode="json")
+        # Existing legacy monetary settings require an explicit complete choice;
+        # editing endpoint/models alone leaves them untouched.
+        if row.pricing_config is None and row.pricing_source != "tokens-only" and "pricing_mode" not in changes:
+            raise HTTPException(400, "select a pricing mode to replace legacy pricing")
+        config = await resolve_config(session, row.team_id, changes, previous=row.pricing_config)
+        await ensure_catalog_share_compatible(session, row, config)
+        apply_config(row, config)
         changed_fields.append("pricing")
-        new_source = payload.pricing_source or row.pricing_source
-        new_data = (
-            payload.pricing_data if payload.pricing_data is not None
-            else row.pricing_data
-        )
-        try:
-            validate_pricing(new_source, new_data)
-        except InvalidPricingError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        row.pricing_source = new_source
-        row.pricing_data = new_data
 
     if payload.allowed_models is not None:
         changed_fields.append("allowed_models")
         row.allowed_models = payload.allowed_models
-
-    if payload.rate_card_provider is not None:
-        changed_fields.append("rate_card_provider")
-        row.rate_card_provider = payload.rate_card_provider
 
     # API key rotation encrypts the new value and swaps the active ref.
     # Retirement is committed atomically with the swap; GC observes a full grace.

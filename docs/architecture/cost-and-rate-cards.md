@@ -105,8 +105,10 @@ cost = (input_tokens  / 1_000_000) * input_per_mtok
      + (cache_write   / 1_000_000) * cache_write_per_mtok
 ```
 
-Cache tokens come from `provider_extras`; missing keys default to 0
-so providers without cache counters compute correctly.
+Cache tokens come from `provider_extras`. New connection pricing subtracts
+cache tokens from OpenAI/Google inclusive input totals; Anthropic counters are
+separate. Missing required cache evidence or an unpriced used cache dimension
+produces an unknown estimate, never an implicit zero charge.
 
 ## Where the table lives
 
@@ -121,53 +123,74 @@ Service: missing row → `RateCardNotFoundError` (HTTP 422 from the
 Gateway), so a misconfigured provider fails fast instead of silently
 recording $0.
 
-Provider-connection facade routes use the same service table, but the
-lookup key comes from the connection rather than the legacy
-`provider/model` routing string. `provider_connections.rate_card_provider`
-stores the provider namespace to use with the raw request model id. Safe
-defaults are `anthropic`, `google`, and `openai` for
-`openai-compatible`; `custom` has no default. When a facade connection is
-set to `pricing_source='rate-card'` and no matching entry exists, the
-gateway records tokens with `cost_usd=0`,
-`rate_card_hash='facade:rate-card:missing'`, and provider extras marking
-`_loom_cost_source=unpriced`,
-`_loom_cost_confidence=unavailable`, and
-`_loom_unpriced_reason=missing_rate_card_entry`. API projections expose
-that as `estimated_cost_usd=null` and `cost_status=price_unknown` so an
-unpriced model such as `glm-5.1-thinking` is never presented as a
-zero-dollar run. Trial and batch responses still show the non-zero call
-count and token totals in this case.
+## Provider connection pricing
 
-For hosted YibuAPI usage, sync the official pricing catalog into the
-service rate-card table:
+Provider connections expose `pricing_mode`, `custom_pricing`, `supplier_id`,
+and `catalog_id`. Every connection has exactly one mode:
 
-```bash
-loom admin rate-cards sync-yibuapi
-```
+- `usage_only`: record tokens; monetary cost is not applicable.
+- `catalog`: use one accessible supplier or team catalog; unmatched models are unknown.
+- `custom`: use exact model-specific prices; unconfigured models are unknown.
 
-The service fetches `https://yibuapi.com/api/pricing`, converts token
-quota models into USD-per-1M-token entries using YibuAPI's group ratio,
-and stores the catalog with `source_url`, `pricing_version`,
-`last_checked_at`, `currency`, `group`, `group_ratio`, entry count, and
-skipped model count. Model lookup normalizes common prefixes such as
-`yibuapi/<model>` and `models/<model>`. The synced card is auditable by
-its stored JSON payload and `rate_card_hash`. Trial and batch detail
-responses include `price_snapshots` for resolved historical hashes with
-the rate-card id, source URL, pricing version, check time, currency,
-group, and group ratio; unresolved non-facade hashes remain visible with
-`resolved=false`.
+There is no per-model override, cross-catalog fallback, or fuzzy model match.
+Selecting a supported supplier at creation defaults to its catalog unless the
+caller explicitly chooses another mode. API protocol never determines supplier
+identity. Existing connections are not automatically opted into new pricing.
 
-Protected rollout profiles can keep this from drifting by declaring
-`[rate_card_sync.yibuapi]` and hosted provider pricing defaults. The
-one-command rollout driver applies those declarations after cluster-up
-and before release-gate/smoke, so a fresh DB-backed rollout does not lose
-the official YibuAPI rate card or revert the hosted provider to
-`tokens-only`.
+Supported public sources (default purchasing group):
 
-Authenticated Service reads use the shared `rate_cards` database authority
-directly, including browser sessions. Mutations still cross the Gateway admin
-surface with the caller's bearer credential and require `admin:rate_cards`;
-the Service never substitutes an operator secret for a browser session.
+| Supplier | Catalog ID | Authoritative source |
+| --- | --- | --- |
+| YibuAPI | `supplier:yibuapi` | <https://yibuapi.com/api/pricing> |
+| AZ GPTPlus5 | `supplier:az-gptplus5` | <https://az.gptplus5.com/api/pricing> (page: <https://az.gptplus5.com/pricing>) |
+
+The owner confirmed AZ GPTPlus5's `default` group for `loom-testing` and
+`loom-runs`. Both suppliers publish New API token ratios: input USD/M =
+`model_ratio * 2 * group_ratio`; output and cache ratios multiply this base.
+Only models enabled for the selected group and representable token billing are
+included. Missing cache prices remain unknown. Tiered/per-request pricing is
+not approximated. No foreign-currency conversion is performed.
+
+The Service's background loop checks shared supplier catalogs every five minutes
+and refreshes when the last attempt is at least six hours old. Database row
+locking prevents concurrent replicas from publishing overlapping updates. A
+bounded fetch and complete validation precede one atomic replacement. Failures
+retain the last valid table and expose a stale/error indication; an empty or
+invalid first update leaves prices unknown. `loom providers catalogs sync ID`
+lets a platform administrator request an immediate update.
+
+`price_catalogs` is separate from legacy global `rate_cards` so team-private
+prices cannot leak through old global read endpoints. Connections using a team-private
+catalog cannot be shared across teams, since call snapshots would disclose its prices. `/api/v1/price-catalogs`
+lists public and current-team catalogs. Team administrators create and import
+team catalogs; platform administrators synchronize public supplier catalogs.
+Imports use a preview and expected revision to reject concurrent overwrites.
+
+Every new call records its exact price basis in `_loom_price_basis`, including
+model, prices, USD unit, source/catalog revision and cache overlap semantics.
+Changes apply to later calls only. Usage projections show unknown prices as
+`estimated_cost_usd=null`, preserve priced zero, and distinguish mixed totals as
+known subtotals with unpriced-call counts. These are estimates, not invoices.
+Hard monetary budgets continue to require a usable estimate.
+
+### Legacy migration and rollback
+
+Migration 0159 adds nullable connection configuration and catalog storage without
+rewriting existing connections or historical calls. A null configuration uses
+the existing calculation path. Public reads expose `legacy_pricing` with the
+old uniform price or namespace; unrelated PATCHes preserve it. Replacing legacy
+pricing requires an explicit mode and complete applicable configuration. New
+custom tables never inherit the legacy price for subsequently discovered models.
+
+A pricing PATCH treats omission as retention and null as clearing. A mode
+transition clears inactive custom/catalog configuration. New rows retain valid
+legacy storage columns with usage-only semantics; older binaries cannot compute
+new model-specific prices. **Do not roll back the application alone after
+activating new pricing.** Export the connection configurations and catalogs,
+restore the previous database backup and compatible application together, or
+explicitly revert connections after reviewing the export. The migration refuses
+a destructive downgrade while new configuration or catalog data exists. A
+no-data migration upgrade/downgrade leaves legacy data intact.
 
 ## Usage API and CLI
 
@@ -213,36 +236,37 @@ Local trials default to **$0** if no row matches — they don't
 incur a real upstream cost. Add a row to attribute internal GPU
 budget; leave it absent to ignore.
 
-For BYO OpenAI-compatible services registered through
-`loom providers create`, set `--rate-card-provider PROVIDER` when the
-endpoint should use a hosted provider's rate-card namespace:
+For a supported supplier:
 
 ```bash
-loom providers create \
-  --name together-prod \
-  --type openai-compatible \
-  --base-url https://api.together.xyz/v1 \
-  --api-key env:TOGETHER_API_KEY \
-  --rate-card-provider together
+loom providers create --name testing --type openai-compatible \
+  --base-url "$PROVIDER_BASE_URL" --api-key env:PROVIDER_API_KEY \
+  --supplier-id az-gptplus5
+loom providers catalogs list
+loom providers update testing --pricing-mode usage_only
+loom providers update testing --pricing-mode custom --price-file prices.csv
 ```
 
-The connection still defaults to `pricing_source='tokens-only'` for
-OpenAI-compatible endpoints; switch it with
-`loom providers update NAME --pricing-source rate-card --rate-card-provider PROVIDER`
-only when the service rate-card table has rows for that provider/model pair. For
-user-managed or self-deployed APIs, keep `tokens-only`: Loom records
-token totals and returns `estimated_cost_usd=null` with
-`cost_status='not_applicable'` rather than inventing a dollar amount.
-Operator-supplied/manual pricing is supported by setting
-`pricing_source='operator-supplied'` with `pricing_data` keys
-`input_usd_per_1m` and `output_usd_per_1m`; facade calls then carry
-`cost_estimate_source='operator-supplied'` and
-`cost_estimate_confidence='configured'`.
-Rate-card metadata is optional for launch selection: BYO provider model
-discovery and manual model ids are exposed through `/api/v1/models`
-even when no matching rate-card entry exists. Missing facade pricing is
-reported with `rate_card_hash='facade:rate-card:missing'` rather than
-blocking evaluation.
+CSV columns are `model,input_usd_per_1m,output_usd_per_1m,cache_read_usd_per_1m,cache_write_usd_per_1m`.
+JSON uses an array of objects with the same field names. Base input/output values
+are required, finite, nonnegative USD per million tokens. Blank cache cells are
+unknown; zero is valid. Duplicate models, malformed rows and unsupported columns
+reject the complete import. A connection price file replaces the custom table;
+omitted models become unpriced. To explicitly apply one price set to several
+models, repeat `--price-model MODEL` with `--input-usd-per-1m` and
+`--output-usd-per-1m` (plus optional cache rates). Numeric updates preserve
+other models' configured prices; `--price-file` explicitly replaces the full table.
+
+```bash
+loom providers catalogs create --name "Negotiated rates" --price-file prices.csv
+loom providers catalogs import TEAM_CATALOG_ID --price-file prices.csv --revision 1
+# After reviewing the preview, repeat with --apply.
+loom providers update testing --pricing-mode catalog --catalog-id TEAM_CATALOG_ID
+```
+
+The Web Provider form supports searchable model rows, numeric editing, selected
+row copying, CSV/JSON preview/import, and saving custom prices as a team catalog.
+Saving uses only the active mode; switching an unsaved form retains its drafts.
 
 The local CLI vLLM helper (`--model hf:<id>` / `--model /path/`)
 registers as provider `local:_auto_vllm`. Rate-card rows for that

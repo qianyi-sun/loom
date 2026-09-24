@@ -1,4 +1,5 @@
 export interface UsageCostLike {
+  price_unknown_llm_calls_count?: number | null;
   total_cost_usd?: number | null;
   estimated_cost_usd?: number | null;
   cost_currency?: string | null;
@@ -31,8 +32,9 @@ export function formatUsageCost(item: UsageCostLike): string {
     return "n/a";
   }
   const currency = item.cost_currency ?? "USD";
-  if (currency === "USD") return `$${value.toFixed(4)}`;
-  return `${value.toFixed(4)} ${currency}`;
+  const amount = currency === "USD" ? `$${value.toFixed(4)}` : `${value.toFixed(4)} ${currency}`;
+  if (item.cost_status === "mixed") return `${amount} known subtotal (${item.price_unknown_llm_calls_count ?? "some"} unpriced calls)`;
+  return amount;
 }
 
 /** Old trajectory snapshots use zero placeholders; the frozen pricing marker
@@ -46,7 +48,7 @@ export function formatTrajectoryCost(event: Record<string, unknown>): string {
     return formatUsageCost({ estimated_cost_usd: null, cost_status: "failed_upstream" });
   }
   const amount = event.cost_usd_snapshot;
-  if (!marker || marker.startsWith("facade:rate-card:missing")
+  if (!marker || marker === "facade:price-unknown" || marker.startsWith("facade:rate-card:missing")
       || marker === "facade:operator-supplied:invalid"
       || typeof amount !== "number" || !Number.isFinite(amount)) {
     return formatUsageCost({ estimated_cost_usd: null, cost_status: "price_unknown" });
@@ -85,6 +87,7 @@ export function summarizeUsageCost(items: UsageCostLike[]): UsageCostLike {
   const confidences = new Set<string>();
   let partialUsageCalls = 0;
   let missingUsageCalls = 0;
+  let unpricedCalls = 0;
 
   for (const item of items) {
     const amount = usageCostAmount(item);
@@ -103,6 +106,7 @@ export function summarizeUsageCost(items: UsageCostLike[]): UsageCostLike {
     }
     partialUsageCalls += item.partial_usage_llm_calls_count ?? 0;
     missingUsageCalls += item.missing_usage_llm_calls_count ?? 0;
+    unpricedCalls += item.price_unknown_llm_calls_count ?? 0;
   }
 
   let costStatus = "unknown";
@@ -131,5 +135,6 @@ export function summarizeUsageCost(items: UsageCostLike[]): UsageCostLike {
     usage_estimate_confidence: usageConfidence,
     partial_usage_llm_calls_count: partialUsageCalls,
     missing_usage_llm_calls_count: missingUsageCalls,
+    price_unknown_llm_calls_count: unpricedCalls,
   };
 }

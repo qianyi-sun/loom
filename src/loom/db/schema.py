@@ -10108,6 +10108,30 @@ class RateCard(Base):
     table: Mapped[dict[str, Any]] = mapped_column("table", JSONB, nullable=False)
 
 
+class PriceCatalog(Base):
+    """One public supplier or team-private catalog; replace prices atomically."""
+
+    __tablename__ = "price_catalogs"
+    __table_args__ = (
+        CheckConstraint("supplier_id IS NULL OR team_id IS NULL", name="price_catalog_supplier_public"),
+        Index("price_catalogs_team_idx", "team_id"),
+    )
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    team_id: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    supplier_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prices: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    aliases: Mapped[dict[str, str]] = mapped_column(JSONB, nullable=False, default=dict)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class ModelSwitchPlan(Base):
     """Immutable K1/K2 plan for a terminus-2 multi-model trial (#1380)."""
 
@@ -10739,6 +10763,7 @@ class ProviderConnection(Base):
         Text,
         nullable=True,
     )
+    pricing_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     pricing_source: Mapped[str] = mapped_column(
         Text,
         nullable=False,

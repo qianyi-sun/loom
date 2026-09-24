@@ -1672,6 +1672,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/price-catalogs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Price Catalogs */
+        get: operations["list_price_catalogs_api_v1_price_catalogs_get"];
+        put?: never;
+        /** Create Price Catalog */
+        post: operations["create_price_catalog_api_v1_price_catalogs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/price-catalogs/{catalog_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Price Catalog */
+        get: operations["get_price_catalog_api_v1_price_catalogs__catalog_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/price-catalogs/{catalog_id}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Import Price Catalog */
+        post: operations["import_price_catalog_api_v1_price_catalogs__catalog_id__import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/price-catalogs/{catalog_id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Sync Price Catalog */
+        post: operations["sync_price_catalog_api_v1_price_catalogs__catalog_id__sync_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/price-imports/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview Model Prices */
+        post: operations["preview_model_prices_api_v1_price_imports_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/provider-connections": {
         parameters: {
             query?: never;
@@ -3332,6 +3418,96 @@ export interface components {
             /** Verifier */
             verifier?: string | null;
         };
+        /** CatalogCreate */
+        CatalogCreate: {
+            /** Aliases */
+            aliases?: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+            /** Prices */
+            prices: {
+                [key: string]: components["schemas"]["ModelPrice"];
+            };
+        };
+        /** CatalogImport */
+        CatalogImport: {
+            /**
+             * Apply
+             * @default false
+             */
+            apply: boolean;
+            /** Content */
+            content: string;
+            /** Expected Revision */
+            expected_revision: number;
+            /**
+             * Format
+             * @enum {string}
+             */
+            format: "csv" | "json";
+        };
+        /** CatalogImportResponse */
+        CatalogImportResponse: {
+            /** Applied */
+            applied: boolean;
+            catalog: components["schemas"]["CatalogResponse"];
+            /** Summary */
+            summary: {
+                [key: string]: string[];
+            };
+        };
+        /** CatalogListResponse */
+        CatalogListResponse: {
+            /** Items */
+            items: components["schemas"]["CatalogResponse"][];
+        };
+        /** CatalogResponse */
+        CatalogResponse: {
+            /** Aliases */
+            aliases?: {
+                [key: string]: string;
+            };
+            /** Checked At */
+            checked_at: string | null;
+            /**
+             * Currency
+             * @constant
+             */
+            currency: "USD";
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Prices */
+            prices: {
+                [key: string]: components["schemas"]["ModelPrice"];
+            };
+            /** Revision */
+            revision: number;
+            /** Source Metadata */
+            source_metadata: {
+                [key: string]: unknown;
+            };
+            /** Source Url */
+            source_url: string | null;
+            /** Stale */
+            stale: boolean;
+            /** Supplier Id */
+            supplier_id: string | null;
+            /** Sync Error */
+            sync_error: string | null;
+            /** Team Id */
+            team_id: string | null;
+            /**
+             * Unit
+             * @constant
+             */
+            unit: "usd_per_1m_tokens";
+            /** Updated At */
+            updated_at: string | null;
+        };
         /** ChallengeInstancesRuntimeRootV1 */
         ChallengeInstancesRuntimeRootV1: {
             /** Episodes Jsonl Sha256 */
@@ -4169,6 +4345,17 @@ export interface components {
              * @constant
              */
             transport: "stdio";
+        };
+        /** ModelPrice */
+        ModelPrice: {
+            /** Cache Read Usd Per 1M */
+            cache_read_usd_per_1m?: number | null;
+            /** Cache Write Usd Per 1M */
+            cache_write_usd_per_1m?: number | null;
+            /** Input Usd Per 1M */
+            input_usd_per_1m: number;
+            /** Output Usd Per 1M */
+            output_usd_per_1m: number;
         };
         /**
          * ModelSpec
@@ -5670,8 +5857,29 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** PriceImportPreview */
+        PriceImportPreview: {
+            /** Content */
+            content: string;
+            /**
+             * Format
+             * @enum {string}
+             */
+            format: "csv" | "json";
+        };
+        /** PriceImportResponse */
+        PriceImportResponse: {
+            /** Count */
+            count: number;
+            /** Prices */
+            prices: {
+                [key: string]: components["schemas"]["ModelPrice"];
+            };
+        };
         /** PriceSnapshot */
         PriceSnapshot: {
+            /** Catalog Id */
+            catalog_id?: string;
             /** Currency */
             currency: string | null;
             /** Group */
@@ -5680,6 +5888,14 @@ export interface components {
             group_ratio: number | null;
             /** Last Checked At */
             last_checked_at: string | null;
+            /** Mode */
+            mode?: string;
+            /** Model */
+            model?: string;
+            /** Prices */
+            prices?: {
+                [key: string]: number | null;
+            };
             /** Pricing Version */
             pricing_version: string | null;
             /** Provider */
@@ -5690,8 +5906,14 @@ export interface components {
             rate_card_id: string | null;
             /** Resolved */
             resolved: boolean;
+            /** Revision */
+            revision?: number;
             /** Source Url */
             source_url: string | null;
+            /** Supplier Metadata */
+            supplier_metadata?: {
+                [key: string]: unknown;
+            };
         } & {
             [key: string]: unknown;
         };
@@ -5741,16 +5963,18 @@ export interface components {
             api_key: string;
             /** Base Url */
             base_url: string;
+            /** Catalog Id */
+            catalog_id?: string | null;
+            /** Custom Pricing */
+            custom_pricing?: {
+                [key: string]: components["schemas"]["ModelPrice"];
+            } | null;
             /** Name */
             name: string;
-            /** Pricing Data */
-            pricing_data?: {
-                [key: string]: number;
-            } | null;
-            /** Pricing Source */
-            pricing_source?: string | null;
-            /** Rate Card Provider */
-            rate_card_provider?: string | null;
+            /** Pricing Mode */
+            pricing_mode?: ("usage_only" | "catalog" | "custom") | null;
+            /** Supplier Id */
+            supplier_id?: string | null;
             /**
              * Type
              * @description one of ('openai-compatible', 'anthropic', 'google', 'custom')
@@ -5768,6 +5992,8 @@ export interface components {
             allowed_models: string[] | null;
             /** Base Url */
             base_url: string;
+            /** Catalog Id */
+            catalog_id: string | null;
             /**
              * Created At
              * Format: date-time
@@ -5775,6 +6001,10 @@ export interface components {
             created_at: string;
             /** Created By */
             created_by: string;
+            /** Custom Pricing */
+            custom_pricing: {
+                [key: string]: components["schemas"]["ModelPrice"];
+            } | null;
             /**
              * Id
              * Format: uuid
@@ -5784,20 +6014,23 @@ export interface components {
             last_validated_at: string | null;
             /** Last Validation Error */
             last_validation_error: string | null;
+            /** Legacy Pricing */
+            legacy_pricing: {
+                [key: string]: unknown;
+            } | null;
             /** Name */
             name: string;
-            /** Pricing Data */
-            pricing_data: {
-                [key: string]: number;
-            } | null;
-            /** Pricing Source */
-            pricing_source: string;
-            /** Rate Card Provider */
-            rate_card_provider: string | null;
+            /**
+             * Pricing Mode
+             * @enum {string}
+             */
+            pricing_mode: "usage_only" | "catalog" | "custom";
             /** Resolved Egress Ips */
             resolved_egress_ips: string[];
             /** Status */
             status: string;
+            /** Supplier Id */
+            supplier_id: string | null;
             /**
              * Team Id
              * Format: uuid
@@ -5875,14 +6108,16 @@ export interface components {
             api_key?: string | null;
             /** Base Url */
             base_url?: string | null;
-            /** Pricing Data */
-            pricing_data?: {
-                [key: string]: number;
+            /** Catalog Id */
+            catalog_id?: string | null;
+            /** Custom Pricing */
+            custom_pricing?: {
+                [key: string]: components["schemas"]["ModelPrice"];
             } | null;
-            /** Pricing Source */
-            pricing_source?: string | null;
-            /** Rate Card Provider */
-            rate_card_provider?: string | null;
+            /** Pricing Mode */
+            pricing_mode?: ("usage_only" | "catalog" | "custom") | null;
+            /** Supplier Id */
+            supplier_id?: string | null;
         };
         /** ProviderModelCacheEntry */
         ProviderModelCacheEntry: {
@@ -11880,6 +12115,210 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_price_catalogs_api_v1_price_catalogs_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_price_catalog_api_v1_price_catalogs_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_price_catalog_api_v1_price_catalogs__catalog_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                catalog_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_price_catalog_api_v1_price_catalogs__catalog_id__import_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                catalog_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogImport"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogImportResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    sync_price_catalog_api_v1_price_catalogs__catalog_id__sync_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                catalog_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_model_prices_api_v1_price_imports_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PriceImportPreview"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PriceImportResponse"];
                 };
             };
             /** @description Validation Error */

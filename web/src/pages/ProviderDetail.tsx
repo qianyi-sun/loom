@@ -1,3 +1,4 @@
+import type { ProviderPricing } from "../api/providers";
 import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
 /**
@@ -6,7 +7,12 @@ import { queryKeys } from "../api/queryKeys";
  */
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import {
+  Link,
+  useNavigate,
+  useParams,
+  useSearchParams,
+} from "react-router-dom";
 
 import { api } from "../api";
 import { Button } from "../components/Button";
@@ -34,7 +40,10 @@ import {
 import { formatLocalDateTime } from "../lib/dateTime";
 
 type TabName = "overview" | "models" | "settings";
-type TestResult = { status: "valid" | "invalid"; last_validation_error?: string | null };
+type TestResult = {
+  status: "valid" | "invalid";
+  last_validation_error?: string | null;
+};
 const TAB_NAMES: TabName[] = ["overview", "models", "settings"];
 const TAB_ITEMS: readonly TabItem<TabName>[] = TAB_NAMES.map((value) => ({
   value,
@@ -92,7 +101,7 @@ export default function ProviderDetail(): JSX.Element {
   }
   if (!data) return <LoadingState />;
 
-  const conn = data as {
+  const conn = data as ProviderPricing & {
     id: string;
     name: string;
     type: string;
@@ -103,8 +112,6 @@ export default function ProviderDetail(): JSX.Element {
     updated_at?: string;
     last_validated_at?: string | null;
     last_validation_error?: string | null;
-    pricing_source?: string | null;
-    rate_card_provider?: string | null;
   };
 
   return (
@@ -141,7 +148,8 @@ export default function ProviderDetail(): JSX.Element {
                       Back to New Batch
                     </Link>
                     <span className="ml-2 text-indigo-700">
-                      after refreshing, preflighting, or adding the missing model.
+                      after refreshing, preflighting, or adding the missing
+                      model.
                     </span>
                   </div>
                 ) : null}
@@ -168,7 +176,7 @@ function OverviewTab({
   conn,
   id,
 }: {
-  conn: {
+  conn: ProviderPricing & {
     name: string;
     type: string;
     base_url: string;
@@ -234,12 +242,19 @@ function OverviewTab({
           {conn.last_validated_at && (
             <>
               <dt className="font-medium text-slate-600">Last tested</dt>
-              <dd>{formatLocalDateTime(conn.last_validated_at)} · {providerTestAge(conn.last_validated_at)}</dd>
+              <dd>
+                {formatLocalDateTime(conn.last_validated_at)} ·{" "}
+                {providerTestAge(conn.last_validated_at)}
+              </dd>
             </>
           )}
         </dl>
         <div>
-          <Button onClick={handleTest} disabled={test.isPending} variant="primary">
+          <Button
+            onClick={handleTest}
+            disabled={test.isPending}
+            variant="primary"
+          >
             {test.isPending ? "Testing…" : "Test connection"}
           </Button>
         </div>
@@ -294,17 +309,19 @@ function SettingsTab({
   id,
   onDeleted,
 }: {
-  conn: {
+  conn: ProviderPricing & {
     name: string;
     type: string;
     base_url: string;
     allowed_models?: string[] | null;
-    pricing_source?: string | null;
-    rate_card_provider?: string | null;
   };
   id: string;
   onDeleted: () => void;
 }): JSX.Element {
+  const models = useQuery({
+    queryKey: queryKeys["providers"](id, "models"),
+    queryFn: () => api.listProviderConnectionModels(id),
+  });
   const edit = useEditConnection(id);
   const rotate = useRotateConnectionKey(id);
   const del = useDeleteConnection();
@@ -312,9 +329,17 @@ function SettingsTab({
   const [showDelete, setShowDelete] = useState(false);
 
   const handleEdit = async (values: ProviderFormValues) => {
-    await edit.mutateAsync({
+    edit.mutate({
       allowed_models: values.allowed_models,
-      rate_card_provider: values.rate_card_provider,
+      ...(values.base_url !== conn.base_url ? { base_url: values.base_url } : {}),
+      ...(values.pricing_mode
+        ? {
+            pricing_mode: values.pricing_mode,
+            custom_pricing: values.custom_pricing,
+            catalog_id: values.catalog_id,
+            supplier_id: values.supplier_id,
+          }
+        : {}),
     } as Parameters<typeof edit.mutateAsync>[0]);
   };
 
@@ -334,15 +359,23 @@ function SettingsTab({
       <Card>
         <Card.Body className="space-y-4">
           <h2 className="text-lg font-semibold">Edit</h2>
+          {edit.isError && <p role="alert">{String((edit.error as {detail?: string})?.detail ?? "Could not save provider settings")}</p>}
+          {edit.isSuccess && <p role="status">Provider settings saved.</p>}
           <ProviderForm
             mode="edit"
+            discoveredModels={
+              models.data?.items?.map((model) => model.model_id) ?? []
+            }
             initial={{
               name: conn.name,
               type: conn.type,
               base_url: conn.base_url,
               allowed_models: conn.allowed_models ?? [],
-              pricing_source: conn.pricing_source ?? null,
-              rate_card_provider: conn.rate_card_provider ?? null,
+              pricing_mode: conn.pricing_mode,
+              supplier_id: conn.supplier_id,
+              custom_pricing: conn.custom_pricing,
+              catalog_id: conn.catalog_id,
+              legacy_pricing: conn.legacy_pricing,
             }}
             pending={edit.isPending}
             onSubmit={handleEdit}

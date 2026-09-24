@@ -324,9 +324,14 @@ async def apply_provider_binding(
         raise PipelineApiError(
             422, "provider_connection_unavailable", "Provider connection is unavailable"
         )
+    pricing_ready = connection.pricing_source == "rate-card" and connection.rate_card_provider == "openai"
+    if is_terminalgen and getattr(connection, "pricing_config", None) is not None:
+        from loom_llm_gateway.dialect import TokenUsage
+        from loom_llm_gateway.provider_pricing import configured_cost
+        estimate = await configured_cost(session, connection, payload.model, TokenUsage(1, 1))
+        pricing_ready = estimate.confidence == "configured" and estimate.currency == "USD"
     if is_terminalgen and (
-        connection.pricing_source != "rate-card"
-        or connection.rate_card_provider != "openai"
+        not pricing_ready
         or connection.responses_api_supported is not True
         or connection.responses_api_probed_at is None
         or datetime.now(UTC) - connection.responses_api_probed_at >= timedelta(hours=24)

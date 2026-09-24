@@ -524,7 +524,7 @@ export default function BatchDetail(): JSX.Element {
                   c.effective_total_completion_tokens,
                 )}
                 {hasEffectiveCostProjection
-                  ? ` · cost ${formatUsageCost({
+                  ? ` · estimated cost ${formatUsageCost({
                       estimated_cost_usd: c.effective_estimated_cost_usd,
                       cost_currency: c.effective_cost_currency,
                       cost_status: c.effective_cost_status,

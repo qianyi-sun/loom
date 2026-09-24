@@ -591,10 +591,16 @@ async def _dispatch_execution_attempt_responses(
             status_code=409,
             detail="execution-attempt calls require fresh native Responses support",
         )
-    if row.pricing_source != "rate-card" or row.rate_card_provider != "openai":
+    pricing_ready = row.pricing_source == "rate-card" and row.rate_card_provider == "openai"
+    if getattr(row, "pricing_config", None) is not None:
+        price_check = await compute_facade_cost_estimate(
+            row, model_name, TokenUsage(1, 1), rate_card_cache=request.app.state.rate_card_cache,
+        )
+        pricing_ready = price_check.confidence == "configured" and price_check.currency == "USD"
+    if not pricing_ready:
         raise HTTPException(
             status_code=409,
-            detail="execution-attempt calls require configured OpenAI pricing",
+            detail="execution-attempt calls require configured USD model pricing",
         )
     try:
         request_digest = canonical_digest(payload, persisted=False)

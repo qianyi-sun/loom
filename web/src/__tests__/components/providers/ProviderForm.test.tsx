@@ -21,12 +21,12 @@ describe("ProviderForm", () => {
     expect(screen.queryByLabelText(/api key/i)).not.toBeInTheDocument();
   });
 
-  it("Advanced section is collapsed by default + reveals pricing fields when expanded", async () => {
-    const user = userEvent.setup();
+  it("shows human-readable pricing choices without handwritten JSON", () => {
     render(<ProviderForm mode="create" onSubmit={vi.fn()} />);
-    expect(screen.queryByLabelText(/pricing source/i)).not.toBeInTheDocument();
-    await user.click(screen.getByText(/advanced/i));
-    expect(screen.getByLabelText(/pricing source/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/pricing mode/i)).toHaveValue("usage_only");
+    expect(
+      screen.getByRole("option", { name: "Enter custom model prices" }),
+    ).toBeInTheDocument();
   });
 
   it("calls onSubmit with the form values on submit", async () => {
@@ -50,4 +50,74 @@ describe("ProviderForm", () => {
     render(<ProviderForm mode="create" onSubmit={vi.fn()} pending />);
     expect(screen.getByRole("button", { name: /create/i })).toBeDisabled();
   });
+});
+
+it("initializes per-model prices and submits edits with the active mode", async () => {
+  const onSubmit = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <ProviderForm
+      mode="edit"
+      initial={{
+        name: "x",
+        type: "custom",
+        base_url: "https://x",
+        pricing_mode: "custom",
+        custom_pricing: { a: { input_usd_per_1m: 1, output_usd_per_1m: 2 } },
+      }}
+      onSubmit={onSubmit}
+    />,
+  );
+  const input = screen.getByLabelText("a input_usd_per_1m");
+  expect(input).toHaveValue(1);
+  await user.clear(input);
+  await user.type(input, "0");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(onSubmit).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      pricing_mode: "custom",
+      catalog_id: null,
+      custom_pricing: {
+        a: {
+          input_usd_per_1m: 0,
+          output_usd_per_1m: 2,
+          cache_read_usd_per_1m: null,
+          cache_write_usd_per_1m: null,
+        },
+      },
+    }),
+  );
+  await user.selectOptions(screen.getByLabelText("Pricing mode"), "usage_only");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(onSubmit).toHaveBeenLastCalledWith(
+    expect.objectContaining({
+      pricing_mode: "usage_only",
+      catalog_id: null,
+      custom_pricing: null,
+    }),
+  );
+});
+
+it("blocks incomplete prices instead of silently dropping malformed values", async () => {
+  const onSubmit = vi.fn();
+  const user = userEvent.setup();
+  render(
+    <ProviderForm
+      mode="edit"
+      initial={{
+        name: "x",
+        type: "custom",
+        base_url: "https://x",
+        pricing_mode: "custom",
+        custom_pricing: { a: { input_usd_per_1m: 1, output_usd_per_1m: 2 } },
+      }}
+      onSubmit={onSubmit}
+    />,
+  );
+  await user.clear(screen.getByLabelText("a output_usd_per_1m"));
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "input and output prices are required",
+  );
+  expect(onSubmit).not.toHaveBeenCalled();
 });

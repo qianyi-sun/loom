@@ -887,6 +887,12 @@ class PlacementResources(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class PriceSnapshot(TypedDict):
+    mode: NotRequired[str]
+    model: NotRequired[str]
+    prices: NotRequired[dict[str, float | None]]
+    catalog_id: NotRequired[str]
+    revision: NotRequired[int]
+    supplier_metadata: NotRequired[dict[str, Any]]
     rate_card_hash: str
     rate_card_id: str | None
     resolved: bool

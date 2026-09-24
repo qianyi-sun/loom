@@ -68,6 +68,13 @@ def test_extract_tokens(
     usage = adapter.extract_tokens(response)
     assert usage.input_tokens == expected_in
     assert usage.output_tokens == expected_out
+    if dialect in ("openai_chat", "openai_responses", "gemini"):
+        expected_extras = {**expected_extras, "_loom_input_includes_cache": True,
+                           "_loom_cache_usage_known": dialect == "gemini"}
+    if dialect.startswith("openai"):
+        expected_extras["_loom_unsupported_billing"] = False
+    if dialect == "anthropic":
+        expected_extras["_loom_cache_usage_known"] = True
     assert usage.provider_extras == expected_extras
 
 

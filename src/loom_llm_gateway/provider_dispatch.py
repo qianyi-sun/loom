@@ -613,6 +613,28 @@ def _safe_usage_extras(values: dict[str, Any]) -> dict[str, Any]:
             isinstance(value, str) and len(value.encode("utf-8")) <= 128
         ):
             result[key] = value
+    basis = values.get("_loom_price_basis")
+    if isinstance(basis, dict):
+        from loom.provider_pricing import ModelPrice
+        try:
+            prices = ModelPrice.model_validate(basis.get("prices"))
+        except ValueError:
+            pass
+        else:
+            result["_loom_price_basis"] = {
+                key: value for key, value in basis.items()
+                if key in {"mode", "model", "currency", "unit", "catalog_id", "supplier_id", "revision",
+                           "source_model", "source_url", "updated_at", "input_includes_cache"}
+                and (value is None or isinstance(value, bool | int | float | str))
+            }
+            result["_loom_price_basis"]["prices"] = prices.model_dump(mode="json")
+            supplier_metadata = basis.get("supplier_metadata")
+            if isinstance(supplier_metadata, dict):
+                result["_loom_price_basis"]["supplier_metadata"] = {
+                    key: value for key, value in supplier_metadata.items()
+                    if key in {"supplier", "group", "group_ratio", "pricing_version"}
+                    and isinstance(value, str | int | float)
+                }
     return result
 
 

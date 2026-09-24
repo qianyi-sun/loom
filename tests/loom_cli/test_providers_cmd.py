@@ -84,9 +84,9 @@ def mock_server(
 
 def _make_connection(
     *, name: str = "openai-prod", type_: str = "openai-compatible",
-    pricing_source: str = "tokens-only",
-    pricing_data: dict | None = None,
-    rate_card_provider: str | None = "openai",
+    pricing_mode: str = "usage_only",
+    custom_pricing: dict | None = None,
+    catalog_id: str | None = "openai",
     status: str = "pending",
     allowed_models: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -102,9 +102,9 @@ def _make_connection(
         "status": status,
         "last_validated_at": None,
         "last_validation_error": None,
-        "pricing_source": pricing_source,
-        "pricing_data": pricing_data,
-        "rate_card_provider": rate_card_provider,
+        "pricing_mode": pricing_mode,
+        "custom_pricing": custom_pricing,
+        "catalog_id": catalog_id,
         "created_by": "admin:abc12345",
         "created_at": "2026-06-16T00:00:00Z",
         "updated_at": "2026-06-16T00:00:00Z",
@@ -156,15 +156,15 @@ def test_create_happy_path_posts_correct_payload(
     assert req.headers["Authorization"] == "Bearer loom_admin_test123456"
 
 
-def test_create_with_operator_pricing_sends_pricing_data(
+def test_create_with_operator_pricing_sends_custom_pricing(
     monkeypatch: pytest.MonkeyPatch,
     mock_server: MockServer,
 ) -> None:
     monkeypatch.setenv("K", "k123")
     mock_server.canned[("POST", "/api/v1/provider-connections")] = httpx.Response(
         201, json=_make_connection(
-            pricing_source="operator-supplied",
-            pricing_data={"input_usd_per_1m": 2.5, "output_usd_per_1m": 10.0},
+            pricing_mode="custom",
+            custom_pricing={"input_usd_per_1m": 2.5, "output_usd_per_1m": 10.0},
         ),
     )
     rc = main([
@@ -172,25 +172,28 @@ def test_create_with_operator_pricing_sends_pricing_data(
         "--name", "n", "--type", "openai-compatible",
         "--base-url", "https://api.openai.com/v1",
         "--api-key", "env:K",
+        "--price-model", "model-a",
         "--input-usd-per-1m", "2.5",
         "--output-usd-per-1m", "10.0",
     ])
     assert rc == 0
     body = json.loads(mock_server[0].content)
-    assert body["pricing_source"] == "operator-supplied"
-    assert body["pricing_data"] == {
+    assert body["pricing_mode"] == "custom"
+    assert body["custom_pricing"] == {"model-a": {
         "input_usd_per_1m": 2.5,
         "output_usd_per_1m": 10.0,
-    }
+        "cache_read_usd_per_1m": None,
+        "cache_write_usd_per_1m": None,
+    }}
 
 
-def test_create_with_rate_card_provider_sends_field(
+def test_create_with_catalog_id_sends_field(
     monkeypatch: pytest.MonkeyPatch,
     mock_server: MockServer,
 ) -> None:
     monkeypatch.setenv("K", "k123")
     mock_server.canned[("POST", "/api/v1/provider-connections")] = httpx.Response(
-        201, json=_make_connection(rate_card_provider="together"),
+        201, json=_make_connection(catalog_id="together"),
     )
 
     rc = main([
@@ -198,11 +201,11 @@ def test_create_with_rate_card_provider_sends_field(
         "--name", "together-prod", "--type", "openai-compatible",
         "--base-url", "https://api.together.xyz/v1",
         "--api-key", "env:K",
-        "--rate-card-provider", "together",
+        "--catalog-id", "together",
     ])
     assert rc == 0
     body = json.loads(mock_server[0].content)
-    assert body["rate_card_provider"] == "together"
+    assert body["catalog_id"] == "together"
 
 
 def test_create_half_set_pricing_rejected(
@@ -218,10 +221,11 @@ def test_create_half_set_pricing_rejected(
         "--name", "n", "--type", "openai-compatible",
         "--base-url", "https://api.openai.com/v1",
         "--api-key", "env:K",
+        "--price-model", "model-a",
         "--input-usd-per-1m", "2.5",  # but no --output-usd-per-1m
     ])
     assert rc == 2
-    assert "interdependent" in capsys.readouterr().err
+    assert "output_usd_per_1m" in capsys.readouterr().err
     # No HTTP call was made.
     assert mock_server == []
 
@@ -285,7 +289,7 @@ def test_list_table_format(
         200, json={"items": [
             _make_connection(name="openai-prod"),
             _make_connection(name="anthropic-dev", type_="anthropic",
-                             pricing_source="rate-card"),
+                             pricing_mode="catalog"),
         ]},
     )
     rc = main(["providers", "list"])
@@ -326,7 +330,7 @@ def test_show_resolves_by_name_then_prints(
     assert rc == 0
     out = capsys.readouterr().out
     assert "name:          openai-prod" in out
-    assert "rate_card:     openai" in out
+    assert "catalog:       openai" in out
 
 
 def test_show_unknown_name_returns_1_with_helpful_message(
@@ -366,11 +370,11 @@ def test_update_patches_by_resolved_id(
     assert patch_body == {"base_url": "https://api.openai.com/v2"}
 
 
-def test_update_rate_card_provider_patches_by_resolved_id(
+def test_update_catalog_id_patches_by_resolved_id(
     mock_server: MockServer,
 ) -> None:
     conn = _make_connection(name="openai-prod")
-    updated = _make_connection(name="openai-prod", rate_card_provider="fireworks")
+    updated = _make_connection(name="openai-prod", catalog_id="fireworks")
     mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
         200, json={"items": [conn]},
     )
@@ -380,11 +384,11 @@ def test_update_rate_card_provider_patches_by_resolved_id(
 
     rc = main([
         "providers", "update", "openai-prod",
-        "--rate-card-provider", "fireworks",
+        "--catalog-id", "fireworks",
     ])
     assert rc == 0
     patch_body = json.loads(mock_server[1].content)
-    assert patch_body == {"rate_card_provider": "fireworks"}
+    assert patch_body == {"catalog_id": "fireworks"}
 
 
 def test_update_with_admin_actor_sends_audit_header(
@@ -400,8 +404,8 @@ def test_update_with_admin_actor_sends_audit_header(
 
     rc = main([
         "providers", "update", "openai-prod",
-        "--pricing-source", "rate-card",
-        "--rate-card-provider", "openai",
+        "--pricing-mode", "catalog",
+        "--catalog-id", "openai",
         "--admin-actor", "release-operator",
     ])
 
@@ -409,14 +413,14 @@ def test_update_with_admin_actor_sends_audit_header(
     assert mock_server[1].headers["X-Loom-Admin-Actor"] == "release-operator"
 
 
-def test_update_pricing_source_rate_card_patches_by_resolved_id(
+def test_update_pricing_mode_rate_card_patches_by_resolved_id(
     mock_server: MockServer,
 ) -> None:
     conn = _make_connection(name="yibuapi-prod")
     updated = _make_connection(
         name="yibuapi-prod",
-        pricing_source="rate-card",
-        rate_card_provider="yibuapi",
+        pricing_mode="catalog",
+        catalog_id="yibuapi",
     )
     mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
         200, json={"items": [conn]},
@@ -427,15 +431,15 @@ def test_update_pricing_source_rate_card_patches_by_resolved_id(
 
     rc = main([
         "providers", "update", "yibuapi-prod",
-        "--pricing-source", "rate-card",
-        "--rate-card-provider", "yibuapi",
+        "--pricing-mode", "catalog",
+        "--catalog-id", "yibuapi",
     ])
 
     assert rc == 0
     patch_body = json.loads(mock_server[1].content)
     assert patch_body == {
-        "pricing_source": "rate-card",
-        "rate_card_provider": "yibuapi",
+        "pricing_mode": "catalog",
+        "catalog_id": "yibuapi",
     }
 
 
@@ -1240,3 +1244,32 @@ def test_rotate_key_literal_api_key_rejected_at_argparse(
             "providers", "rotate-key", "openai-prod",
             "--api-key", "sk-literal-no-good",
         ])
+
+
+@pytest.mark.parametrize("edit", ["mode", "model", "file"])
+def test_custom_price_update_preserves_unselected_models(
+    mock_server: MockServer, tmp_path: Path, edit: str,
+) -> None:
+    existing = {"other-model": {"input_usd_per_1m": 1, "output_usd_per_1m": 2}}
+    conn = _make_connection(pricing_mode="custom", custom_pricing=existing, catalog_id=None)
+    mock_server.canned[("GET", "/api/v1/provider-connections")] = httpx.Response(
+        200, json={"items": [conn]},
+    )
+    mock_server.canned[("PATCH", f"/api/v1/provider-connections/{conn['id']}")] = (
+        httpx.Response(200, json=conn)
+    )
+    argv = ["providers", "update", conn["name"], "--pricing-mode", "custom"]
+    if edit == "model":
+        argv += ["--price-model", "new-model", "--input-usd-per-1m", "0",
+                 "--output-usd-per-1m", "3"]
+    elif edit == "file":
+        path = tmp_path / "prices.json"
+        path.write_text('[{"model":"new-model","input_usd_per_1m":0,"output_usd_per_1m":3}]')
+        argv += ["--price-file", str(path)]
+    assert main(argv) == 0
+    payload = json.loads(mock_server[1].content)
+    if edit == "mode":
+        assert "custom_pricing" not in payload
+    else:
+        assert payload["custom_pricing"]["new-model"]["input_usd_per_1m"] == 0
+        assert ("other-model" in payload["custom_pricing"]) == (edit == "model")
