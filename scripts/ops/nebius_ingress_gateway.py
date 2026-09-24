@@ -23,6 +23,8 @@ from uuid import UUID
 from cryptography import x509
 from scripts.ops import nebius_certificates as certificates
 
+MAX_KUBECTL_OUTPUT = 4 * 1024 * 1024
+
 
 class IngressError(RuntimeError):
     """Payload-free failure; private TLS/API diagnostics must not reach Actions."""
@@ -83,7 +85,7 @@ class KubectlTLSAPI:
         try:
             result = subprocess.run([*self.prefix, *arguments], input=payload, capture_output=True,
                                     timeout=40, check=False, env={"PATH": os.defpath, "LANG": "C.UTF-8"})
-            if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
+            if result.returncode or len(result.stdout) > MAX_KUBECTL_OUTPUT:
                 raise IngressError("protected Kubernetes operation failed")
             return result.stdout
         except (OSError, subprocess.TimeoutExpired):
