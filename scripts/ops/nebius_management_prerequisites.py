@@ -212,15 +212,33 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
             raise ValueError()
         claims = self.inventory("v1", "persistentvolumeclaims", "PersistentVolumeClaim")
         pending = 0
-        own = False
+        existing = {(row["metadata"]["namespace"], row["metadata"]["name"]): row for row in claims}
+        if len(existing) != len(claims):
+            raise ValueError()
         for claim in claims:
-            if (claim["metadata"]["namespace"], claim["metadata"]["name"]) == (request.binding.namespace, "data-loom-postgres-0"):
-                own = True  # Identity/adoption is separately guarded before DB creation.
-            # Include pending foreign claims. They may consume the observed
-            # provider headroom even when no backing disk is counted yet.
-            if claim.get("status", {}).get("phase") != "Bound":
-                pending += _quantity(claim["spec"]["resources"]["requests"]["storage"], kind="storage")
-        return budget.storage_mib + pending + (0 if own else request.deployment.postgres_storage_gi * 1024)
+            requested = _quantity(claim["spec"]["resources"]["requests"]["storage"], kind="storage")
+            # Provider usage already includes bound capacity, but an expansion
+            # request may not have reached the provider yet. Ignore neither.
+            allocated = (_quantity(claim["status"]["capacity"]["storage"], kind="storage")
+                         if claim.get("status", {}).get("phase") == "Bound" else 0)
+            pending += max(0, requested - allocated)
+        future: dict[tuple[str, str], int] = {}
+        for row in [*controllers, *planned]:
+            if row["kind"] != "StatefulSet":
+                continue
+            spec = row["spec"]
+            start = spec.get("ordinals", {}).get("start", 0)
+            if type(start) is not int or start < 0:
+                raise ValueError()
+            # Includes the in-memory HPA maximum and nonzero start ordinals.
+            # Same live/planned identity shares one reservation on replay.
+            for template in spec.get("volumeClaimTemplates", []):
+                size = _quantity(template["spec"]["resources"]["requests"]["storage"], kind="storage")
+                for ordinal in range(start, start + _count(row)):
+                    key = (row["metadata"]["namespace"], f'{template["metadata"]["name"]}-{row["metadata"]["name"]}-{ordinal}')
+                    if key not in existing:
+                        future[key] = max(future.get(key, 0), size)
+        return budget.storage_mib + pending + sum(future.values())
 
     async def provider_and_publication(self, request: ManagementInstallRequest, missing_storage_mib: int) -> None:
         from nebius.api.nebius.quotas import v1
