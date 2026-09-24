@@ -18,7 +18,7 @@ from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT
 from loom.pipeline.keys import canonical_digest
 from loom_llm_gateway.drain import ensure_drain_state
 from loom_llm_gateway.routes import task_egress
-from loom_llm_gateway.task_egress import TaskEgressConfig, TaskEgressRuntime
+from loom_llm_gateway.task_egress import EgressDeniedError, TaskEgressConfig, TaskEgressRuntime
 from tests.unit.test_execution_runtime_contract import _plan
 from tests.unit.test_task_web_egress import policy
 
@@ -138,6 +138,30 @@ def test_gateway_limits_connections_per_lease(monkeypatch) -> None:
             ws.receive_json()
     assert exc.value.reason == "task_egress_capacity_exceeded"
     assert ensure_drain_state(app).in_flight == 0
+
+
+def test_package_connections_retain_per_lease_and_global_capacity_bounds() -> None:
+    runtime = TaskEgressRuntime(TaskEgressConfig(protected_cidrs=("8.8.8.8/32",)))
+    # Metadata, package requests and redirects retain separate TCP tunnels.
+    for lease in ("package-task", "other-task"):
+        for _ in range(32):
+            runtime.acquire(lease)
+        with pytest.raises(EgressDeniedError, match="task_egress_capacity_exceeded"):
+            runtime.acquire(lease)
+    with pytest.raises(EgressDeniedError, match="task_egress_capacity_exceeded"):
+        runtime.acquire("third-task")
+    assert runtime.connections == {"package-task": 32, "other-task": 32}
+
+    runtime.release("package-task")
+    runtime.acquire("third-task")
+    with pytest.raises(EgressDeniedError, match="task_egress_capacity_exceeded"):
+        runtime.acquire("package-task")
+    runtime.release("third-task")
+    runtime.acquire("package-task")
+    for lease in ("package-task", "other-task"):
+        for _ in range(32):
+            runtime.release(lease)
+    assert not runtime.connections
 
 
 async def test_download_activity_keeps_tunnel_alive_without_upload_activity(monkeypatch) -> None:
