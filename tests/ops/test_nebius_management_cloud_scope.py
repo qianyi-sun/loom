@@ -49,8 +49,7 @@ def cloud():
         "spec": {"versioning_policy": "ENABLED", "bucket_policy": {"rules": [{
             "group_id": "group-backup", "paths": ["*"], "roles": ["storage.object-editor"]}]}},
         "status": {"state": "ACTIVE", "suspension_state": "NOT_SUSPENDED", "region": "eu-north1"}})
-    groups = {"serviceaccount-manager": ["group-manager"], "serviceaccount-backup": ["group-backup"],
-              "group-manager": [], "group-backup": []}
+    groups = {"serviceaccount-manager": ["group-manager"], "serviceaccount-backup": ["group-backup"]}
     permits = {"group-manager": [{"metadata": {"id": "permit-manager", "parent_id": "group-manager"},
                 "spec": {"resource_id": "project-children", "role": "admin"}}], "group-backup": []}
     bucket_ids = ["bucket-management"]
@@ -65,6 +64,9 @@ def cloud():
 
     async def member_of(request, **kwargs):
         assert kwargs == {"timeout": 30, "retries": 0}
+        # Nebius ListMemberOf accepts account subjects, never a group ID.
+        if request.subject_id not in groups:
+            raise ValueError("unsupported membership subject")
         calls.append(("member_of", request.subject_id))
         assert not request.page_token
         return v1.ListMemberOfResponse.from_json(json.dumps({
@@ -110,7 +112,7 @@ async def test_exact_project_provisioner_and_object_only_backup_are_qualified(cl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mutation", ["tenant_admin", "extra_group", "nested_group", "wrong_public_key", "wrong_subject",
+@pytest.mark.parametrize("mutation", ["tenant_admin", "extra_group", "tenant_group", "wrong_public_key", "wrong_subject",
     "wrong_kid", "key_expired", "key_inactive", "account_inactive", "project_suspended", "wrong_region", "backup_admin",
     "backup_key_subject", "backup_key_expired", "backup_key_inactive", "bucket_public", "bucket_wrong_group", "bucket_broad_role",
     "bucket_wrong_project", "bucket_no_versioning", "bucket_extra_rule"])
@@ -124,8 +126,8 @@ async def test_broad_mismatched_or_unusable_cloud_authority_is_rejected(cloud, m
         cloud.permits["group-manager"][0]["spec"]["resource_id"] = "tenant-test"
     elif mutation == "extra_group":
         cloud.groups["serviceaccount-manager"].append("group-backup")
-    elif mutation == "nested_group":
-        cloud.groups["group-manager"] = ["group-backup"]
+    elif mutation == "tenant_group":
+        cloud.rows["group-manager"][1]["metadata"]["parent_id"] = "tenant-test"
     elif mutation == "wrong_public_key":
         other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         key["spec"]["data"] = other.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
