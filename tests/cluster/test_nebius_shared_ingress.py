@@ -293,9 +293,11 @@ def test_shared_tls_routes_streams_and_preserves_legacy(ingress_input, platform_
 
         wait_for_route(old_host, "/", (200, (ns + ":8443").encode()))
         wait_for_route("alice.dev.example.com", "/api/v1/health", (200, b"loom-dev-alice:8090"))
-        assert get("bob.dev.example.com", "/api") == (200, b"loom-dev-bob:8090")
-        assert get("alice.dev.example.com", "/apiary") == (200, b"loom-dev-alice:8080")
-        assert get("bob.dev.example.com") == (200, b"loom-dev-bob:8080")
+        # Each host/backend pair converges independently in the provider watch.
+        # Alice's API readiness does not establish Bob's routes or either web backend.
+        wait_for_route("bob.dev.example.com", "/api", (200, b"loom-dev-bob:8090"))
+        wait_for_route("alice.dev.example.com", "/apiary", (200, b"loom-dev-alice:8080"))
+        wait_for_route("bob.dev.example.com", "/", (200, b"loom-dev-bob:8080"))
         assert get(old_host) == (200, (ns + ":8443").encode())
         with connect(old_host, alpn=["acme-tls/1"]) as stream:
             assert stream.selected_alpn_protocol() == "acme-tls/1"
