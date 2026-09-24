@@ -428,7 +428,7 @@ Task-specific setup, pytest arguments, reward logic and the complete private
 adapters or image shapes fail with an adaptation error; configuration admission
 alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
-before a model batch. This adapter supports Debian/Ubuntu final images and the
+before a model batch. This adapter supports the final image families below and the
 Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
 or exact canonical `curl -LsSf https://astral.sh/uv/install.sh | sh` installer,
 and preinstalled `uvx -p ... -w package==version ... pytest` (including the
@@ -451,6 +451,20 @@ original application interpreter and PATH; plain pip verifiers inherit system
 packages so compiled PyROOT dependencies remain available. Validate the actual
 image and original verifier before execution; accepting a tag does not qualify
 its upstream contents. Alpine and Fedora variants remain unsupported.
+
+Official `archlinux:latest`, `archlinux:base` and `archlinux:base-devel` final
+images are also supported, including local stage inheritance. Preparation adds
+missing harness tools with pacman and builds the separate verifier environment
+with the same supported uv/pip bootstrap conversion. It leaves already installed
+packages at their authored versions and rejects a dependency transaction that
+would upgrade or downgrade one. A rolling repository can therefore require an
+explicitly reviewed compatible image or repository snapshot. Preparation uses a
+temporary package cache and preserves the image's existing package cache. Debian
+`apt` bootstrap dependencies are rejected on Arch instead of translating package
+names. This image support does not grant mounts, devices or kernel privileges;
+declare supported directory state separately and qualify its private-verifier
+handoff before running an original task.
+
 Prebuilt images, malformed
 Dockerfile `SHELL`, selected build targets, floating Git dependencies and
 unrecognized shell/installer forms need explicit adaptation. An upstream asset
