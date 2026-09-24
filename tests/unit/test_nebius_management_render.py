@@ -125,6 +125,40 @@ def test_runtime_mounts_only_explicit_separate_authorities(management_inputs):
                     assert volume["configMap"]["items"] == [{"key": "environment.json", "path": "environment.json"}]
 
 
+def test_projected_identity_is_renewed_and_mounted_only_into_management_api(management_inputs):
+    runtime = management_inputs[0]["installation"]["provider_runtime"]
+    runtime["kubernetes"].pop("credentials_file")
+    runtime["kubernetes"].update(kind="projected_service_account", token_file="/var/run/loom-management-kubernetes/token")
+    docs = documents(render(management_inputs))
+    accounts = [d["metadata"]["name"] for d in docs if d["kind"] == "ServiceAccount"]
+    assert set(accounts) == {"loom-platform", "loom-management-provisioner"}
+    for doc in docs:
+        if doc["kind"] not in {"Deployment", "StatefulSet", "Job", "CronJob"}:
+            continue
+        template = pod(doc)
+        assert template["automountServiceAccountToken"] is False
+        volumes = {v["name"]: v for v in template["volumes"]}
+        if doc["kind"] == "Deployment":
+            assert template["serviceAccountName"] == "loom-management-provisioner"
+            assert volumes["management-kubernetes"] == {"name": "management-kubernetes", "projected": {
+                "defaultMode": 0o440, "sources": [
+                    {"serviceAccountToken": {"path": "token", "expirationSeconds": 3600}},
+                    {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+                ],
+            }}
+        else:
+            assert template["serviceAccountName"] == "loom-platform"
+            assert "management-kubernetes" not in volumes
+
+
+def test_projected_render_rejects_unmounted_token_path(management_inputs):
+    runtime = management_inputs[0]["installation"]["provider_runtime"]
+    runtime["kubernetes"].pop("credentials_file")
+    runtime["kubernetes"].update(kind="projected_service_account", token_file="/var/run/ambient/token")
+    with pytest.raises(ValueError, match="mounted credentials"):
+        render(management_inputs)
+
+
 def test_migration_and_backup_never_start_task_authorities_or_share_child_data(management_inputs):
     docs = documents(render(management_inputs))
     job = next(d for d in docs if d["kind"] == "Job")
