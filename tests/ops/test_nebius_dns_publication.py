@@ -10,6 +10,7 @@ import threading
 import dns.flags
 import dns.message
 import dns.rcode
+import dns.resolver
 import dns.rrset
 import httpx
 import pytest
@@ -63,6 +64,49 @@ def test_publishes_only_pair_and_replays_without_writes(target, tmp_path):
     assert first["status"] == "dns_published"
     assert provider.posts == ["*.dev.nebius", "management.nebius"]
     assert all(row["origin"] == "created" for row in first["records"])
+
+
+@pytest.mark.parametrize("failure", [None, "wrong_a", "ipv6", "alias", "missing", "tls"])
+def test_recursive_route_requires_exact_addresses_and_both_trusted_sni_names(target, monkeypatch, failure):
+    from scripts.ops import nebius_ingress_probe as probes
+
+    queries, handshakes = [], []
+
+    class Resolver:
+        def resolve(self, name, rdtype, *, lifetime, search, raise_on_no_answer):
+            assert 0 < lifetime <= 30 and search is False and raise_on_no_answer is False
+            queries.append((name, rdtype))
+            request = dns.message.make_query(name, rdtype)
+            response = dns.message.make_response(request)
+            if failure == "missing":
+                raise dns.resolver.NXDOMAIN()
+            if failure == "alias":
+                response.answer.append(dns.rrset.from_text(name + ".", 600, "IN", "CNAME", "foreign.example.test."))
+            elif rdtype == "A":
+                response.answer.append(dns.rrset.from_text(name + ".", 600, "IN", "A", "1.1.1.1" if failure == "wrong_a" else "8.8.8.8"))
+            elif failure == "ipv6":
+                response.answer.append(dns.rrset.from_text(name + ".", 600, "IN", "AAAA", "2606:4700:4700::1111"))
+            return dns.resolver.Answer(request.question[0].name, request.question[0].rdtype, 1,
+                                       dns.message.from_wire(response.to_wire()))
+
+    def handshake(**kwargs):
+        assert kwargs["address"] == "8.8.8.8" and kwargs["port"] == 443
+        assert kwargs["fingerprint"] == "b" * 64
+        handshakes.append(kwargs["hostname"])
+        if failure == "tls":
+            raise probes.ProbeError("wrong certificate")
+
+    monkeypatch.setattr(dns.resolver, "Resolver", Resolver)
+    monkeypatch.setattr(probes, "probe_management", handshake)
+    if failure is not None:
+        with pytest.raises(publication.PublicationError):
+            publication.qualify_public_routes(target)
+    else:
+        publication.qualify_public_routes(target)
+        assert len(queries) == 4
+        child = queries[0][0]
+        assert child.endswith(".dev.nebius.example.test") and not child.startswith("*.")
+        assert handshakes == [child, "management.nebius.example.test"]
 
 
 def test_lost_response_qualifies_value_without_claiming_ownership(target, tmp_path):
@@ -151,7 +195,7 @@ def test_propagation_failure_retains_records_and_replay_does_not_post(target, tm
     assert len(provider.posts) == 2
 
 
-@pytest.mark.parametrize("change", [{"address": "127.0.0.1"}, {"address": "::1"},
+@pytest.mark.parametrize("change", [{"address": "127.0.0.1"}, {"address": "::1"}, {"address": "224.0.0.1"},
                                    {"child_domain": "evil.test"}, {"management_host": "alice.dev.nebius.example.test"},
                                    {"installation_id": "not-a-uuid"}, {"candidate": "dev"}])
 def test_invalid_target_fails_before_provider_access(target, tmp_path, change):

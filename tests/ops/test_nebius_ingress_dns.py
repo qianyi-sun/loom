@@ -9,6 +9,8 @@ from uuid import uuid4
 import pytest
 from scripts.ops import nebius_ingress_operation as operation
 from scripts.ops.nebius_ingress_cutover import MARKER
+from tests.ops.test_nebius_dns_publication import Provider
+from tests.ops.test_nebius_dns_publication import target as target
 from tests.ops.test_nebius_ingress_gateway import inputs as inputs
 from tests.ops.test_nebius_ingress_install import installation as installation
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
@@ -147,3 +149,80 @@ def test_dns_qualification_does_not_recreate_missing_evidence(installed, evidenc
     with pytest.raises(operation.OperationError):
         operation.qualify_dns_target(**arguments)
     assert not paths[evidence].exists()
+
+
+@pytest.mark.parametrize("failure", [None, "expired", "changed", "expires_midway", "authority", "public"])
+def test_fixed_dns_operation_checks_credentials_authority_and_public_route_before_success(target, tmp_path, monkeypatch, failure):
+    from scripts.ops import nebius_dns_challenge as credentials
+    from scripts.ops import nebius_dns_publication as publication
+
+    events = []
+    api = object()
+    config = {"credential_file": str(tmp_path / "credential.json")}
+    state = tmp_path / "ingress"
+    state.mkdir(mode=0o700)
+
+    def qualify(**arguments):
+        assert arguments == {"api": api, "certificate_config": config, "state_dir": state}
+        events.append("ingress")
+        return dict(target)
+
+    def token(path):
+        assert path == tmp_path / "credential.json"
+        events.append("credential")
+        if failure == "expired" or (failure == "expires_midway" and events.count("credential") > 1):
+            raise credentials.DNSChallengeError("expired")
+        if failure == "changed" and events.count("credential") > 1:
+            return "replacement-private-token"
+        return "private-fixture-token"
+
+    class BoundProvider(Provider):
+        def __init__(self, actual, token):
+            super().__init__()
+            assert actual == target and token == "private-fixture-token"
+            events.append("provider")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def create(self, name, address):
+            events.append("create:" + name)
+            return super().create(name, address)
+
+    def authority(actual):
+        assert actual == target
+        events.append("authority")
+        if failure == "authority":
+            raise publication.PublicationError("delegated")
+
+    def public(actual):
+        assert actual == target
+        events.append("public")
+        if failure == "public":
+            raise publication.PublicationError("wrong TLS")
+
+    monkeypatch.setattr(operation, "qualify_dns_target", qualify)
+    monkeypatch.setattr(credentials, "load_token", token)
+    monkeypatch.setattr(publication, "GoDaddyPublication", BoundProvider)
+    monkeypatch.setattr(publication, "qualify_authority", authority)
+    monkeypatch.setattr(publication, "wait_for_addresses", lambda actual: events.append("propagation"))
+    monkeypatch.setattr(publication, "qualify_public_routes", public)
+    if failure:
+        with pytest.raises(operation.OperationError) as caught:
+            operation.publish_ingress_dns(api=api, certificate_config=config, state_dir=state)
+        assert "private-fixture-token" not in str(caught.value)
+    else:
+        result = operation.publish_ingress_dns(api=api, certificate_config=config, state_dir=state)
+        assert result["status"] == "dns_published" and result["service_uid"] == target["service_uid"]
+        assert events.index("authority") < events.index("create:*.dev.nebius")
+        assert events.index("propagation") < events.index("public")
+    if failure in {"expired", "changed", "expires_midway", "authority"}:
+        assert not any(event.startswith("create:") for event in events)
+    if failure == "expired":
+        assert "provider" not in events
+    if failure == "public":
+        journal = json.loads((state / "dns/dns-publication.json").read_text())
+        assert journal["status"] == "pending"
