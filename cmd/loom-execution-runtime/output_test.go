@@ -99,6 +99,54 @@ func TestTimeoutCaptureKeepsVerifierRewardWithMissingNativeArtifact(t *testing.T
 	}
 }
 
+func TestCaptureVerifierFailureKeepsRewardSeparateFromDiagnostics(t *testing.T) {
+	for _, diagnostic := range []string{
+		`{"exception_type":"ServiceExecutionTaskError","exception_message":"isolated verifier process failed"}`,
+		`{"rewards":{"passed":1}}`,
+	} {
+		t.Run(diagnostic, func(t *testing.T) {
+			workspace, output := t.TempDir(), t.TempDir()
+			p := completeOutputPlan(workspace)
+			p.OutputDeclarations = []outputDeclaration{
+				{SourcePath: ".loom/verifier/exception.json", RelativePath: "diagnostics/verifier-exception.json", Kind: "verifier"},
+				p.OutputDeclarations[3],
+			}
+			writeWorkspaceOutput(t, workspace, ".loom/verifier/exception.json", diagnostic)
+			writeWorkspaceOutput(t, workspace, ".loom/verifier/output.json", `{"rewards":{"passed":0}}`)
+			result := resultManifest{Status: "verifier_error", PartialEvidence: true}
+			if err := captureDeclaredOutputs(p, workspace, output, &result); err != nil {
+				t.Fatal(err)
+			}
+			if reward, ok := result.VerifierRewards["passed"]; !ok || reward != 0 {
+				t.Fatalf("failed verifier lost its canonical reward: %#v", result)
+			}
+			if result.Status != "verifier_error" || !result.PartialEvidence {
+				t.Fatalf("reward replaced failed phase status: %#v", result)
+			}
+			if len(result.Outputs) != 2 || result.Outputs[0].State != "captured" {
+				t.Fatalf("diagnostic evidence was discarded: %#v", result.Outputs)
+			}
+		})
+	}
+}
+
+func TestVerifierDiagnosticCannotSupplyMissingCanonicalReward(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	p := completeOutputPlan(workspace)
+	p.OutputDeclarations = []outputDeclaration{
+		{SourcePath: ".loom/verifier/exception.json", RelativePath: "diagnostics/verifier-exception.json", Kind: "verifier"},
+		p.OutputDeclarations[3],
+	}
+	writeWorkspaceOutput(t, workspace, ".loom/verifier/exception.json", `{"rewards":{"passed":1}}`)
+	result := resultManifest{Status: "verifier_error", PartialEvidence: true}
+	if err := captureDeclaredOutputs(p, workspace, output, &result); err == nil {
+		t.Fatal("missing canonical output lost its required-artifact error")
+	}
+	if result.VerifierRewards != nil {
+		t.Fatalf("diagnostic supplied a reward: %#v", result.VerifierRewards)
+	}
+}
+
 func TestCaptureDeclaredOutputsRejectsWorkspaceSymlink(t *testing.T) {
 	workspace, output := t.TempDir(), t.TempDir()
 	p := completeOutputPlan(workspace)
