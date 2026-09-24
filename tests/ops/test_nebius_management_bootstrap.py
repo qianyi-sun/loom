@@ -4,11 +4,13 @@ from __future__ import annotations
 import copy
 import json
 import shutil
+import ssl
 from contextlib import contextmanager
 from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+import httpx
 
 from tests.ops.test_nebius_management_material import SecretAPI
 
@@ -192,3 +194,61 @@ def test_invalid_outer_journal_preserves_all_resources(tmp_path, change):
         bootstrap_management(binding=binding, api=api, state_dir=state)
     assert "private-secret-diagnostic" not in str(error.value)
     assert len(api.creates) == 1 and len(api.secrets.created) == 4
+
+
+def test_namespace_policy_change_between_secrets_stops_delivery(tmp_path):
+    from scripts.ops.nebius_management_bootstrap import BootstrapError, bootstrap_management
+
+    binding, api = setup()
+    original_factory = api.material_api
+
+    @contextmanager
+    def changing_namespace(material_binding):
+        with original_factory(material_binding) as secrets:
+            create = secrets.create_secret
+
+            def mutate(document):
+                create(document)
+                api.namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
+
+            secrets.create_secret = mutate
+            yield secrets
+
+    api.material_api = changing_namespace
+    with pytest.raises(BootstrapError):
+        bootstrap_management(binding=binding, api=api, state_dir=tmp_path / "bootstrap")
+    assert len(api.secrets.created) == 1
+
+
+@pytest.mark.parametrize("change", ["name", "owner", "pss", "missing_operation", "extra"])
+def test_transport_cannot_create_arbitrary_namespace(monkeypatch, change):
+    from scripts.ops.nebius_management_bootstrap import BootstrapError, HTTPSBootstrapAPI
+
+    binding, _ = setup()
+    document = {
+        "apiVersion": "v1", "kind": "Namespace", "metadata": {
+            "name": binding.namespace,
+            "labels": {"loom.nebius/platform": "true", "pod-security.kubernetes.io/enforce": "restricted",
+                       "loom.nebius/management-installation": binding.installation_id},
+            "annotations": {"loom.nebius/management-bootstrap-operation": str(uuid4())},
+        },
+    }
+    if change == "name":
+        document["metadata"]["name"] = "production"
+    elif change == "owner":
+        document["metadata"]["labels"]["loom.nebius/management-installation"] = str(uuid4())
+    elif change == "pss":
+        document["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
+    elif change == "missing_operation":
+        document["metadata"]["annotations"] = {}
+    else:
+        document["metadata"]["finalizers"] = ["foreign"]
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("Rejected Namespace must not reach network")
+
+    monkeypatch.setattr(httpx.Client, "send", no_network)
+    with HTTPSBootstrapAPI(binding=binding, api_server="https://cluster.example.test",
+                           ssl_context=ssl.create_default_context()) as api:
+        with pytest.raises(BootstrapError, match="outside"):
+            api.create_namespace(document)
