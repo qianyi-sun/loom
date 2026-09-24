@@ -575,7 +575,7 @@ def test_retirement_program_calls_admin_api_without_exposing_credentials(tmp_pat
         assert path == "/admin/service-execution/targets/previous-primary/health"
         assert authorization == "Bearer " + token
         assert body == {"desired_state": "retired", "observed_state": "retired",
-                        "health_status": "unknown", "observed_at": body["observed_at"],
+                        "health_status": "unhealthy", "observed_at": body["observed_at"],
                         "error_code": "target_replaced"}
     finally:
         server.shutdown()

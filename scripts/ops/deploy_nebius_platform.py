@@ -535,7 +535,7 @@ def target_action(action, previous_id, target_id, *, secret_file, origin):
             raise ValueError("replacement target must be a fresh identity")
         if action == "retire":
             expected = {"target_id": previous_id, "desired_state": "retired",
-                        "observed_state": "retired", "health_status": "unknown"}
+                        "observed_state": "retired", "health_status": "unhealthy"}
             body = {key: value for key, value in expected.items() if key != "target_id"}
             body.update(observed_at=datetime.now(UTC).isoformat(), error_code="target_replaced")
             result = request("POST", "/admin/service-execution/targets/" + previous_id + "/health", body)
