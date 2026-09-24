@@ -39,11 +39,7 @@ from loom_service.auth_guards import (
 )
 from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
-from loom_service.delivery_export import (
-    CanonicalTrialBundleFile,
-    DeliveryExportError,
-    canonical_bundle_from_artifact,
-)
+from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemental
@@ -60,6 +56,7 @@ from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
 from loom_service.task_filter import resolve_task_filter_with_diagnostics
+from loom_service.trial_bundles import CanonicalTrialBundleFile, canonical_bundle_from_artifact
 from loom_service.usage_accounting import empty_usage_projection, usage_by_batch_ids
 
 router = APIRouter()

@@ -15,12 +15,12 @@ from loom.db.schema import Batch
 from loom_service import wire_responses as wire
 from loom_service.auth_guards import require_scope, require_team_or_admin
 from loom_service.delivery_export import (
-    DeliveryExportError,
     artifact_storage_for_download,
     create_delivery_export,
     latest_delivery_export,
     load_delivery_artifact,
 )
+from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.delivery_export_openhands import OpenHandsExportError
 from loom_service.delivery_export_tb2_v2 import Tb2V2ExportError
 from loom_service.dependencies import SessionAndCtx

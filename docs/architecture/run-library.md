@@ -61,6 +61,12 @@ evidence stays in the full bundle download, outside the reusable file inventory.
 The artifact id identifies the original bundle; the selected key and relative
 path identify its file, and reuse provenance retains both bundle and file digests.
 
+`loom_service.trial_bundles` owns this shared inventory parser, attempt identity,
+bundle lookup and manifest projection. Run Library, Trial routes and delivery
+exports use that same contract. `loom_service.delivery_export_errors` owns the
+shared error types; routes retain visibility checks and error redaction.
+Archive construction and object publication remain in `delivery_export`.
+
 Within the producing team, `safe` or `verified_internal` outputs may be reused
 while sharing/redaction scans are pending. Explicitly blocked, unsafe, unknown,
 or redaction-blocked content is not reusable. This does not change the stored

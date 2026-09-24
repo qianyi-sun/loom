@@ -28,12 +28,8 @@ from loom.resource_usage_store import report_values
 from loom_control_plane.service_execution import persist_execution_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
-from loom_service.delivery_export import (
-    ObjectRef,
-    SelectedTrial,
-    _build_archive,
-    _resource_usage_for_selected,
-)
+from loom_service.delivery_export import SelectedTrial, _build_archive, _resource_usage_for_selected
+from loom_service.trial_bundles import ObjectRef
 from tests.integration.test_service_execution_leases import _target
 from tests.integration.test_trial_resource_usage import resource_seed  # noqa: F401
 
