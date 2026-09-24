@@ -290,6 +290,16 @@ def classify_trial_outcome(trial: Any) -> dict[str, Any]:
             rerunnable=True,
         )
 
+    if reason == "oom_killed":
+        return _common(
+            reason_code="trial.oom_killed", reason=reason,
+            failure_class="platform_failure", root_cause="memory_limit",
+            platform_outcome="failed", score_outcome="unscored",
+            rerun_recommendation="operator_approval", message=message,
+            category="resource", attribution="resource_limit", rerunnable=True,
+            requires_operator_approval=True,
+        )
+
     if reason in _AGENT_FAILURE_REASONS:
         return _common(
             reason_code=f"trial.{reason}",

@@ -72,66 +72,66 @@ a request template and existing frozen plans retain their previous behavior.
 ## Persistent Nebius scheduling baseline
 
 Ordinary automatic native Terminus-2 submissions use a persistent baseline of
-**1 CPU / 2 GiB RAM / 2 GiB ephemeral storage per complete execution Pod**. It
-applies to future task IDs and revisions, including frontend, CLI and API
-submissions. It is a scheduling policy, not a claim that all workloads use less
-than these amounts or that every task has been empirically calibrated.
+a **target node-capacity share**, frozen on the execution lease before admission.
+Task-package CPU, memory and storage declarations are minimum requirements.
+Existing leases keep their original allocation; changing a pool does not resize
+running containers. New publisher profiles advertise `resource_allocation_policy:
+node-share-v1` only with the matching execution runtime. Historical profiles and
+explicit precompiled plans keep their prior contract; rerun against the current
+runtime to adopt this policy. The normal candidate build publishes this capability.
+Manual profile creation requires `--node-share-resources` and a compatible runtime.
+Do not add the capability to an old runtime image. Rollback must retain a compatible
+runtime for existing allocated leases until they finish.
 
-The deployment environment's optional `default_task_resource_requests` holds the
-role template. If omitted, the Nebius renderer resolves and persists this value
-in both the environment ConfigMap and each published runtime profile:
+The allocator uses a fresh placement observation for the target pool (or its
+existing compatible allocatable sample when scaled to zero). Node allocatable
+already excludes kube/system reservations. Subtract resident DaemonSet requests
+once, and respect the configured per-node policy ceilings. It does not use
+transiently free memory or subtract system reservations a second time.
 
-```json
-{
-  "default_task_resource_requests": {
-    "controller": {
-      "cpu_millis": 200,
-      "memory_mib": 512,
-      "ephemeral_storage_mib": 512
-    },
-    "task_sandbox": {
-      "cpu_millis": 600,
-      "memory_mib": 1024,
-      "ephemeral_storage_mib": 1024
-    },
-    "verifier_sandbox": {
-      "cpu_millis": 200,
-      "memory_mib": 512,
-      "ephemeral_storage_mib": 512
-    }
-  }
-}
-```
+Baseline slots are `max(1, floor(usable CPU millicores / 1000))`. Divide usable
+memory and ephemeral storage by that slot count. Within each complete Pod share,
+reserve the controller and ordinary sidecars first, then divide the remainder
+between the concurrently resident task and verifier sandboxes. For each sandbox,
+take the component-wise maximum of that share, its task declaration, and its
+explicit request. Both sandboxes remain resident even while one is idle.
 
-An explicit configured template survives subsequent candidate releases. Each
-configured role requires positive integer CPU millicores, memory MiB and storage
-MiB. This template does not alter source task/container limits, workspace/output
-bounds, build scratch space, node image-cache storage, or the native node ceiling.
-The default requires compatible role limits. Submission rejects requests above
-current hard limits; for a task with lower limits, provide a compatible explicit
-override rather than silently raising its limits.
+For example, 16 usable CPUs and 240 GiB usable memory give a 15 GiB Pod share.
+After a 1 GiB controller, each of two sandboxes receives a 7 GiB default. A 4 GiB
+task therefore receives 7 GiB; a 12 GiB task receives 12 GiB per sandbox and
+reserves 25 GiB for the complete Pod. Every execution container's memory request
+equals its limit. Controller CPU requests remain distinct from CPU limits and
+throttling; storage remains subject to Kubernetes ephemeral-storage semantics.
 
-At submission the Batch resolver binds the template to each selected automatic
-Terminus task's current source checksum. The resulting per-task requests are
-frozen on the Batch. The precedence is:
+Admission, cost reservations, placement and rendered container resources consume
+this same frozen plan. Larger task requirements reduce concurrency; insufficient
+capacity queues/scales through the existing capacity controller, while an
+allocation larger than a supported node returns
+`execution_capacity_workload_exceeds_node_allocatable`. No reservation is shrunk
+to force placement. CPU-derived slots are a baseline, not guaranteed concurrency.
 
-1. Explicit per-task submission override.
-2. Environment `task_resource_requests` entry for that exact task revision.
-3. Environment `default_task_resource_requests` template.
+New node-share profiles omit the retired `default_task_resource_requests`
+template. Submission also ignores a legacy default template if one was retained
+in such a profile, so it cannot reject a small task declaration before target
+allocation. Historical profiles retain that template for compatibility.
 
-A higher-priority per-task entry replaces that task's request object; unlisted
-roles keep the existing role defaults rather than merging individual fields from
-the lower-priority template. Exact revision overrides remain strict: stale
-checksums and requests over limits are rejected. The general template binds new
-revisions at submission, so operators do not need to copy a calibrated cohort for
-each new task. Non-Terminus and explicitly precompiled execution configurations
-are not silently overridden. Existing Batches keep their frozen maps; reruns
-retain the selected parent requests even when choosing the current runtime.
+Revision-bound per-task request overrides remain optional compatibility inputs:
+explicit submission overrides environment revision entries, and source checksum
+and limit validation remain strict. The node allocator then raises effective
+memory reservations and limits together. Original task checksums, source
+declarations, output bounds and build resources are unchanged.
+
+The Trial detail API exposes `materialization.resource_allocation`, including
+source minima, effective requests and limits for every role, and complete Pod
+requests. The same role allocations are shown on the Trial detail page. The
+Batch's submitted request map is input policy; consult the Trial's frozen
+allocation for actual scheduling and execution values.
 
 ### Per-task measured overrides
 
 After collecting representative usage, use an override to compare scheduling
-requests for selected tasks without rebuilding images or changing hard limits.
+inputs for selected tasks without rebuilding images. The node-share allocator
+then resolves effective requests and limits before admission.
 Pass `--task-resource-requests @requests.json` to `loom eval batch create`, or the
 same `task_resource_requests` object to `POST /api/v1/batches`:
 
@@ -162,12 +162,12 @@ same `task_resource_requests` object to `POST /api/v1/batches`:
 
 To persist a deliberate task-specific override for ordinary users, place this map
 under `task_resource_requests` in the environment configuration. Remove obsolete
-cohort overrides when adopting the general baseline, or their higher precedence
-will intentionally preserve their previous requests. Overrides for unselected
+cohort overrides when adopting the node-share policy; higher overrides remain
+minimum inputs to the final allocation. Overrides for unselected
 tasks, other backends/agents or explicit precompiled bindings are rejected.
 
 The Batch detail API exposes its resolved `task_resource_requests` map; the page
-shows per-task totals. Kubernetes placement, admission reservations and
+shows submitted per-task totals. Trial details show the final allocation. Kubernetes placement, admission reservations and
 request-based cost allocation use the same effective Pod requests. Reservations
 are not maximum consumption, and request-based costs are not the provider bill.
 Compare packing and node-hours while retaining OOM, eviction, latency and

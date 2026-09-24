@@ -238,6 +238,7 @@ def create_candidate(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    node_share_resources: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_identity(document, require_current_images=True)
     key = _trusted_signer(signing_key, signing_key_id, keyring_json)
@@ -272,6 +273,7 @@ def create_candidate(
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_identity=supports_task_identity,
+        resource_allocation_policy="node-share-v1" if node_share_resources else None,
         image_admission=ExecutionImageAdmissionBundleV1(
             schema_version="loom.execution-image-admission.v1",
             admissions=tuple(admissions),
@@ -664,6 +666,7 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
                 service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
                 supports_task_identity=getattr(args, "supports_task_identity", False),
+                node_share_resources=True,
             )
             write_json(args.output / "candidate.json", manifest)
             write_json(args.output / "runtime-profile.json", profile)
@@ -702,6 +705,8 @@ def main() -> int:
         command.add_argument("--supports-task-web-egress", action="store_true")
         command.add_argument("--service-lifecycle-ready", action="store_true")
         command.add_argument("--supports-task-identity", action="store_true")
+    create.add_argument("--node-share-resources", action="store_true",
+                        help="Only for a build record whose runtime supports node-share-v1")
     args = parser.parse_args()
     try:
         if args.command == "check-shape":
@@ -722,6 +727,7 @@ def main() -> int:
                 supports_task_web_egress=args.supports_task_web_egress,
                 service_lifecycle_ready=args.service_lifecycle_ready,
                 supports_task_identity=args.supports_task_identity,
+                node_share_resources=args.node_share_resources,
             )
             args.output.mkdir(parents=True, exist_ok=False)
             write_json(args.output / "candidate.json", manifest)

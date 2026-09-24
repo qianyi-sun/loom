@@ -1379,13 +1379,16 @@ def _build_platform(
         raise NebiusPlatformError(
             "task identity readiness requires a qualified policy; execution namespaces remain restricted"
         )
-    # Resolve the environment-owned baseline once and persist it with the
-    # environment and each release profile. Task limits remain source-owned.
+    # Keep the legacy environment template for older profiles. New node-share
+    # profiles resolve their effective budget only after selecting a target.
     default_requests = ExecutionResourceRequestsV1.model_validate(
         config.get("default_task_resource_requests", DEFAULT_TASK_RESOURCE_REQUESTS)
     ).model_dump(mode="json")
     config = {**config, "default_task_resource_requests": default_requests}
-    profile = {**profile, "default_task_resource_requests": default_requests}
+    if profile.get("resource_allocation_policy") == "node-share-v1":
+        profile = {key: value for key, value in profile.items() if key != "default_task_resource_requests"}
+    else:
+        profile = {**profile, "default_task_resource_requests": default_requests}
     # Exact task/revision entries remain higher-priority overrides.
     if "task_resource_requests" in config:
         profile = {**profile, "task_resource_requests": config["task_resource_requests"]}

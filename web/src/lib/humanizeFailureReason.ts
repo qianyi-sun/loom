@@ -5,6 +5,10 @@ export interface FailureReasonSummary {
 }
 
 const FAILURE_REASON_HELP: Record<string, Omit<FailureReasonSummary, "code">> = {
+  oom_killed: {
+    label: "Container memory limit exceeded",
+    description: "The system terminated an execution container after an out-of-memory failure. Periodic samples may miss the final peak.",
+  },
   agent_error: {
     label: "Agent error",
     description: "The agent process failed before the verifier could score the task.",

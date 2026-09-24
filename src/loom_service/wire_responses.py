@@ -372,7 +372,29 @@ class TrialDetailMaterializationVariant0BundleVariant0(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class ExecutionResourceValues(TypedDict):
+    cpu_millis: int
+    memory_mib: int
+    ephemeral_storage_mib: int
+
+
+class ExecutionContainerAllocation(TypedDict):
+    role: str
+    requests: ExecutionResourceValues
+    limits: ExecutionResourceValues
+
+
+class ExecutionResourceAllocation(TypedDict):
+    policy: str
+    baseline_slots: int
+    declared_task: ExecutionResourceValues
+    pod_requests: ExecutionResourceValues
+    containers: list[ExecutionContainerAllocation]
+
+
+@with_config(ConfigDict(extra="allow"))
 class TrialDetailMaterializationVariant0(TypedDict):
+    resource_allocation: NotRequired[ExecutionResourceAllocation | None]
     state: str
     lifecycle_stage: (
         Literal["queued"]
@@ -511,6 +533,7 @@ class DebugEvidenceFailure(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class DebugEvidence(TypedDict):
+    execution_failure: NotRequired[dict[str, Any] | None]
     schema_version: Literal["1"]
     generated_at: NotRequired[str]
     entity: DebugEvidenceEntity

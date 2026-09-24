@@ -1109,3 +1109,14 @@ def test_task_identity_readiness_cannot_relax_restricted_execution_policy(platfo
     profile['supports_task_identity'] = True
     with pytest.raises(NebiusPlatformError, match=r'task identity.*restricted'):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+def test_node_share_profile_does_not_publish_retired_default_template(platform_inputs):
+    config, candidate, profile = platform_inputs
+    profile["resource_allocation_policy"] = "node-share-v1"
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    cm = next(doc for doc in files["10-config-network.yaml"]
+              if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == "loom-platform-config")
+    rendered = json.loads(cm["data"]["profile.json"])
+    assert rendered["resource_allocation_policy"] == "node-share-v1"
+    assert "default_task_resource_requests" not in rendered

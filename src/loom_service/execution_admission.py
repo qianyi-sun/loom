@@ -109,7 +109,10 @@ async def freeze_task_resource_requests(
         if task_id in task_ids and terminus_only
     }
     requests.update(overrides)
-    baseline = profile.default_task_resource_requests if terminus_only else None
+    # Node-share profiles resolve memory from target capacity at admission.
+    # The retired fixed template must not reject small source declarations first.
+    baseline = (profile.default_task_resource_requests
+                if terminus_only and profile.resource_allocation_policy is None else None)
     selected_ids = set(task_ids) if baseline is not None else set(requests)
     if not selected_ids:
         return profile.model_copy(update={"task_resource_requests": {}})

@@ -461,6 +461,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         )
         assert "worker" not in manifest["images"]
         assert "tb90_task" not in manifest["images"]
+        assert profile["resource_allocation_policy"] == "node-share-v1"
         assert profile["agent_image_ref"] == manifest["images"]["harbor_runtime"]["image_ref"]
         assert release["image_admission"] in profile["image_admission"]["admissions"]
         for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):

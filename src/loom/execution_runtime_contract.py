@@ -110,6 +110,16 @@ class TaskExecutionResourceRequestsV1(_Strict):
     requests: ExecutionResourceRequestsV1
 
 
+class NodeResourceAllocationV1(_Strict):
+    """Frozen task minima and usable target-node budget, after resident overhead."""
+
+    policy: Literal["node-share-v1"] = "node-share-v1"
+    target_id: str = Field(min_length=1, max_length=80)
+    usable_node: ContainerResourcesV1
+    baseline_slots: int = Field(gt=0)
+    declared_task: ContainerResourcesV1
+
+
 class ProcessPhaseV1(_Strict):
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
@@ -296,6 +306,7 @@ class ExecutionRuntimePlanV1(_Strict):
     task_egress: WebAllowlist | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
+    node_resource_allocation: NodeResourceAllocationV1 | None = None
     workspace_mib: int = Field(gt=0, le=1_048_576)
     runtime_volume_mib: int = Field(gt=0, le=4096)
     termination_grace_seconds: int = Field(default=30, ge=1, le=300)
@@ -400,7 +411,8 @@ class ExecutionRuntimePlanV1(_Strict):
                 raise ValueError("controller resources require an isolated attempt controller")
             if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
                 raise ValueError("controller sizing must preserve task and verifier resources")
-            if (self.controller_resources.ephemeral_storage_mib
+            if (self.node_resource_allocation is None
+                    and self.controller_resources.ephemeral_storage_mib
                     != self.task_resources.ephemeral_storage_mib):
                 raise ValueError("controller sizing must preserve task-derived storage")
         if self.resource_requests is not None:
@@ -417,6 +429,18 @@ class ExecutionRuntimePlanV1(_Strict):
             self.resource_requests.validate_limits(
                 controller=self.execution_resources, task=self.task_resources,
             )
+        if self.node_resource_allocation is not None:
+            allocation = self.node_resource_allocation
+            if allocation.baseline_slots != max(1, allocation.usable_node.cpu_millis // 1000):
+                raise ValueError("node allocation slot count does not match usable CPU")
+            if any(getattr(self.task_resources, key) < getattr(allocation.declared_task, key)
+                   for key in ContainerResourcesV1.model_fields):
+                raise ValueError("node allocation cannot reduce declared task requirements")
+            for role, limits in [("execution", self.execution_resources), *(
+                (sidecar.role_name, sidecar.resources) for sidecar in self.sidecars
+            )]:
+                if self.container_request(role).memory_mib != limits.memory_mib:
+                    raise ValueError("node allocation memory requests must equal limits")
         source_paths = [item.source_path for item in self.output_declarations]
         bundle_paths = [item.relative_path for item in self.output_declarations]
         if len(source_paths) != len(set(source_paths)) or len(bundle_paths) != len(
@@ -436,6 +460,8 @@ class ExecutionRuntimePlanV1(_Strict):
             payload.pop("controller_resources")
         if self.resource_requests is None:
             payload.pop("resource_requests")
+        if self.node_resource_allocation is None:
+            payload.pop("node_resource_allocation")
         if self.agent_image_ref is None:
             payload.pop("agent_image_ref")
         if self.task_image_materialization_id is None:
@@ -617,11 +643,9 @@ def validate_runtime_plan_requirements(
         requirements.memory_mib,
         requirements.ephemeral_storage_mib,
     )
-    actual_resources = (
-        plan.task_resources.cpu_millis,
-        plan.task_resources.memory_mib,
-        plan.task_resources.ephemeral_storage_mib,
-    )
+    declared = (plan.node_resource_allocation.declared_task
+                if plan.node_resource_allocation else plan.task_resources)
+    actual_resources = (declared.cpu_millis, declared.memory_mib, declared.ephemeral_storage_mib)
     if expected_resources != actual_resources:
         raise ValueError("runtime plan resources do not match workload requirements")
     if requirements.sidecar_count != sum(not sidecar.private_sandbox for sidecar in plan.sidecars):

@@ -313,6 +313,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
         service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
         supports_task_identity=getattr(args, "supports_task_identity", False),
+        resource_allocation_policy="node-share-v1" if getattr(args, "node_share_resources", False) else None,
         image_admission=bundle,
     )
     public_bytes = private_key.public_key().public_bytes(
@@ -361,6 +362,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--supports-task-web-egress", action="store_true")
     parser.add_argument("--service-lifecycle-ready", action="store_true")
     parser.add_argument("--supports-task-identity", action="store_true")
+    parser.add_argument("--node-share-resources", action="store_true")
     parser.add_argument("--signing-key", required=True, type=Path)
     parser.add_argument("--signing-key-id", required=True)
     parser.add_argument("--create-signing-key", action="store_true")
