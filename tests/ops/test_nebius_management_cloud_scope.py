@@ -228,3 +228,15 @@ async def test_broad_permit_on_later_page_is_not_ignored(cloud):
     cloud.clients["permits"].list = pages
     with pytest.raises(ManagementCloudScopeError):
         await qualify(cloud)
+
+
+@pytest.mark.asyncio
+async def test_typed_provider_readback_not_an_invented_key_prefix_identifies_the_key(cloud):
+    cloud.scope["provisioning_key_id"] = "publickey-e00example"
+    cls, document = cloud.rows.pop("authpublickey-manager")
+    document["metadata"]["id"] = "publickey-e00example"
+    cloud.rows["publickey-e00example"] = cls, document
+    credentials = json.loads(cloud.material["loom-management-cloud"]["credentials.json"])
+    credentials["subject-credentials"]["kid"] = "publickey-e00example"
+    cloud.material["loom-management-cloud"]["credentials.json"] = json.dumps(credentials)
+    assert (await qualify(cloud))["provisioning_account_id"] == "serviceaccount-manager"

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from cryptography.hazmat.primitives import serialization
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,19 +21,22 @@ class ManagementCloudScopeError(RuntimeError):
     """Sanitized diagnostic; SDK errors and credential material must stay private."""
 
 
+_ProviderId = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,128}$")]
+
+
 class ManagementCloudScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    tenant_id: str = Field(pattern=r"^tenant[a-z0-9-]+$")
+    tenant_id: _ProviderId
     region: str = Field(pattern=r"^[a-z]+-[a-z]+[0-9]+$")
-    provisioning_project_id: str = Field(pattern=r"^project[a-z0-9-]+$")
-    provisioning_account_id: str = Field(pattern=r"^serviceaccount[a-z0-9-]+$")
-    provisioning_group_id: str = Field(pattern=r"^group[a-z0-9-]+$")
-    provisioning_key_id: str = Field(pattern=r"^authpublickey[a-z0-9-]+$")
-    backup_project_id: str = Field(pattern=r"^project[a-z0-9-]+$")
-    backup_account_id: str = Field(pattern=r"^serviceaccount[a-z0-9-]+$")
-    backup_group_id: str = Field(pattern=r"^group[a-z0-9-]+$")
-    backup_bucket_id: str = Field(pattern=r"^bucket[a-z0-9-]+$")
-    backup_key_id: str = Field(pattern=r"^accesskey[a-z0-9-]+$")
+    provisioning_project_id: _ProviderId
+    provisioning_account_id: _ProviderId
+    provisioning_group_id: _ProviderId
+    provisioning_key_id: _ProviderId
+    backup_project_id: _ProviderId
+    backup_account_id: _ProviderId
+    backup_group_id: _ProviderId
+    backup_bucket_id: _ProviderId
+    backup_key_id: _ProviderId
 
     @model_validator(mode="after")
     def separate_authorities(self) -> ManagementCloudScope:
