@@ -19,14 +19,14 @@ async def reference_drivers(sandboxes):  # noqa: F811
     yield tuple(sandboxes[:2])
 
 
-async def _reference_fixture(drivers):
+async def _reference_fixture(drivers, external="/usr/local/bin/interpreter"):
     for driver in drivers:
         result = await driver.exec(
             "mkdir -p /workspace /usr/local/bin /cache; cp /usr/local/bin/python3.11 /usr/local/bin/interpreter; "
             "echo baseline > /cache/baseline", user="root")
         assert result.return_code == 0, result.stderr
     result = await drivers[0].exec(
-        "mkdir -p /cache/venv/bin; ln -s /usr/local/bin/interpreter /cache/venv/bin/python; "
+        f"mkdir -p /cache/venv/bin; ln -s {external} /cache/venv/bin/python; "
         "ln -s python /cache/venv/bin/python3; ln -s python /cache/venv/bin/python3.9", user="root")
     assert result.return_code == 0, result.stderr
 
@@ -63,10 +63,11 @@ async def test_native_handoff_restores_the_shell_runtime_libraries(sandboxes, tm
     assert untouched.return_code == 0, untouched.stderr
 
 
-async def test_declared_external_interpreter_is_checked_and_preserved(reference_drivers, tmp_path):
+@pytest.mark.parametrize("external", ["/usr/local/bin/interpreter", "../../../usr/local/bin/interpreter"])
+async def test_declared_external_interpreter_is_checked_and_preserved(reference_drivers, tmp_path, external):
     from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
 
-    await _reference_fixture(reference_drivers)
+    await _reference_fixture(reference_drivers, external)
     agent, verifier = reference_drivers
     options = {"workdir": PurePosixPath("/workspace"),
                "reference_files": (PurePosixPath("/usr/local/bin/interpreter"),)}
@@ -77,7 +78,7 @@ async def test_declared_external_interpreter_is_checked_and_preserved(reference_
     assert manifest["reference_files"][0]["path"] == "/usr/local/bin/interpreter"
     await import_mutable_paths(verifier, paths, tmp_path, **options)
     checked = await verifier.exec(
-        "set -eu; test \"$(readlink /cache/venv/bin/python)\" = /usr/local/bin/interpreter; "
+        f"set -eu; test \"$(readlink /cache/venv/bin/python)\" = {external}; "
         "test \"$(readlink /cache/venv/bin/python3)\" = python; "
         "test \"$(readlink /cache/venv/bin/python3.9)\" = python; "
         "/cache/venv/bin/python3.9 -c 'print(\"reference-preserved\")'", user="root")

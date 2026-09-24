@@ -42,6 +42,7 @@ _POLICY = WorkspaceStagingPolicy((".loom/**",), (".loom/**",), ())
 def _archive_evidence(
     archive: Path, root: PurePosixPath | None = None,
     reference_files: tuple[PurePosixPath, ...] = (),
+    *, allow_relative_references: bool = False,
 ) -> dict[str, int | str]:
     if archive.is_symlink() or not archive.is_file():
         raise WorkspaceSnapshotError("mutable path archive is not a regular file")
@@ -57,7 +58,8 @@ def _archive_evidence(
                 if count > MAX_MUTABLE_ENTRIES or expanded > MAX_MUTABLE_BYTES:
                     raise WorkspaceSnapshotError("mutable path archive exceeds content limits")
         _validate_workspace_archive(archive, _POLICY, root=root,
-                                    external_reference_files=frozenset(reference_files))
+                                    external_reference_files=frozenset(reference_files),
+                                    allow_relative_references=allow_relative_references)
         with archive.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
     except (tarfile.TarError, OSError) as exc:
@@ -195,7 +197,8 @@ async def export_mutable_paths(
             await _export_workspace_archive(driver, root, archive, preserve_acls=preserve_acls)
         else:
             await asyncio.to_thread(_empty_archive, archive)
-        evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files)
+        evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files,
+                                           allow_relative_references=True)
         records.append({"path": str(root), "archive": archive.name, **evidence,
                         **({"state": "absent"} if not present[root] else {})})
         _check_totals(records)
@@ -234,7 +237,8 @@ async def import_mutable_paths(
     # Validate every archive before changing any verifier directory.
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
-        evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files)
+        evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files,
+                                           allow_relative_references=True)
         await asyncio.to_thread(check_acl_declaration, archive, preserve_acls=preserve_acls)
         absent = declared["paths"][index].get("state") == "absent"
         if absent and evidence["entries"] != 0:
