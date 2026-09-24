@@ -197,6 +197,15 @@ describe("TrialDetail trajectory section", () => {
     expect(await screen.findByText("terminus-2@harbor-v2")).toBeInTheDocument();
   });
 
+  it("explains terminal zero-event trials and links to the final diagnostics", async () => {
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, { ...TRIAL_BODY, state: "failed", failure_reason: "task_image_build_failed" } as typeof TRIAL_BODY);
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>, { route: `/trials/${TRIAL_ID}` });
+    expect(await screen.findByText(/This trial ended without recorded trajectory events/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open build and execution diagnostics" })).toHaveAttribute("href", `/trials/${TRIAL_ID}#diagnostics`);
+    expect(screen.queryByText("Trajectory pending")).not.toBeInTheDocument();
+    expect(screen.queryByText("No events yet")).not.toBeInTheDocument();
+  });
+
   it("hides Load more when the trajectory is empty", async () => {
     fetchSpy({ ok: true, body: { events: [], next_cursor: null } });
     renderWithProviders(
@@ -240,7 +249,7 @@ describe("TrialDetail trajectory section", () => {
     expect(await screen.findByText("Owner")).toBeInTheDocument();
     expect(screen.getByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
-    expect(screen.getByText("team / pending_scan")).toBeInTheDocument();
+    expect(screen.getByText("Team access / sharing scan pending")).toBeInTheDocument();
     expect(screen.getByText("Provenance")).toBeInTheDocument();
     expect(screen.getByText(/reused artifact/i)).toBeInTheDocument();
   });

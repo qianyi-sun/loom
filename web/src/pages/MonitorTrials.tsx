@@ -1,18 +1,18 @@
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useMemo } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import Pagination from "../components/Pagination";
-import { initialPage, nextPage, prevPage, type PageState } from "../components/paginationState";
+import { useUrlCursorPage } from "../hooks/useUrlCursorPage";
 import { TrialProgressPill } from "../components/TrialProgress";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { formatLocalDateTime } from "../lib/dateTime";
-import { ownershipLabel, ownershipSearchText } from "../lib/ownership";
+import { ownershipLabel } from "../lib/ownership";
 import { formatTokenUsage } from "../lib/tokenUsage";
 import { SkeletonRows } from "./MonitorControls";
 import {
@@ -45,7 +45,9 @@ export function TrialsView({
   providerConnectionFilter: string;
   providerModelFilter: string;
 }): JSX.Element {
-  const [page, setPage] = useState<PageState>(initialPage);
+  const pagination = useUrlCursorPage();
+  const page = pagination.state;
+  const location = useLocation();
   const debouncedSearch = useDebouncedValue(search, 300);
 
   const polling = useAdaptivePolling({
@@ -72,6 +74,7 @@ export function TrialsView({
     ),
     queryFn: () =>
       api.listTrials({
+        q: debouncedSearch || undefined,
         state: stateFilter || undefined,
         batch_id: batchId,
         team_id: teamFilter || undefined,
@@ -92,17 +95,7 @@ export function TrialsView({
     },
   });
 
-  const items: TrialRow[] = useMemo(() => {
-    const raw = (query.data?.items ?? []) as TrialRow[];
-    const q = debouncedSearch.trim().toLowerCase();
-    if (!q) return raw;
-    return raw.filter(
-      (t) =>
-        t.task_id.toLowerCase().includes(q) ||
-        t.id.toLowerCase().includes(q) ||
-        ownershipSearchText(t).includes(q),
-    );
-  }, [query.data, debouncedSearch]);
+  const items = useMemo(() => (query.data?.items ?? []) as TrialRow[], [query.data?.items]);
   const failureGroups: FailureGroup[] = useMemo(() => {
     const groups = new Map<string, FailureGroup>();
     for (const item of items) {
@@ -127,49 +120,7 @@ export function TrialsView({
 
   const COLS = 8;
   return (
-    <div className="space-y-3">
-      {failureGroups.length > 0 ? (
-        <Card>
-          <Card.Header
-            title="Failure diagnostics"
-            description="Failed trials grouped by the platform diagnostic reason returned by the API."
-          />
-          <Card.Body className="space-y-3">
-            {failureGroups.map((group) => (
-              <div
-                key={group.reason}
-                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-semibold text-slate-900">{group.reason}</p>
-                    <p className="text-xs text-slate-500">
-                      {group.count} failed trial{group.count === 1 ? "" : "s"}
-                    </p>
-                  </div>
-                  <Link
-                    to={`/trials/${group.firstTrialId}`}
-                    className="text-sm font-medium text-accent hover:text-accent-hover"
-                  >
-                    Open {group.firstTrialId}
-                  </Link>
-                </div>
-                {group.messages.length > 0 ? (
-                  <ul className="mt-2 space-y-1 text-xs text-slate-600">
-                    {group.messages.slice(0, 3).map((message) => (
-                      <li key={message}>{message}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-2 text-xs text-slate-500">
-                    No failure message was reported; open the trial for logs and artifacts.
-                  </p>
-                )}
-              </div>
-            ))}
-          </Card.Body>
-        </Card>
-      ) : null}
+    <div className="flex flex-col gap-3">
       <Card>
         <Card.Body className="p-0">
           <div className="overflow-x-auto" role="region" aria-label="Monitored trials" tabIndex={0}>
@@ -220,6 +171,7 @@ export function TrialsView({
                       <td className="px-4 py-3">
                         <Link
                           to={`/trials/${t.id}`}
+                          state={{ monitorReturn: location.pathname + location.search }}
                           title="Open this trial's detail page, logs, and artifacts."
                           className="font-mono text-xs text-accent hover:text-accent-hover"
                         >
@@ -271,21 +223,67 @@ export function TrialsView({
             </table>
           </div>
         </Card.Body>
-        {query.data && items.length > 0 ? (
+        {(query.data && items.length > 0) || page.current ? (
           <Card.Footer>
             <Pagination
               state={page}
-              hasNext={query.data.next_cursor !== null}
+              hasNext={Boolean(query.data?.next_cursor)}
+              isLoading={query.isFetching}
+              isError={query.isError}
+              onRetry={() => void query.refetch()}
               onNext={() => {
                 if (query.data?.next_cursor) {
-                  setPage((p) => nextPage(p, query.data!.next_cursor!));
+                  pagination.next(query.data.next_cursor);
                 }
               }}
-              onPrev={() => setPage((p) => prevPage(p))}
+              onPrev={pagination.prev}
             />
           </Card.Footer>
         ) : null}
       </Card>
+      {failureGroups.length > 0 ? (
+        <Card>
+          <Card.Header
+            title="Failure diagnostics"
+            description="Failed trials grouped by the platform diagnostic reason returned by the API."
+          />
+          <Card.Body className="space-y-3">
+            {failureGroups.map((group) => (
+              <div
+                key={group.reason}
+                className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-semibold text-slate-900">{group.reason}</p>
+                    <p className="text-xs text-slate-500">
+                      {group.count} failed trial{group.count === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <Link
+                    to={`/trials/${group.firstTrialId}`}
+                    state={{ monitorReturn: location.pathname + location.search }}
+                    className="text-sm font-medium text-accent hover:text-accent-hover"
+                  >
+                    Open {group.firstTrialId}
+                  </Link>
+                </div>
+                {group.messages.length > 0 ? (
+                  <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                    {group.messages.slice(0, 3).map((message) => (
+                      <li key={message}>{message}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No failure message was reported; open the trial for logs and artifacts.
+                  </p>
+                )}
+              </div>
+            ))}
+          </Card.Body>
+        </Card>
+      ) : null}
     </div>
   );
 }

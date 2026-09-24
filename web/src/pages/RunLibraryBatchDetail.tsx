@@ -2,7 +2,7 @@ import { CommandActions } from "../components/CommandActions";
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import {
   api,
@@ -62,7 +62,7 @@ function formatBytes(size: number): string {
 }
 
 function artifactName(artifact: RunLibraryArtifact): string {
-  return (artifact.relative_path ?? artifact.key).replace(/\/+$/, "");
+  return artifact.relative_path ?? artifact.key.replace(/\/+$/, "").split("/").pop() ?? "Artifact";
 }
 
 function artifactDownloadName(artifact: RunLibraryArtifact): string {
@@ -71,9 +71,10 @@ function artifactDownloadName(artifact: RunLibraryArtifact): string {
 }
 
 function artifactSafetyText(artifact: RunLibraryArtifact): string {
-  return `${artifact.safety_state ?? "unknown"} / ${
-    artifact.redaction_state ?? "pending"
-  }`;
+  if (artifact.safety_state === "unsafe" || artifact.redaction_state === "blocked") return "Restricted diagnostic · not approved for reuse";
+  if (artifact.share_status === "pending_scan") return "Team access only · sharing scan pending";
+  if (artifact.safety_state === "verified_internal") return "Verified internal output · sharing review pending";
+  return artifact.share_status === "shared" ? "Approved for sharing" : "Restricted to authorized readers";
 }
 
 function artifactSourceText(artifact: RunLibraryArtifact): string | null {
@@ -153,7 +154,8 @@ function ArtifactRow({
   onReuse: (artifact: RunLibraryArtifact) => void;
 }): JSX.Element {
   const label = artifactName(artifact);
-  const actionsAllowed = artifactActionsAllowed(artifact);
+  const actionsAllowed = Boolean(artifact.download_url && artifact.trial_id && !artifact.key.startsWith("redacted-artifact:"));
+  const reusable = artifactActionsAllowed(artifact) && artifact.role !== "logs_diagnostics" && artifact.role !== "raw_diagnostics" && artifact.size > 0 && !/(^|\/)(stderr|stdout)(\.|$)/i.test(artifact.relative_path ?? artifact.key);
   const source = artifactSourceText(artifact);
   const hash = artifactHashText(artifact);
 
@@ -169,8 +171,9 @@ function ArtifactRow({
         <div className="min-w-0">
           <p className="break-all font-medium text-slate-800">{label}</p>
           <p className="mt-1 text-xs text-slate-500">
-            {formatBytes(artifact.size)} · {artifact.share_status}
+            {formatBytes(artifact.size)} · {artifactSafetyText(artifact)}
           </p>
+          <details className="mt-2 text-xs text-slate-500"><summary className="cursor-pointer">File details</summary><p className="break-all">Storage key: {artifact.key}</p><p>Safety: {artifact.safety_state ?? "unknown"} · Redaction: {artifact.redaction_state ?? "pending"}</p></details>
           <div className="mt-2 flex flex-wrap gap-1.5 text-xs text-slate-600">
             {artifact.artifact_type_label ? (
               <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5">
@@ -222,13 +225,13 @@ function ArtifactRow({
               >
                 Copy URL
               </Button>
-              <Button
+              {reusable ? <Button
                 size="sm"
                 title="Create new work that records this artifact as source provenance."
                 onClick={() => onReuse(artifact)}
               >
                 Reuse {label}
-              </Button>
+              </Button> : null}
             </>
           ) : null}
         </div>
@@ -316,6 +319,8 @@ function CombinationSummarySection({
 export default function RunLibraryBatchDetail(): JSX.Element {
   const { batchId } = useParams<{ batchId: string }>();
   const auth = useAuth();
+  const location = useLocation();
+  const back = location.state as { returnTo?: string; returnState?: unknown } | null;
   const [providerConnectionId, setProviderConnectionId] = useState("");
 
   const query = useQuery({
@@ -388,7 +393,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
   return (
     <div className="space-y-6">
       <Link
-        to="/library"
+        to={back?.returnTo ?? "/library"}
+        state={back?.returnState}
         className="text-xs font-medium text-slate-500 hover:text-slate-700"
       >
         ← Run Library
@@ -550,6 +556,8 @@ export default function RunLibraryBatchDetail(): JSX.Element {
         </Card.Body>
       </Card>
 
+      {(auth.isAdmin || auth.currentTeamId === batch.team_id) ? <Card><Card.Header title="Download complete results" description="Start with the batch delivery bundle. Individual Trial bundles and files are below." /><Card.Body><BatchDeliveryExport batchId={batch.id} state={batch.state} /></Card.Body></Card> : null}
+      <details className="rounded border p-4"><summary className="cursor-pointer text-sm font-medium">Run metadata</summary><p className="mt-2 text-sm">Token prefix: {batch.created_by_token_prefix ?? "—"} · Cost status: {batch.cost_status ?? "unknown"} · Estimate source: {batch.cost_estimate_source ?? "unknown"}</p></details>
       <CombinationSummarySection rows={combinationSummary} />
 
       {!hasDiagnostics ? (
@@ -594,12 +602,9 @@ export default function RunLibraryBatchDetail(): JSX.Element {
       <Card>
         <Card.Header
           title="Artifacts"
-          description="Shared files are downloadable through Loom API URLs; blocked files stay owner-team diagnostics."
+          description="Individual files are grouped by type and Trial. Scan status controls sharing; authorized team diagnostic downloads may be available while scanning is pending."
         />
         <Card.Body className="space-y-5">
-          {(auth.isAdmin || auth.currentTeamId === batch.team_id) ? (
-            <BatchDeliveryExport batchId={batch.id} state={batch.state} />
-          ) : null}
           {trialBundles.length > 0 ? (
             <section className="space-y-2">
               <div>
@@ -655,7 +660,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           {artifactInventoryTruncated ? (
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
               Artifact preview truncated for this large run. Exported metadata
-              contains the complete safe typed set.
+              is a separate metadata-only export; use the complete delivery bundle for all files.
             </p>
           ) : null}
           {firstSharedArtifact ? (
@@ -665,22 +670,15 @@ export default function RunLibraryBatchDetail(): JSX.Element {
             ]} />
           ) : null}
           {GROUP_ORDER.map((group) => {
-            const artifacts = batch.artifact_inventory[group] ?? [];
+            const all = GROUP_ORDER.flatMap((source) => batch.artifact_inventory[source] ?? []);
+            const isDiagnostic = (artifact: RunLibraryArtifact): boolean => artifact.role === "logs_diagnostics" || artifact.role === "raw_diagnostics" || (artifact.role === "reusable_outputs" && (artifact.size === 0 || /(^|\/)(stderr|stdout)(\.|$)/i.test(artifact.relative_path ?? artifact.key)));
+            const artifacts = all.filter((artifact) => group === "logs_diagnostics" ? isDiagnostic(artifact) && artifact.role !== "raw_diagnostics" : group === "reusable_outputs" ? artifact.role === group && !isDiagnostic(artifact) : artifact.role === group);
             if (artifacts.length === 0) return null;
-            return (
-              <section key={group} className="space-y-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  {GROUP_LABELS[group]}
-                </h3>
-                {artifacts.map((artifact) => (
-                  <ArtifactRow
-                    key={`${artifact.trial_id}-${artifact.key}`}
-                    artifact={artifact}
-                    onReuse={(item) => reuse.mutate(item)}
-                  />
-                ))}
-              </section>
-            );
+            const trials = [...new Set(artifacts.map((artifact) => artifact.trial_id))];
+            return <section key={group} className="space-y-2"><h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">{GROUP_LABELS[group]}</h3>
+              {group === "logs_diagnostics" ? <p className="text-xs text-slate-600">Logs and empty process output support diagnosis; they are not reusable downstream inputs.</p> : null}
+              {trials.map((trial) => <div key={trial ?? "run"} className="space-y-2">{trial ? <Link to={`/trials/${trial}`} className="text-sm text-accent">Trial {trial}</Link> : null}{artifacts.filter((artifact) => artifact.trial_id === trial).map((artifact) => <ArtifactRow key={`${artifact.trial_id}-${artifact.key}`} artifact={artifact} onReuse={(item) => reuse.mutate(item)} />)}</div>)}
+            </section>;
           })}
           {reuse.data ? (
             <Link

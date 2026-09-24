@@ -1143,10 +1143,37 @@ curl --fail-with-body "${LOOM_SERVER}/api/v1/batches" \
   --header "Authorization: Bearer ${LOOM_TOKEN:?Set LOOM_TOKEN first}"
 ```
 
-Then prepare the configuration in New batch and use **Export CLI / API → API**.
-The generated request targets the current deployment and uses the validated
-form JSON. Running it creates a batch. Alternatively, use the downloaded
-`batch.json` with the same endpoint:
+You can prepare `batch.json` entirely in your terminal. For a minimal no-model
+native evaluation, find one authorized native task with a reference solution:
+
+```bash
+curl --fail-with-body "${LOOM_SERVER}/api/v1/tasks?limit=20" \
+  --header "Authorization: Bearer ${LOOM_TOKEN:?Set LOOM_TOKEN first}"
+```
+
+Replace the task ID below with that task. Oracle executes its reference solution
+and verifier without model calls; it is not a model-generated evaluation.
+
+```json
+{
+  "purpose": "evaluation",
+  "task_filter": {"subset_kind": "explicit", "task_ids": ["REPLACE_WITH_TASK_ID"]},
+  "combinations": [{"agent_name": "oracle", "n_per_task": 1}],
+  "trial_config": {}
+}
+```
+
+Save this as `batch.json`. A signed-in CLI can submit the same request using
+`loom eval batch create --request-json @batch.json`. Model-based work instead
+uses the agent/provider/model configuration in the CLI quickstart above.
+
+To use your current Web form configuration, open **Export CLI / API** in New
+batch instead. The dialog leads with the command and configuration summary;
+**Download batch.json** saves the request, and **Request JSON** expands its raw
+contents. Invalid configurations stay in the form, with the error and focus at
+the relevant section or field. Both paths use normal server validation.
+Running the following command creates the batch:
+
 
 ```bash
 curl --fail-with-body --request POST "${LOOM_SERVER}/api/v1/batches" \
@@ -1164,13 +1191,16 @@ readiness; normal server validation and runtime prerequisites still apply.
 Monitor lists show `username / team` for each batch and trial when the submitter
 is known, with legacy team fallback for old rows. Ordinary users see their
 current team's work; platform admins can use the team filter to inspect
-cross-team queues without losing context. The Monitor health card summarizes
+cross-team queues without losing context. The compact Monitor summary describes
 the current URL scope with batch/trial state counters, queued/claimed/running
 trial pressure, concurrent task slots, active worker count, worker backends, and
-per-resource-pool slot usage before the row table. In the batch view, the `q`
-search filter scopes both the table and health card to matching batch identity
-text or batch ids, so shared Monitor links keep their counters aligned with the
-visible rows. For autoscaled worker pools,
+per-resource-pool slot usage. Batches and Trials lead with the task table; the
+Capacity view and expandable diagnostics retain nodes, scheduling, image
+preparation, transfers, and raw evidence. In either list view, `q` searches all authorized matching records before
+pagination, including IDs and task or ownership text, and scopes the summary
+to the same search. Search keeps keyboard focus during consecutive edits.
+State and team filters are primary controls; Advanced filters expose benchmark,
+agent, provider, and model constraints with removable active chips. For autoscaled worker pools,
 the resource summary also includes desired slots, pending slots, draining
 slots, idle-window age, and the last autoscaler decision. The same slot summary
 is available from the CLI with `loom resources status` and
@@ -1976,3 +2006,33 @@ pip-installed adapter package raised at import time. Try `pip
 install --force-reinstall <package>` to refresh the entry-points
 metadata, or `loom datasets list --installed` to confirm which
 adapters are loadable.
+
+
+### Navigation and recovery
+
+At narrow widths, the compact environment header opens **Menu** with all
+navigation, account/team, Settings, and version information. Escape closes the
+menu. Getting started uses a compact topic selector and keeps Web/CLI/API next
+to the selected guide; an authenticated Web guide shows the connected account
+and team. Full repository documentation remains pinned to the loaded build.
+
+Monitor, Library, Tasks, Benchmarks, Pipelines, and access Audit keep filters
+and page cursors in the URL. Changing a filter resets pagination; browser
+history and contextual detail-return links restore the list context. Within
+the current session, returning to a visited route also restores its reading
+position. Trial details expose the parent Batch and separate Overview,
+Trajectory, Artifacts, and Diagnostics. A terminal trial that never started
+execution explains why no trajectory exists and links to its diagnostics.
+Compare labels different tasks explicitly and can load subsequent event pages.
+
+Library separates **Runs** and **Pipeline artifacts**. Artifact lists support
+continuation beyond 200 records. The complete delivery bundle is the primary
+result download; metadata exports and individual files are separate actions.
+Scan status describes sharing readiness, while an available download follows
+the server's existing access policy. Diagnostic streams and empty files are
+labeled separately from reusable output.
+
+Account setup/reset links that are missing, invalid, expired, or already used
+show a readable recovery path. The service deliberately does not distinguish
+invalid, expired, and consumed credentials to the caller. Request a new link
+through the sign-in reset flow or the team administrator as appropriate.

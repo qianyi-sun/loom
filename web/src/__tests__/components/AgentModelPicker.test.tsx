@@ -203,7 +203,7 @@ describe("AgentModelPicker copy", () => {
       "aria-labelledby",
       localTab.id,
     );
-    expect(screen.getByText(/No local servers are configured/i)).toBeInTheDocument();
+    expect(screen.getByText(/No local servers are available in this deployment/i)).toBeInTheDocument();
 
     await user.keyboard("{End}");
     expect(screen.getByRole("tab", { name: "HuggingFace" })).toHaveAttribute(

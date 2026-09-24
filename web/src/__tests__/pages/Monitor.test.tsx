@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import { screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -469,6 +470,48 @@ describe("Monitor human-readable labels", () => {
     });
   });
 
+  it("searches authorized trials beyond the current page on the server (F1)", async () => {
+    const fetchMock = mockFailureMonitorEndpoints();
+    renderWithProviders(<Monitor />, { route: "/monitor?view=trials&q=trial-sandbox" });
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/v1/trials"));
+      expect(calls.length).toBeGreaterThan(0);
+      expect(new URL(String(calls.at(-1)![0]), "http://localhost").searchParams.get("q")).toBe("trial-sandbox");
+    });
+  });
+
+  it("restores a bookmarked page and resets the cursor when filters change", async () => {
+    const fetchMock = mockFailureMonitorEndpoints();
+    renderWithProviders(<Monitor />, { route: '/monitor?view=trials&cursor=page-two&cursor_history=%5Bnull%5D' });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("cursor=page-two"))).toBe(true));
+    expect(await screen.findByText("Page 2, end of results.")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("filter by state"), "failed");
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/v1/trials"));
+      const url = new URL(String(calls.at(-1)![0]), "http://localhost");
+      expect(url.searchParams.get("state")).toBe("failed");
+      expect(url.searchParams.has("cursor")).toBe(false);
+    });
+    expect(await screen.findByText("Page 1, end of results.")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "Open trial-provider" });
+    expect(link).toHaveAttribute("href", "/trials/trial-provider");
+  });
+
+  it("keeps advanced filters collapsed and removes active aliases with a page reset", async () => {
+    const fetchMock = mockFailureMonitorEndpoints();
+    renderWithProviders(<Monitor />, { route: "/monitor?view=trials&agent=oracle&cursor=page-two&cursor_history=%5Bnull%5D" });
+    expect(screen.getByText("Advanced filters").closest("details")).not.toHaveAttribute("open");
+    await userEvent.click(screen.getByRole("button", { name: /agent name: oracle/ }));
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/v1/trials"));
+      const url = new URL(String(calls.at(-1)![0]), "http://localhost");
+      expect(url.searchParams.has("agent_name")).toBe(false);
+      expect(url.searchParams.has("agent")).toBe(false);
+      expect(url.searchParams.has("cursor")).toBe(false);
+    });
+    expect(screen.queryByRole("button", { name: /agent name: oracle/ })).not.toBeInTheDocument();
+  });
+
   it("hydrates trial filters from URL and sends shareable filter params", async () => {
     const fetchMock = mockFilteredMonitorEndpoints();
     renderWithProviders(<Monitor />, {
@@ -729,6 +772,9 @@ describe("Monitor human-readable labels", () => {
 
     expect(await screen.findByText("blocked/stale")).toBeInTheDocument();
     expect(screen.getByText("Blockers: provider_quota_exhausted")).toBeInTheDocument();
+    expect(screen.getByText(/Capacity is unknown because/)).toBeInTheDocument();
+    expect(screen.getByText(/Scheduling is waiting on capacity or service readiness/)).toBeInTheDocument();
+    expect(screen.getByText("Blockers: provider_quota_exhausted").closest("details")).not.toHaveAttribute("open");
     expect(screen.getByText("Lifecycle: none")).toBeInTheDocument();
     expect(screen.getByText("Provider execution: none")).toBeInTheDocument();
     expect(screen.getByText("Source cleanup: none")).toBeInTheDocument();

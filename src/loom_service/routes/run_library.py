@@ -635,6 +635,21 @@ def _serialize_typed_artifacts(
 ) -> list[dict[str, Any]]:
     if not _artifact_metadata_visible(ctx, artifact, batch=batch, trial=trial):
         return []
+    if artifact.pipeline_run_id is not None and artifact.pipeline_stage_run_id is not None:
+        # Pipeline bundles use an upload manifest, not a Trial storage key.
+        # Represent the bundle itself; its detail route authorizes file access.
+        return [{
+            "id": str(artifact.id), "trial_id": None,
+            "key": artifact.name, "relative_path": artifact.name,
+            "size": artifact.stored_size_bytes or 0,
+            "role": _artifact_group_for_type(artifact.artifact_type),
+            "artifact_type": artifact.artifact_type,
+            "owner_team": {"id": str(owner_team.id), "name": owner_team.name},
+            "share_status": artifact.share_status,
+            "safety_state": artifact.safety_state,
+            "redaction_state": artifact.redaction_state,
+            "can_reuse": False, "download_url": None,
+        }]
     files: Sequence[CanonicalTrialBundleFile | None] = (
         _canonical_artifact_files(artifact, trial)
         if _artifact_storage_key(artifact) is None else (None,)
@@ -1890,7 +1905,8 @@ async def _artifact_rows_for_library(
     artifact_filters: dict[str, Any],
     safe_content_only: bool,
     limit: int,
-) -> list[dict[str, Any]]:
+    cursor: str | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
     stmt = (
         select(Artifact, Team, Batch, Trial)
         .join(Team, Team.id == Artifact.team_id)
@@ -1932,34 +1948,69 @@ async def _artifact_rows_for_library(
             run_filter = run_filter.where(PipelineRun.result == pipeline_result)
         stmt = stmt.where(Artifact.pipeline_run_id.in_(run_filter))
 
+    if not is_admin(ctx):
+        restricted_runs = select(PipelineRun.id).where(
+            PipelineRun.team_id == ctx.team_id,
+        )
+        if getattr(ctx, "role", None) != "owner":
+            restricted_runs = restricted_runs.where(
+                PipelineRun.created_by_user_id == getattr(ctx, "user_id", None),
+            ) if getattr(ctx, "user_id", None) is not None else restricted_runs.where(false())
+        stmt = stmt.where(or_(
+            Artifact.pipeline_run_id.is_(None),
+            Artifact.access_class.is_(None),
+            Artifact.access_class.in_(("sanitized_audit", "team_runtime")),
+            Artifact.pipeline_run_id.in_(restricted_runs),
+        ))
+
     if scope != "all":
         if ctx.team_id is None:
-            return []
+            return [], None
         stmt = stmt.where(Artifact.team_id == ctx.team_id)
     elif not is_admin(ctx):
         stmt = stmt.where(_joined_artifact_metadata_visibility_predicate(ctx))
 
-    rows = list((await session.execute(stmt)).all())
+    if cursor:
+        try:
+            after = decode_cursor(cursor)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        stmt = stmt.where(or_(
+            Artifact.created_at < after.submitted_at,
+            and_(Artifact.created_at == after.submitted_at, Artifact.id < after.id),
+        ))
+
+    # Scan bounded database pages because provenance and content authorization
+    # also filter in Python. Look ahead after filtering, never before it.
     selected: list[tuple[Artifact, Team, Batch | None, Trial | None]] = []
-    for artifact, owner_team, batch, trial in rows:
-        if not _artifact_metadata_visible(
-            ctx,
-            artifact,
-            batch=batch,
-            trial=trial,
-        ):
-            continue
-        if not _typed_artifact_matches_filters(artifact, artifact_filters):
-            continue
-        if safe_content_only and not _artifact_content_allowed(
-            artifact,
-            batch=batch,
-            trial=trial,
-        ):
-            continue
-        selected.append((artifact, owner_team, batch, trial))
-        if len(selected) >= limit:
+    scan_stmt = stmt
+    scan_size = max(limit + 1, 200)
+    while len(selected) <= limit:
+        rows = list((await session.execute(scan_stmt.limit(scan_size))).all())
+        for artifact, owner_team, batch, trial in rows:
+            if not _artifact_metadata_visible(ctx, artifact, batch=batch, trial=trial):
+                continue
+            if not _typed_artifact_matches_filters(artifact, artifact_filters):
+                continue
+            if safe_content_only and not _artifact_content_allowed(
+                artifact, batch=batch, trial=trial,
+            ):
+                continue
+            selected.append((artifact, owner_team, batch, trial))
+            if len(selected) > limit:
+                break
+        if len(selected) > limit or len(rows) < scan_size:
             break
+        last = rows[-1][0]
+        scan_stmt = stmt.where(or_(
+            Artifact.created_at < last.created_at,
+            and_(Artifact.created_at == last.created_at, Artifact.id < last.id),
+        ))
+    next_cursor = None
+    if len(selected) > limit:
+        selected = selected[:limit]
+        last = selected[-1][0]
+        next_cursor = encode_cursor(Cursor(submitted_at=last.created_at, id=last.id))
 
     parents_by_artifact = await _parents_for_artifacts(
         session,
@@ -2007,7 +2058,7 @@ async def _artifact_rows_for_library(
                     "result": pipeline_run.result,
                 }
             out.append(redact_mapping(item) if safe_content_only else item)
-    return out
+    return out, next_cursor
 
 
 @router.get("/run-library/artifacts")
@@ -2026,6 +2077,7 @@ async def list_run_library_artifacts(
     pipeline_result: Annotated[str | None, Query()] = None,
     team_id: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(gt=0, le=500)] = 200,
+    cursor: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     session, ctx = sc
     require_scope(ctx, "read:own")
@@ -2040,7 +2092,7 @@ async def list_run_library_artifacts(
         "pipeline_result": pipeline_result,
         "owner_team_id": team_id or owner_team_id,
     }
-    stmt_items = await _artifact_rows_for_library(
+    stmt_items, next_cursor = await _artifact_rows_for_library(
         session,
         ctx,
         request=request,
@@ -2048,8 +2100,9 @@ async def list_run_library_artifacts(
         artifact_filters=filters,
         safe_content_only=False,
         limit=limit,
+        cursor=cursor,
     )
-    return {"items": stmt_items, "next_cursor": None}
+    return {"items": stmt_items, "next_cursor": next_cursor}
 
 
 @router.get("/run-library/artifacts/export")
@@ -2075,7 +2128,7 @@ async def export_run_library_artifacts(
         "safety_state": safety_state,
         "provenance_relation": provenance_relation,
     }
-    items = await _artifact_rows_for_library(
+    items, _next_cursor = await _artifact_rows_for_library(
         session,
         ctx,
         request=None,

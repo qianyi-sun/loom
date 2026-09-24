@@ -12,13 +12,14 @@ import { api } from "../api";
 import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
 import { StatusPill } from "../components/StatusPill";
-import { providerStatusSummary } from "../lib/providerDisplay";
+import { providerStatusSummary, providerTestAge } from "../lib/providerDisplay";
 
 type Conn = {
   id: string;
   name: string;
   type: string;
   status?: string;
+  last_validated_at?: string | null;
 };
 
 export default function ProvidersList(): JSX.Element {
@@ -119,6 +120,7 @@ export default function ProvidersList(): JSX.Element {
                     <p className="mt-1 text-xs text-slate-500">
                       {status.description}
                     </p>
+                    <p className="text-xs text-slate-500">{providerTestAge(c.last_validated_at)}</p>
                   </td>
                 </tr>
               );

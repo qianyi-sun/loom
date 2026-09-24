@@ -9,10 +9,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, cast, func, or_
+from sqlalchemy import String, cast, func, or_, select
 
 from loom.auth import AuthContext
-from loom.db.schema import Batch, Task, Trial
+from loom.db.schema import Batch, Task, Team, Trial, User
 from loom_service.auth_guards import is_admin, require_team_or_admin
 from loom_service.trial_progress import progress_stage_case
 
@@ -115,6 +115,7 @@ def apply_trial_monitor_filters(
     *,
     target_team: UUID | None,
     q: str | None = None,
+    trial_q: str | None = None,
     task_id: str | None = None,
     batch_id: UUID | None = None,
     benchmark_id: str | None = None,
@@ -138,6 +139,16 @@ def apply_trial_monitor_filters(
                 Batch.description.ilike(pattern),
                 cast(Batch.id, String).ilike(pattern),
             ))
+    if trial_q and trial_q.strip():
+        # Apply the literal text predicate before cursor/limit and retain tenant scope.
+        needle = trial_q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{needle}%"
+        stmt = stmt.where(or_(
+            cast(Trial.id, String).ilike(pattern, escape="\\"),
+            Trial.task_id.ilike(pattern, escape="\\"),
+            Trial.team_id.in_(select(Team.id).where(Team.name.ilike(pattern, escape="\\"))),
+            Trial.submitted_by_user_id.in_(select(User.id).where(User.username.ilike(pattern, escape="\\"))),
+        ))
     if task_id is not None:
         stmt = stmt.where(Trial.task_id == task_id)
     if benchmark_id is not None:

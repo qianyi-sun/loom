@@ -1,6 +1,6 @@
 import { queryKeys } from "../api/queryKeys";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../api";
@@ -46,6 +46,12 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
         })
     ),
   });
+  const resetCompletion = complete.reset;
+  useEffect(() => {
+    setPassword("");
+    setConfirmPassword("");
+    resetCompletion();
+  }, [mode, token, resetCompletion]);
   const disabled =
     token.length === 0 ||
     password.length === 0 ||
@@ -63,6 +69,12 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
       ? lookupData.team.name
       : null;
 
+  const linkError = lookup.error ?? (complete.isError ? complete.error : null);
+  const rejectedLink = Boolean(linkError && typeof linkError === "object" && "status" in linkError
+    && [400, 404, 410, 422].includes(Number(linkError.status))
+    && "detail" in linkError && /token|expired|consumed|used/i.test(String(linkError.detail)));
+  const recovery = !token || rejectedLink;
+
   return (
     <div className="mx-auto max-w-lg space-y-5">
       <header>
@@ -75,10 +87,17 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
       </header>
       <Card>
         <Card.Body className="space-y-4">
-          {!token ? <ErrorState error={{ detail: "missing token" }} /> : null}
+          {recovery ? <div role="alert" className="space-y-3 text-sm text-slate-700">
+            <h2 className="font-semibold text-slate-900">{!token ? "Your account link is missing" : "This account link is no longer available"}</h2>
+            <p>{!token ? "Open the complete link provided by your team administrator."
+              : "The link is invalid, expired, or already used. For privacy, Loom cannot distinguish these states here."}</p>
+            <p>{isSetup ? "Ask your team administrator for a new account setup link. If you already set your password, sign in."
+              : "Go to sign in and choose Reset password to request a new link from your team administrator."}</p>
+            <Link className="inline-block rounded text-accent underline" to="/auth/login">Go to sign in</Link>
+          </div> : null}
           {lookup.isPending && token ? <LoadingState /> : null}
-          {lookup.isError ? <ErrorState error={lookup.error} /> : null}
-          {lookup.data && !complete.isSuccess ? (
+          {lookup.isError && !rejectedLink ? <ErrorState error={lookup.error} /> : null}
+          {lookup.data && !complete.isSuccess && !recovery ? (
             <form
               className="space-y-4"
               onSubmit={(event) => {
@@ -131,7 +150,7 @@ export default function PasswordAction({ mode }: { mode: Mode }): JSX.Element {
               </Button>
             </form>
           ) : null}
-          {complete.isError ? <ErrorState error={complete.error} /> : null}
+          {complete.isError && !rejectedLink ? <ErrorState error={complete.error} /> : null}
           {complete.isSuccess ? (
             <div className="space-y-3">
               <p className="text-sm font-medium text-emerald-700">

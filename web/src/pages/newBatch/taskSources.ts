@@ -3,6 +3,7 @@
 export interface BenchmarkItem {
   id: string;
   display_name?: string;
+  detail_label?: string;
   task_count?: number;
   raw_task_count?: number;
   valid_task_config_count?: number;

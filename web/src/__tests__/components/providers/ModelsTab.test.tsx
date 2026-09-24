@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ModelsTab from "../../../components/providers/ModelsTab";
 
-function renderTab(models: unknown[]) {
+function renderTab(models: unknown[], connectionName?: string) {
   const fetchMock = vi.fn().mockImplementation((_url: string, _init?: RequestInit) => {
     // All list calls return the same items shape; refresh returns summary counts.
     if (_url.includes("/models/refresh")) {
@@ -39,7 +39,7 @@ function renderTab(models: unknown[]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const result = render(
     <QueryClientProvider client={qc}>
-      <ModelsTab id="abc" />
+      <ModelsTab id="abc" connectionName={connectionName} />
     </QueryClientProvider>,
   );
   return { ...result, fetchMock };
@@ -87,10 +87,18 @@ describe("ModelsTab", () => {
       expect(screen.getByText("gpt-4o")).toBeInTheDocument();
       expect(screen.getByText("manual/x")).toBeInTheDocument();
     });
+    await userEvent.click(screen.getByRole("button", { name: "Model help and CLI" }));
     expect(screen.getByText("Model picker guidance")).toBeInTheDocument();
-    expect(screen.getByText("loom providers models abc --refresh")).toBeInTheDocument();
+    expect(screen.getByText("loom providers models 'abc' --refresh")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "close" }));
     expect(screen.getByText(/Callable/i)).toBeInTheDocument();
     expect(screen.getByText(/Not tested/i)).toBeInTheDocument();
+  });
+
+  it("quotes connection names with whitespace and shell syntax in the supported refresh command", async () => {
+    renderTab([], "team's model; $(echo unsafe)");
+    await userEvent.click(await screen.findByRole("button", { name: "Model help and CLI" }));
+    expect(screen.getByText(/loom providers models/).textContent).toBe(`loom providers models 'team'"'"'s model; $(echo unsafe)' --refresh`);
   });
 
   it("renders failed preflight details in human-readable copy", async () => {

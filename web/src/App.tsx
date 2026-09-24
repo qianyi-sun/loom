@@ -41,6 +41,7 @@ export default function App(): JSX.Element {
         <Route path="getting-started" element={<GettingStarted />} />
         <Route path="monitor" element={<Monitor />} />
         <Route path="pipelines" element={<PipelineRuns />} />
+        <Route path="pipeline-artifacts/:artifactId" element={<PipelineArtifactDetail />} />
         <Route path="pipelines/:runId" element={<PipelineRunDetail />} />
         <Route path="pipelines/:runId/stages/:stageRunId/artifacts/:artifactId" element={<PipelineArtifactDetail />} />
         <Route path="library" element={<RunLibrary />} />

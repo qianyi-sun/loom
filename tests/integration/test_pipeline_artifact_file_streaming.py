@@ -394,3 +394,91 @@ async def test_sha_or_marker_drift_fails_before_any_response_body() -> None:
             bucket="artifacts",
         )
     assert exc.value.status_code == 409
+
+
+async def test_lineage_detail_route_keeps_team_and_restricted_access_boundaries() -> None:
+    from loom.auth import AuthContext
+    from loom_service.routes.pipeline import get_pipeline_artifact_by_id
+
+    case = _fixture()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        minio_client=case.store, settings=SimpleNamespace(artifacts_bucket="artifacts"),
+    )))
+    def context(*, team_id=case.team_id, role="member", user_id=None):
+        return AuthContext(token_hash=b"x" * 32, type="user", scopes=["read:own"], team_id=team_id, expires_at=None, role=role, user_id=user_id or uuid4())
+
+    result = await get_pipeline_artifact_by_id(request, (case.session, context()), case.artifact_id)
+    assert result["id"] == str(case.artifact_id)
+    with pytest.raises(HTTPException) as cross_team:
+        await get_pipeline_artifact_by_id(request, (case.session, context(team_id=uuid4())), case.artifact_id)
+    assert cross_team.value.status_code == 404
+    artifact = await case.session.get(Artifact, case.artifact_id)
+    artifact.access_class = "authoring_restricted"
+    with pytest.raises(HTTPException) as member:
+        await get_pipeline_artifact_by_id(request, (case.session, context()), case.artifact_id)
+    assert member.value.status_code == 404
+    for ctx in (context(role="owner"), context(user_id=case.creator_user_id)):
+        readable = await get_pipeline_artifact_by_id(request, (case.session, ctx), case.artifact_id)
+        assert readable["id"] == str(case.artifact_id)
+
+
+async def test_lineage_lookup_rejects_input_artifact_without_committed_source_record() -> None:
+    from loom.auth import AuthContext
+    from loom_service.routes.pipeline import get_pipeline_artifact_by_id
+
+    case = _fixture()
+    artifact = await case.session.get(Artifact, case.artifact_id)
+    artifact.producer_kind = "input_import"
+    artifact.pipeline_run_id = None
+    artifact.pipeline_stage_run_id = None
+    artifact.execution_attempt_id = None
+    ctx = AuthContext(token_hash=b"x" * 32, type="user", scopes=["read:own"], team_id=case.team_id, expires_at=None, role="owner", user_id=case.creator_user_id)
+    with pytest.raises(HTTPException) as unavailable:
+        await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, ctx), case.artifact_id)
+    assert unavailable.value.status_code == 404
+
+
+@pytest.mark.parametrize("source_kind", ["input_import", "recipe_input_materialization"])
+async def test_lineage_lookup_reads_committed_input_metadata_with_existing_access_policy(source_kind) -> None:
+    from loom.auth import AuthContext
+    from loom.db.schema import PipelineInputImport, PipelineInputMaterialization
+    from loom.pipeline.public_api import PipelineInputArtifactDetailV1
+    from loom_service.routes.pipeline import get_pipeline_artifact_by_id
+
+    case = _fixture()
+    artifact = await case.session.get(Artifact, case.artifact_id)
+    artifact.producer_kind = source_kind
+    artifact.pipeline_run_id = None
+    artifact.pipeline_stage_run_id = None
+    artifact.execution_attempt_id = None
+    source_id = uuid4()
+    source_model = PipelineInputImport if source_kind == "input_import" else PipelineInputMaterialization
+    if source_kind == "input_import":
+        artifact.pipeline_input_import_id = source_id
+    else:
+        artifact.pipeline_input_materialization_id = source_id
+    source = source_model(id=source_id, team_id=case.team_id, state="committed", created_by_user_id=case.creator_user_id, recipe_name="behavior-recovery", recipe_version=1, artifact_upload_session_id=artifact.artifact_upload_session_id)
+    if source_kind == "input_import":
+        source.committed_artifact_id = artifact.id
+    case.session.values[(source_model, source_id)] = source
+    def context(*, team_id=case.team_id, role="member", user_id=None):
+        return AuthContext(token_hash=b"x" * 32, type="user", scopes=["read:own"], team_id=team_id, expires_at=None, role=role, user_id=user_id or uuid4())
+    # No request/app/store is needed: this route reads registry metadata only.
+    result = await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, context()), artifact.id)
+    parsed = PipelineInputArtifactDetailV1.model_validate(result)
+    assert parsed.source_kind == source_kind and parsed.source_id == source_id
+    assert "storage" not in result and "download_path" not in result
+    assert case.prefix not in repr(result)
+    with pytest.raises(HTTPException) as cross_team:
+        await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, context(team_id=uuid4(), role="platform_admin")), artifact.id)
+    assert cross_team.value.status_code == 404
+    artifact.access_class = "authoring_restricted"
+    with pytest.raises(HTTPException) as restricted:
+        await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, context()), artifact.id)
+    assert restricted.value.status_code == 404
+    for ctx in (context(role="owner"), context(user_id=case.creator_user_id)):
+        assert (await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, ctx), artifact.id))["source_id"] == str(source_id)
+    source.state = "aborted"
+    with pytest.raises(HTTPException) as uncommitted:
+        await get_pipeline_artifact_by_id(SimpleNamespace(), (case.session, context(role="owner")), artifact.id)
+    assert uncommitted.value.status_code == 404

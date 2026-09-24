@@ -8,7 +8,7 @@ import { ProgressSummary } from "../components/TrialProgress";
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useLocation } from "react-router-dom";
 
 import { api } from "../api";
 import type { components } from "../api/schema";
@@ -107,6 +107,8 @@ function TaskResourceRequests({
 }
 
 export default function BatchDetail(): JSX.Element {
+  const location = useLocation();
+  const monitorReturn = location.state?.monitorReturn || "/monitor?view=batches";
   const { batchId } = useParams<{ batchId: string }>();
   const queryClient = useQueryClient();
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -175,8 +177,13 @@ export default function BatchDetail(): JSX.Element {
   if (query.isError) return <ErrorState error={query.error} />;
   if (!query.data) return <ErrorState error={new Error("no data")} />;
   const c = query.data;
+  const resolvedTasks = Array.isArray(c.resolved_task_ids) ? c.resolved_task_ids : null;
+  const samplesPerTask = c.combinations?.reduce((sum, combo) => sum + combo.n_per_task, 0)
+    || (typeof c.n_per_task === "number" ? c.n_per_task : 1);
+  const poolCount = Array.isArray(c.required_worker_pools) ? Math.max(1, c.required_worker_pools.length) : 1;
+  const inferredTaskCount = c.expected_trial_count / (samplesPerTask * poolCount);
   const taskSummary = humanizeTaskFilter(c.task_filter, {
-    matchedTaskCount: c.expected_trial_count,
+    matchedTaskCount: resolvedTasks ? resolvedTasks.length : Number.isInteger(inferredTaskCount) ? inferredTaskCount : undefined,
   });
   const trialConfigSummary = humanizeTrialConfig(c.trial_config);
   const rerunnableFailedCount = c.rerunnable_failed_count ?? 0;
@@ -231,7 +238,7 @@ export default function BatchDetail(): JSX.Element {
     <div className="space-y-6">
       <div>
         <Link
-          to="/monitor?view=batches"
+          to={monitorReturn}
           title="Return to the batch monitor table."
           className="text-xs font-medium text-slate-500 hover:text-slate-700"
         >
@@ -664,15 +671,7 @@ export default function BatchDetail(): JSX.Element {
             className="flex cursor-pointer items-center gap-2 border-b border-slate-200 px-5 py-4 text-sm font-semibold text-slate-800"
             title="Expand the per-state trial counts for this batch."
           >
-            <span className="flex-1">Show trials in this batch</span>
-            <Link
-              to={`/monitor?view=trials&batch_id=${c.id}`}
-              className="text-xs font-medium text-accent hover:text-accent-hover"
-              title="Open the Monitor filtered to this batch's trials."
-              onClick={(e) => e.stopPropagation()}
-            >
-              Open in Monitor →
-            </Link>
+            <span className="flex-1">Trial counts by state</span>
             <span className="text-slate-600 transition-transform group-open:rotate-90">
               ›
             </span>
@@ -706,6 +705,15 @@ export default function BatchDetail(): JSX.Element {
             </div>
           </Card.Body>
         </details>
+        <div className="border-t border-slate-200 px-5 py-3">
+          <Link
+            to={`/monitor?view=trials&batch_id=${c.id}`}
+            className="text-sm font-medium text-accent hover:text-accent-hover"
+            title="Open the Monitor filtered to this batch's trials."
+          >
+            Open in Monitor →
+          </Link>
+        </div>
       </Card>
 
       <Card>
@@ -714,6 +722,7 @@ export default function BatchDetail(): JSX.Element {
           description="What this batch will run, how often each task runs, and which shared settings apply to every trial."
         />
         <Card.Body className="space-y-5">
+          <p className="text-sm font-medium">Purpose: {c.purpose === "trajectory_generation" ? "Generate trajectories" : c.purpose === "evaluation" ? "Evaluate task performance" : "Not recorded for this batch"}</p>
           <div className="grid gap-4 md:grid-cols-2">
             <div>
               <p className="text-xs font-medium uppercase tracking-wider text-slate-500">

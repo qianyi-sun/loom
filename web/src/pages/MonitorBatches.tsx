@@ -1,18 +1,17 @@
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { Card } from "../components/Card";
 import EmptyState from "../components/EmptyState";
 import ErrorState from "../components/ErrorState";
 import Pagination from "../components/Pagination";
-import { initialPage, nextPage, prevPage, type PageState } from "../components/paginationState";
+import { useUrlCursorPage } from "../hooks/useUrlCursorPage";
 import { StatusPill } from "../components/StatusPill";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { formatLocalDateTime } from "../lib/dateTime";
-import { ownershipLabel, ownershipSearchText } from "../lib/ownership";
+import { ownershipLabel } from "../lib/ownership";
 import { batchStateVariant } from "../lib/statusVariant";
 import { SkeletonRows } from "./MonitorControls";
 import { TERMINAL_BATCH_STATES, compactCostLabel, type BatchRow } from "./monitorPresentation";
@@ -38,7 +37,9 @@ export function BatchesView({
   providerConnectionFilter: string;
   providerModelFilter: string;
 }): JSX.Element {
-  const [page, setPage] = useState<PageState>(initialPage);
+  const pagination = useUrlCursorPage();
+  const page = pagination.state;
+  const location = useLocation();
   const debouncedSearch = useDebouncedValue(search, 300);
 
   const polling = useAdaptivePolling({
@@ -84,19 +85,7 @@ export function BatchesView({
     },
   });
 
-  // Filter client-side by search if backend doesn't support `q` on
-  // batches — safe fallback.
-  const items: BatchRow[] = useMemo(() => {
-    const raw = (query.data?.items ?? []) as BatchRow[];
-    const q = debouncedSearch.trim().toLowerCase();
-    if (!q) return raw;
-    return raw.filter(
-      (b) =>
-        b.name.toLowerCase().includes(q) ||
-        b.id.toLowerCase().includes(q) ||
-        ownershipSearchText(b).includes(q),
-    );
-  }, [query.data, debouncedSearch]);
+  const items = (query.data?.items ?? []) as BatchRow[];
 
   const COLS = 6;
   return (
@@ -146,6 +135,7 @@ export function BatchesView({
                       <td className="px-4 py-3">
                         <Link
                           to={`/batches/${c.id}`}
+                          state={{ monitorReturn: location.pathname + location.search }}
                           title="Open this batch's detail page."
                           className="font-medium text-accent hover:text-accent-hover"
                         >
@@ -171,17 +161,20 @@ export function BatchesView({
             </table>
           </div>
         </Card.Body>
-        {query.data && items.length > 0 ? (
+        {(query.data && items.length > 0) || page.current ? (
           <Card.Footer>
             <Pagination
               state={page}
-              hasNext={query.data.next_cursor !== null}
+              hasNext={Boolean(query.data?.next_cursor)}
+              isLoading={query.isFetching}
+              isError={query.isError}
+              onRetry={() => void query.refetch()}
               onNext={() => {
                 if (query.data?.next_cursor) {
-                  setPage((p) => nextPage(p, query.data!.next_cursor!));
+                  pagination.next(query.data.next_cursor);
                 }
               }}
-              onPrev={() => setPage((p) => prevPage(p))}
+              onPrev={pagination.prev}
             />
           </Card.Footer>
         ) : null}

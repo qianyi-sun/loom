@@ -106,6 +106,7 @@ export function NewBatchTaskSelection({
                       ({
                         id: ts.task_set_id,
                         display_name: ts.display_name,
+                        detail_label: `${ts.created_at.slice(0, 10)} · ${ts.task_set_id}`,
                         task_count: ts.task_count,
                         readiness_state: "ready",
                         readiness_label: ts.status,
