@@ -1,4 +1,6 @@
-from loom.models.networking import NoNetwork, Public
+import pytest
+
+from loom.models.networking import NoNetwork, Public, WebAllowlist, WebDestination
 from loom.models.task import (
     AgentDefaults,
     EnvironmentConfig,
@@ -64,3 +66,19 @@ def test_step_requires_no_network_adds_to_set():
     req = derive_requires_caps(task)
     assert "no-network" in req.network_policies
     assert "public" in req.network_policies
+
+
+@pytest.mark.parametrize("phase", ["baseline", "agent_phase", "verifier_phase"])
+def test_web_allowlist_is_preserved_as_a_distinct_network_requirement(phase):
+    policy = WebAllowlist(destinations=(WebDestination(host="registry.npmjs.org", protocol="https"),))
+    task = _task(EnvironmentConfig(os="linux", network_policies_supported={"public", "web-allowlist"}))
+    if phase == "baseline":
+        task = task.model_copy(update={"environment": task.environment.model_copy(
+            update={"baseline_network_policy": policy},
+        )})
+    else:
+        task = task.model_copy(update={"steps": [StepConfig(
+            name="main", network=StepNetworkPlan(**{phase: policy}),
+        )]})
+    required = derive_requires_caps(task)
+    assert required.network_policies == ({"web-allowlist"} if phase == "baseline" else {"public", "web-allowlist"})
