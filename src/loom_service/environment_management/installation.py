@@ -23,6 +23,7 @@ from loom_service.environment_management.candidates import (
     _json,
 )
 from loom_service.environment_management.child_client import ChildEnvironmentClient
+from loom_service.environment_management.kubernetes_credentials import ProjectedKubernetesConnection
 from loom_service.environment_management.manager import EnvironmentManager, EnvironmentPlanFactory
 from loom_service.environment_management.registry import EnvironmentRegistry, ManagementError
 from loom_service.environment_management.runtime import ProviderRuntimeSettings
@@ -52,6 +53,9 @@ class ManagementInstallation(BaseModel):
     def validate_publications(self) -> ManagementInstallation:
         if self.provider_runtime is not None and self.foundation.provisioning_project_id is None:
             raise ValueError("provider runtime requires an explicit dedicated provisioning project")
+        if (self.foundation.namespace_authority is not None and self.provider_runtime is not None
+                and not isinstance(self.provider_runtime.kubernetes, ProjectedKubernetesConnection)):
+            raise ValueError("namespace authority requires projected Kubernetes identity")
         ImageAdmissionKeyring.from_json(json.dumps(self.keyring))
         if (len({row.candidate_id for row in self.publications}) != len(self.publications)
                 or any(row.candidate_id.int == 0 for row in self.publications)):
