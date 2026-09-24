@@ -337,3 +337,44 @@ async def test_absence_restore_rejects_symlink_before_deleting_any_root(docker_d
         await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
     result = await verifier.exec("test -d /data && cat /tests/private", user="root")
     assert result.return_code == 0 and result.stdout.strip() == b"trusted"
+
+
+@pytest.mark.parametrize("mode", ["0555", "0000"])
+async def test_absence_restore_can_remove_nonwritable_empty_leaf_as_task_user(docker_drivers, tmp_path, monkeypatch, mode):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/data/state"),)
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        f"mkdir -p /data/state; chown -R 1000:1000 /data; chmod {mode} /data/state", user="root")
+    assert result.return_code == 0
+    execute = verifier.exec
+
+    async def as_task(command, **kwargs):
+        return await execute(command, **{**kwargs, "user": "1000:1000"})
+
+    monkeypatch.setattr(verifier, "exec", as_task)
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (await execute("test ! -e /data/state", user="root")).return_code == 0
+
+
+async def test_absence_restore_checks_parent_permissions_before_removing_roots(docker_drivers, tmp_path, monkeypatch):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier = docker_drivers
+    paths = (PurePosixPath("/home/task"), PurePosixPath("/data/state"))
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    result = await verifier.exec(
+        "mkdir -p /home/task /data/state; chown -R 1000:1000 /home/task /data; chmod 0777 /home; chmod 0555 /data",
+        user="root")
+    assert result.return_code == 0
+    execute = verifier.exec
+
+    async def as_task(command, **kwargs):
+        return await execute(command, **{**kwargs, "user": "1000:1000"})
+
+    monkeypatch.setattr(verifier, "exec", as_task)
+    with pytest.raises(RuntimeError):
+        await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath("/workspace"))
+    assert (await execute("test -d /home/task && test -d /data/state", user="root")).return_code == 0
