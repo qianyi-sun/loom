@@ -270,6 +270,60 @@ async def test_sdk_lookup_checks_all_pages_and_rejects_duplicate_access_keys():
         await api.find("access_key", expected)
 
 
+@pytest.mark.parametrize("case", ["found", "absent", "duplicate", "cycle", "bound"])
+async def test_sdk_membership_lookup_uses_generated_client_and_complete_inventory(monkeypatch, case):
+    from types import SimpleNamespace
+
+    from nebius.aio.client import Client
+    from nebius.api.nebius.common.v1 import ResourceMetadata
+    from nebius.api.nebius.iam.v1 import (
+        GroupMembership,
+        GroupMembershipSpec,
+        ListGroupMembershipsRequest,
+        ListGroupMembershipsResponse,
+    )
+
+    from loom_service.environment_management.nebius_api import NebiusSdkEnvironmentApi
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    calls = []
+
+    async def rpc(self, method, request, result_class, **kwargs):
+        # Keep generated method dispatch and message models real; only the
+        # network boundary is replaced. A fake client.list hid this mismatch.
+        assert method == "ListMembers"
+        assert isinstance(request, ListGroupMembershipsRequest)
+        assert request.parent_id == "group-owned" and request.page_size == 100
+        assert kwargs == {"timeout": 30, "retries": 0}
+        calls.append(request.page_token)
+        member = "service-account-wanted" if (
+            case == "duplicate" or (case == "found" and request.page_token)
+        ) else "service-account-other"
+        next_token = "second" if not request.page_token or case == "cycle" else ""
+        if case == "bound":
+            next_token = str(len(calls))
+        return ListGroupMembershipsResponse(memberships=[GroupMembership(
+            metadata=ResourceMetadata(id="membership-" + str(len(calls)), parent_id="group-owned"),
+            spec=GroupMembershipSpec(member_id=member),
+        )], next_page_token=next_token)
+
+    monkeypatch.setattr(Client, "request", rpc)
+    api = NebiusSdkEnvironmentApi(SimpleNamespace())
+    expected = {"metadata": {"parent_id": "group-owned"}, "spec": {"member_id": "service-account-wanted"}}
+    if case in {"duplicate", "cycle", "bound"}:
+        reason = "identity_ambiguous" if case == "duplicate" else "inventory_incomplete"
+        with pytest.raises(ProviderBlockedError, match=reason):
+            await api.find("membership", expected)
+    else:
+        actual = await api.find("membership", expected)
+        if case == "absent":
+            assert actual is None
+        else:
+            assert actual["metadata"]["id"] == "membership-2"
+            assert actual["spec"]["member_id"] == "service-account-wanted"
+    assert calls == ([""] + [str(n) for n in range(1, 100)] if case == "bound" else ["", "second"])
+
+
 @pytest.mark.parametrize("code,expected_exception", [("NOT_FOUND", None), ("UNAVAILABLE", "retry"),
                                                     ("PERMISSION_DENIED", "blocked")])
 async def test_sdk_lookup_sanitizes_failures_and_only_not_found_means_absent(code, expected_exception):
