@@ -37,6 +37,18 @@ DEFAULT_STORAGE_MB = 4096
 _GLOB_MAGIC = re.compile(r"[][*?]")
 
 
+class UnsupportedComposeEnvironmentError(ValueError):
+    """The task's packaged service topology has no equivalent profile mapping."""
+
+    def __init__(self, relative_paths: tuple[str, ...]) -> None:
+        self.relative_paths = relative_paths
+        super().__init__(
+            "nebius-terminus: packaged Docker Compose configuration is unsupported: "
+            + ", ".join(relative_paths)
+            + "; preserve its service images, mounts, network aliases, health checks and dependencies"
+        )
+
+
 # Exact previous generated wrapper, before failed-exit rewards were retained.
 # Unknown custom scripts must still require an explicit reviewed adaptation.
 _LEGACY_OFFLINE_WRAPPER_SHA256 = "652a23b2adc7c088d149b895e286a1541ef6d1ad0eeeea6252c67c82ece861ae"
@@ -142,6 +154,18 @@ def adapt_bundle_for_nebius_terminus(
     Returns a shallow-copied config dict (nested sections that are mutated are
     also copied) and counters describing what changed.
     """
+
+    # Harbor consumes environment/docker-compose.yaml alongside its Dockerfile.
+    # Also surface the standard Compose aliases; none is translated by this
+    # single-image adapter. Do this before writing any derived inputs, including
+    # for main-only overrides whose environment or mounts would otherwise vanish.
+    compose_paths = tuple(
+        f"environment/{name}"
+        for name in ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
+        if (staged / "environment" / name).exists() or (staged / "environment" / name).is_symlink()
+    )
+    if compose_paths:
+        raise UnsupportedComposeEnvironmentError(compose_paths)
 
     adapted = dict(config)
     environment = dict(adapted.get("environment") or {})

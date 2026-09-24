@@ -309,6 +309,14 @@ requirements for review. The profile points the verifier at relative
 and prepares a derived Dockerfile for the selected numeric identity.
 Explicit identity and web egress require qualified deployment opt-ins;
 the default runtime remains non-root with gateway-only networking.
+Packaged `environment/docker-compose.yaml` and the standard `.yml` or
+`compose.yaml` / `compose.yml` variants block profile conversion before derived
+files are written. The compatibility report identifies each source as
+`compose_environment_unsupported`. This includes main-container overrides:
+their environment, mounts and network settings must not disappear. Preserve
+supplied service fixtures and qualify their isolated images, network aliases,
+health checks, dependencies and verifier lifecycle; a packaged local service
+does not establish a missing external endpoint.
 The original Dockerfile and `tests/test.sh` remain
 unchanged in the source bundle. The derived image prepares writable workspace,
 home and verifier directories, installs Terminus tools, and preinstalls the
