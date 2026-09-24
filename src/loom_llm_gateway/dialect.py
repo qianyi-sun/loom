@@ -198,10 +198,11 @@ def _gemini(r: dict[str, Any]) -> TokenUsage:
     extras["_loom_input_includes_cache"] = True
     cached = u.get("cachedContentTokenCount")
     extras["_loom_cache_usage_known"] = isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0
+    modality_counts = [u.get(key) for key in ("promptTokensDetails", "candidatesTokensDetails")]
     if u.get("thoughtsTokenCount") or any(
         isinstance(item, dict) and item.get("tokenCount") and item.get("modality") != "TEXT"
-        for key in ("promptTokensDetails", "candidatesTokensDetails")
-        for item in (u.get(key) if isinstance(u.get(key), list) else [])
+        for counts in modality_counts if isinstance(counts, list)
+        for item in counts
     ):
         # These extra categories need an explicit supplier billing rule.
         extras["_loom_unsupported_billing"] = True
