@@ -736,6 +736,59 @@ async def test_default_catalog_upgrade_preserves_existing_class_identity(postgre
         await engine.dispose()
 
 
+async def test_deployment_retirement_payload_commits_observed_target_health(
+    postgres_url: str, tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deployer's actual payload must satisfy the migrated health constraint."""
+    import io
+    import urllib.request
+
+    from scripts.ops.deploy_nebius_platform import TARGET_RETIRE_PROGRAM
+
+    from loom_control_plane.routes.service_executions import TargetHealthBody
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    payloads = []
+    try:
+        async with sessions() as session, session.begin():
+            _, target = await _seed_ready_trial(session, now=datetime.now(UTC))
+
+        class Transport:
+            def open(self, request, timeout):
+                if request.method == "GET":
+                    result = {"targets": [{"target_id": target.target_id, "desired_state": "active"}]}
+                else:
+                    payload = json.loads(request.data)
+                    payloads.append(payload)
+                    result = {"target_id": target.target_id, **payload}
+                response = io.BytesIO(json.dumps(result).encode())
+                response.status = 200
+                return response
+
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Transport())
+        secret = tmp_path / "admin.toml"
+        secret.write_text('[admin]\ntoken = "retirement-test"\n')
+        namespace = {"__name__": "retirement_fixture"}
+        exec(TARGET_RETIRE_PROGRAM, namespace)
+        namespace["target_action"](
+            "retire", target.target_id, "replacement-target", secret_file=secret, origin="http://fixture",
+        )
+        assert len(payloads) == 1
+        body = TargetHealthBody.model_validate(payloads[0])
+        async with sessions() as session, session.begin():
+            await set_execution_target_health(session, target_id=target.target_id, **body.model_dump())
+        async with sessions() as session:
+            stored = await session.get(ServiceExecutionTarget, target.target_id)
+            assert stored is not None
+            assert stored.desired_state == stored.observed_state == "retired"
+            assert stored.health_status == "unhealthy"
+            assert stored.health_observed_at == body.observed_at
+            assert stored.health_error_code == "target_replaced"
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize("operator_state", ["draining", "retired"])
 async def test_actuator_refreshes_target_health_during_drift_without_reenabling_operator_state(
     postgres_url: str, operator_state: str,
