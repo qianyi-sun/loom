@@ -18,17 +18,16 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 if TYPE_CHECKING:
     from loom.family_run.spec import FamilyRunSpec
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
-from loom.agent_runtime_registry import resolve_agent_runtimes
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
 from loom.db.schema import (
@@ -47,8 +46,6 @@ from loom.db.schema import (
     Worker,
 )
 from loom.models.batch import Combination
-from loom.models.task import TaskConfig
-from loom.models.trial import TrialConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
 from loom.request_params import sanitize_request_extras
@@ -56,17 +53,10 @@ from loom.resource_usage_store import resource_usage_response
 from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import (
     NEBIUS_BACKEND,
-    NEBIUS_LOGICAL_POOL_ID,
     local_execution_enabled,
 )
 from loom.service_execution_materialization import (
-    ServiceExecutionRuntimeProfileV1,
     TaskExecutionResourceRequestsV1,
-    automatic_service_execution_rejections,
-    freeze_agent_runtime_releases,
-    load_service_execution_runtime_profile,
-    runtime_profile_rejections,
-    validate_task_resource_requests,
 )
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -98,6 +88,12 @@ from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.execution_admission import (
+    admit_execution_backend,
+    freeze_task_resource_requests,
+    reject_submission,
+    reject_unsupported_hosted_backend,
+)
 from loom_service.failure_taxonomy import (
     build_supplemental_rerun_plan,
     is_auto_safe_rerun,
@@ -154,11 +150,6 @@ from loom_service.usage_accounting import (
 )
 from loom_service.usage_accounting import (
     usage_by_batch_ids as _usage_by_batch_ids,
-)
-from loom_service.worker_backends import (
-    get_active_backends,
-    get_service_execution_backend_pools,
-    runtime_environment,
 )
 
 router = APIRouter()
@@ -250,7 +241,7 @@ class _CreateBatch(BaseModel):
     n_per_task: int = Field(default=1, ge=1, le=100)
     # Hosted submissions default to Nebius, so callers should omit this. An
     # explicit "nebius" is compatibility input; any other hosted value is
-    # rejected by _reject_unsupported_hosted_backend before any work.
+    # rejected by reject_unsupported_hosted_backend before any work.
     # Disposable local stacks (LOOM_LOCAL_EXECUTION=1) default to Docker.
     backend: str = Field(
         default_factory=lambda: "docker" if local_execution_enabled() else NEBIUS_BACKEND,
@@ -353,7 +344,7 @@ def _reject_invalid_workspace_staging_policy_name(
     if policy_name is None:
         return
     if not isinstance(policy_name, str) or policy_name not in {"tb21", "none"}:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail=("trial_config.workspace_staging_policy_name must be 'tb21' or 'none'"),
@@ -385,13 +376,13 @@ def _normalize_required_worker_pools(values: Sequence[str]) -> list[str]:
     for raw in values:
         pool = str(raw).strip()
         if not pool:
-            _reject_submission(
+            reject_submission(
                 reason="invalid_input",
                 status_code=400,
                 detail="required_worker_pools entries must be non-empty strings",
             )
         if len(pool) > 80 or any(ch.isspace() for ch in pool):
-            _reject_submission(
+            reject_submission(
                 reason="invalid_input",
                 status_code=400,
                 detail=(
@@ -420,7 +411,7 @@ def _reject_if_k8s_worker_unavailable(
     settings = request.app.state.settings
     if settings.k8s_worker_enabled:
         return
-    _reject_submission(
+    reject_submission(
         reason="k8s_worker_unavailable",
         status_code=400,
         detail=(
@@ -432,265 +423,6 @@ def _reject_if_k8s_worker_unavailable(
     )
 
 
-def _reject_submission(
-    *,
-    reason: str,
-    status_code: int,
-    detail: Any,
-) -> NoReturn:
-    SUBMISSION_REJECTS_TOTAL.labels(reason=reason).inc()
-    raise HTTPException(status_code=status_code, detail=detail)
-
-
-def _reject_unsupported_hosted_backend(backend: str) -> None:
-    """Reject any explicit non-Nebius backend outside disposable local execution.
-
-    Never reinterprets the request as Nebius: the caller is told to omit it.
-    """
-    if backend != NEBIUS_BACKEND and not local_execution_enabled():
-        _reject_submission(
-            reason="unsupported_hosted_backend",
-            status_code=400,
-            detail={
-                "reason": "unsupported_hosted_backend",
-                "backend": backend,
-                "message": (
-                    "Hosted execution supports Nebius only. "
-                    "Omit `backend` and resubmit."
-                ),
-            },
-        )
-
-
-async def _freeze_task_resource_requests(
-    session: Any,
-    *,
-    backend: str,
-    task_ids: Sequence[str],
-    trial_config: dict[str, Any],
-    combinations: Sequence[Combination | dict[str, Any]],
-    profile: ServiceExecutionRuntimeProfileV1 | None,
-    overrides: dict[str, TaskExecutionResourceRequestsV1],
-) -> ServiceExecutionRuntimeProfileV1 | None:
-    """Freeze selected deployment policy plus explicit overrides at submission.
-
-    The same API resolves browser and CLI submissions. The environment baseline
-    applies to newly selected tasks; measured and explicit overrides take priority.
-    Every resolved request is frozen against the selected task's current revision.
-    """
-    if backend != NEBIUS_BACKEND or profile is None:
-        if overrides:
-            raise HTTPException(status_code=400, detail="task_resource_requests requires native Nebius execution")
-        return profile
-    if not set(overrides).issubset(task_ids):
-        raise HTTPException(status_code=400, detail="task_resource_requests contains an unselected task")
-    selections = [
-        {**trial_config, "agent_name": item.agent_name, "agent_version": item.agent_version,
-         "agent_model": item.agent_model.model_dump(mode="json") if item.agent_model is not None else None}
-        for raw in combinations
-        for item in (raw if isinstance(raw, Combination) else Combination.model_validate(raw),)
-    ] or [trial_config]
-    terminus_only = all(item.get("agent_name") == "terminus-2" for item in selections)
-    if overrides and not terminus_only:
-        raise HTTPException(status_code=400, detail="task_resource_requests supports only terminus-2")
-    requests = {
-        task_id: entry for task_id, entry in profile.task_resource_requests.items()
-        if task_id in task_ids and terminus_only
-    }
-    requests.update(overrides)
-    baseline = profile.default_task_resource_requests if terminus_only else None
-    selected_ids = set(task_ids) if baseline is not None else set(requests)
-    if not selected_ids:
-        return profile.model_copy(update={"task_resource_requests": {}})
-    rows = (await session.execute(
-        select(Task.id, Task.checksum, Task.config).where(Task.id.in_(list(selected_ids))),
-    )).all()
-    if {str(row[0]) for row in rows} != selected_ids:
-        raise HTTPException(status_code=400, detail="task_resource_requests task is missing")
-    try:
-        trials = [TrialConfig.model_validate(item) for item in selections]
-        for task_id, checksum, raw_task in rows:
-            task = TaskConfig.model_validate(raw_task)
-            if task.service_execution is not None:
-                if str(task_id) in requests:
-                    raise ValueError("task_resource_requests requires automatic native execution")
-                continue
-            revision = "sha256:" + checksum.removeprefix("sha256:")
-            if str(task_id) not in requests:
-                assert baseline is not None
-                requests[str(task_id)] = TaskExecutionResourceRequestsV1(
-                    task_revision_sha256=revision, requests=baseline,
-                )
-            for trial in trials:
-                try:
-                    validate_task_resource_requests(
-                        task=task, trial=trial, profile=profile,
-                        task_revision_sha256=revision,
-                        override=requests[str(task_id)],
-                    )
-                except ValueError as exc:
-                    raise ValueError(f"{task_id}: {exc}") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return profile.model_copy(update={"task_resource_requests": requests})
-
-
-async def _reject_if_backend_cannot_execute_or_cold_start(
-    session: Any,
-    *,
-    backend: str,
-    task_ids: Sequence[str],
-    trial_config: dict[str, Any],
-    combinations: Sequence[Combination | dict[str, Any]],
-    runtime_profile_json: str,
-    resolve_versions: bool = True,
-    automatic_only: bool = False,
-) -> ServiceExecutionRuntimeProfileV1 | None:
-    """Require a native target, or a worker in explicit local development."""
-    _reject_unsupported_hosted_backend(backend)
-    selection_configs = [
-        combo.model_dump(mode="json") if isinstance(combo, Combination) else combo
-        for combo in combinations
-    ] or [trial_config]
-    selections = [
-        (str(item.get("agent_name", "")), item.get("agent_version"))
-        for item in selection_configs
-    ]
-    if any(version is not None for _, version in selections) and backend != NEBIUS_BACKEND:
-        raise HTTPException(status_code=400, detail="agent_version requires the native Nebius backend")
-    task_rows = (
-        await session.execute(
-            select(Task.id, Task.config, Task.source_provenance).where(Task.id.in_(list(task_ids))),
-        )
-    ).all()
-    configs_by_id = {
-        str(task_id): (TaskConfig.model_validate(config), dict(source_provenance or {}))
-        for task_id, config, source_provenance in task_rows
-    }
-    if backend == NEBIUS_BACKEND:
-        parsed_trials: tuple[TrialConfig, ...] | None = None
-        parsed_trial_error = False
-        profile = load_service_execution_runtime_profile(runtime_profile_json)
-        if profile is not None and resolve_versions:
-            try:
-                releases = await resolve_agent_runtimes(session, selections)
-                profile = freeze_agent_runtime_releases(profile, releases)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        incompatible_task_ids: list[str] = []
-        rejection_reasons: dict[str, list[str]] = {}
-        automatic_profile_used = False
-        for task_id in task_ids:
-            task_entry = configs_by_id.get(task_id)
-            task_config = task_entry[0] if task_entry is not None else None
-            provenance = task_entry[1] if task_entry is not None else {}
-            binding = task_config.service_execution if task_config is not None else None
-            reasons: tuple[str, ...] = ()
-            if binding is not None and automatic_only:
-                raise HTTPException(
-                    status_code=400,
-                    detail="current runtime rerun requires automatic native execution for every task",
-                )
-            if binding is not None and any(version is not None for _, version in selections):
-                raise HTTPException(status_code=400, detail="agent_version requires automatic native execution")
-            if binding is None and task_config is not None:
-                automatic_profile_used = True
-                if parsed_trials is None:
-                    try:
-                        if combinations:
-                            parsed_trials = tuple(
-                                TrialConfig.model_validate(
-                                    {
-                                        **trial_config,
-                                        "agent_name": combination.agent_name,
-                                        "agent_version": combination.agent_version,
-                                        "agent_model": (
-                                            combination.agent_model.model_dump(mode="json")
-                                            if combination.agent_model is not None
-                                            else None
-                                        ),
-                                    }
-                                )
-                                for raw_combination in combinations
-                                for combination in (
-                                    raw_combination
-                                    if isinstance(raw_combination, Combination)
-                                    else Combination.model_validate(raw_combination),
-                                )
-                            )
-                        else:
-                            parsed_trials = (TrialConfig.model_validate(trial_config),)
-                    except ValidationError:
-                        parsed_trials = ()
-                        parsed_trial_error = True
-                if parsed_trial_error:
-                    reasons = ("automatic_trial_config_invalid",)
-                else:
-                    reasons = tuple(
-                        dict.fromkeys(
-                            reason
-                            for parsed_trial in parsed_trials
-                            for reason in automatic_service_execution_rejections(
-                                task_config,
-                                parsed_trial,
-                                source_provenance=provenance,
-                                allow_task_image_preparation=True,
-                            )
-                        )
-                    )
-                if profile is None:
-                    reasons = (*reasons, "runtime_profile_unavailable")
-                elif parsed_trials:
-                    reasons = (*reasons, *(
-                        reason for parsed_trial in parsed_trials
-                        for reason in runtime_profile_rejections(
-                            task_config, parsed_trial, profile,
-                            allow_task_image_preparation=True,
-                        )
-                    ))
-            if (
-                task_config is None
-                or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)
-                or reasons
-            ):
-                incompatible_task_ids.append(task_id)
-                if reasons:
-                    rejection_reasons[task_id] = list(dict.fromkeys(reasons))
-        if incompatible_task_ids:
-            _reject_submission(
-                reason="nebius_task_incompatible",
-                status_code=400,
-                detail={
-                    "reason": "nebius_task_incompatible",
-                    "backend": NEBIUS_BACKEND,
-                    "logical_pool_id": NEBIUS_LOGICAL_POOL_ID,
-                    "task_ids": incompatible_task_ids,
-                    "rejection_reasons": rejection_reasons,
-                },
-            )
-        service_pools = await get_service_execution_backend_pools(session)
-        if any(pool.pool_name == NEBIUS_LOGICAL_POOL_ID for pool in service_pools):
-            return profile if automatic_profile_used else None
-        _reject_submission(
-            reason="nebius_target_unavailable",
-            status_code=400,
-            detail=(
-                "backend 'nebius' has no fresh healthy active target in "
-                f"environment {runtime_environment()!r}"
-            ),
-        )
-
-    active_backends = await get_active_backends(session)
-    if backend in active_backends:
-        return None
-    available_str = ", ".join(sorted(active_backends)) or "(none — no active workers)"
-    _reject_submission(
-        reason="no_workers", status_code=400,
-        detail=(f"no active worker advertises backend {backend!r}. "
-                f"Currently available: {available_str}. Start a local worker."),
-    )
-
-
 async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
     paused_at = (
         await session.execute(
@@ -698,7 +430,7 @@ async def _reject_if_team_paused(session: Any, team_id: UUID) -> None:
         )
     ).scalar_one_or_none()
     if paused_at is not None:
-        _reject_submission(
+        reject_submission(
             reason="team_paused",
             status_code=403,
             detail="team submissions are paused",
@@ -710,7 +442,7 @@ async def _resolve_on_behalf_submitter(
     payload: _AdminCreateBatchOnBehalf,
 ) -> User:
     if payload.team_id is None:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail="team_id is required for admin on-behalf batch submission",
@@ -720,7 +452,7 @@ async def _resolve_on_behalf_submitter(
         payload.represented_username.strip() if payload.represented_username is not None else None
     )
     if bool(represented_user_id) == bool(represented_username):
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail=("set exactly one of represented_user_id or represented_username"),
@@ -732,13 +464,13 @@ async def _resolve_on_behalf_submitter(
         )
     ).scalar_one_or_none()
     if team is None:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=404,
             detail="team not found",
         )
     if team.disabled_at is not None:
-        _reject_submission(
+        reject_submission(
             reason="permission",
             status_code=403,
             detail="represented team is disabled",
@@ -753,13 +485,13 @@ async def _resolve_on_behalf_submitter(
         )
     user = (await session.execute(stmt)).scalar_one_or_none()
     if user is None:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=404,
             detail="represented user not found",
         )
     if user.status != "active" or user.disabled_at is not None:
-        _reject_submission(
+        reject_submission(
             reason="permission",
             status_code=403,
             detail="represented user is not active",
@@ -774,7 +506,7 @@ async def _resolve_on_behalf_submitter(
         )
     ).scalar_one_or_none()
     if membership is None:
-        _reject_submission(
+        reject_submission(
             reason="permission",
             status_code=403,
             detail="represented user is not a member of the represented team",
@@ -789,7 +521,7 @@ async def _resolve_submission_team_id(
 ) -> UUID:
     if requested_team_id is None:
         if ctx.team_id is None:
-            _reject_submission(
+            reject_submission(
                 reason="invalid_input",
                 status_code=400,
                 detail="admin tokens must scope batches to a team — "
@@ -800,7 +532,7 @@ async def _resolve_submission_team_id(
 
     if not is_admin(ctx):
         if ctx.team_id != requested_team_id:
-            _reject_submission(
+            reject_submission(
                 reason="permission",
                 status_code=403,
                 detail="cross-team batch submission requires admin scope",
@@ -813,7 +545,7 @@ async def _resolve_submission_team_id(
         )
     ).scalar_one_or_none()
     if exists is None:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=404,
             detail="team not found",
@@ -840,7 +572,7 @@ async def _reject_if_known_failed_provider_model(
     ).scalar_one_or_none()
     if row is None:
         prefix = f"{context}: " if context else ""
-        _reject_submission(
+        reject_submission(
             reason="provider_model_cache",
             status_code=400,
             detail=(
@@ -856,7 +588,7 @@ async def _reject_if_known_failed_provider_model(
     if row.last_preflight_error_code:
         detail += f" ({row.last_preflight_error_code})"
     detail += "; run provider model preflight again or choose another model"
-    _reject_submission(
+    reject_submission(
         reason="provider_model_preflight",
         status_code=400,
         detail=detail,
@@ -1088,7 +820,7 @@ async def _create_batch_record(
     usage_attributed_user_id: UUID | None,
     usage_attributed_actor: str | None,
 ) -> dict[str, Any]:
-    _reject_unsupported_hosted_backend(payload.backend)
+    reject_unsupported_hosted_backend(payload.backend)
     submission_team_id = await _resolve_submission_team_id(
         s,
         ctx,
@@ -1101,7 +833,7 @@ async def _create_batch_record(
     _reject_invalid_workspace_staging_policy_name(trial_config)
     purpose_trial_err = validate_purpose_trial_config(payload.purpose, trial_config)
     if purpose_trial_err is not None:
-        _reject_submission(
+        reject_submission(
             reason=purpose_trial_err,
             status_code=400,
             detail=purpose_trial_err,
@@ -1111,7 +843,7 @@ async def _create_batch_record(
         payload.task_filter,
     )
     if purpose_filter_err is not None:
-        _reject_submission(
+        reject_submission(
             reason=purpose_filter_err,
             status_code=400,
             detail=purpose_filter_err,
@@ -1127,7 +859,7 @@ async def _create_batch_record(
         # those live on each Combination.
         for forbidden in ("agent_name", "agent_model", "agent_version"):
             if forbidden in trial_config:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
@@ -1140,7 +872,7 @@ async def _create_batch_record(
         # Combination.
         for i, combo in enumerate(payload.combinations):
             if combo.agent_name not in catalog:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
@@ -1154,7 +886,7 @@ async def _create_batch_record(
                 combo.agent_model,
             )
             if err is not None:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=f"combinations[{i}]: {err}",
@@ -1165,7 +897,7 @@ async def _create_batch_record(
         for i, combo in enumerate(payload.combinations):
             label = combo.label or _derive_combination_label(combo)
             if label in seen_labels:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(f"combinations[{i}] label {label!r} is duplicated within the batch"),
@@ -1177,7 +909,7 @@ async def _create_batch_record(
         agent_name = trial_config.get("agent_name")
         if isinstance(agent_name, str) and agent_name:
             if agent_name not in catalog:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
@@ -1185,7 +917,7 @@ async def _create_batch_record(
                     ),
                 )
             if "agent_model" not in trial_config:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
@@ -1202,14 +934,14 @@ async def _create_batch_record(
                 try:
                     model = ModelSpec.model_validate(model_raw)
                 except Exception as exc:
-                    _reject_submission(
+                    reject_submission(
                         reason="invalid_input",
                         status_code=400,
                         detail=(f"trial_config.agent_model failed to validate: {exc}"),
                     )
             err = validate_agent_model_compat(agent_name, model)
             if err is not None:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=f"trial_config: {err}",
@@ -1285,7 +1017,7 @@ async def _create_batch_record(
     try:
         multi_model_spec = parse_multi_model(trial_config)
     except Exception as exc:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail=f"trial_config.multi_model is invalid: {exc}",
@@ -1304,7 +1036,7 @@ async def _create_batch_record(
                     context=f"combinations[{i}]",
                 )
                 if err is not None:
-                    _reject_submission(
+                    reject_submission(
                         reason="invalid_input",
                         status_code=400,
                         detail=err,
@@ -1325,7 +1057,7 @@ async def _create_batch_record(
                 try:
                     model = ModelSpec.model_validate(model_raw)
                 except Exception as exc:
-                    _reject_submission(
+                    reject_submission(
                         reason="invalid_input",
                         status_code=400,
                         detail=f"trial_config.agent_model failed to validate: {exc}",
@@ -1345,7 +1077,7 @@ async def _create_batch_record(
                 context="trial_config",
             )
             if err is not None:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=err,
@@ -1387,7 +1119,7 @@ async def _create_batch_record(
                 combinations=payload.combinations,
                 trial_config=trial_config,
             )
-        _reject_submission(
+        reject_submission(
             reason="empty_filter",
             status_code=400,
             detail=(
@@ -1401,7 +1133,7 @@ async def _create_batch_record(
         task_ids,
     )
     if invalid_tasks:
-        _reject_submission(
+        reject_submission(
             reason="invalid_task_config",
             status_code=400,
             detail=invalid_task_config_detail(invalid_tasks),
@@ -1422,7 +1154,7 @@ async def _create_batch_record(
             task_set_ids=purpose_task_rows,
         )
         if purpose_resolved_err is not None:
-            _reject_submission(
+            reject_submission(
                 reason=purpose_resolved_err,
                 status_code=400,
                 detail=purpose_resolved_err,
@@ -1431,7 +1163,7 @@ async def _create_batch_record(
     # A live worker is immediately executable. A fresh compatible pool policy
     # is only cold-start authority, but it must be allowed to observe the queued
     # trials created below; otherwise min_slots=0 can never scale up.
-    service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
+    service_execution_runtime_profile = await admit_execution_backend(
         s,
         backend=payload.backend,
         task_ids=valid_task_ids,
@@ -1439,7 +1171,7 @@ async def _create_batch_record(
         combinations=payload.combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
     )
-    service_execution_runtime_profile = await _freeze_task_resource_requests(
+    service_execution_runtime_profile = await freeze_task_resource_requests(
         s, backend=payload.backend, task_ids=valid_task_ids,
         trial_config=trial_config, combinations=payload.combinations,
         profile=service_execution_runtime_profile, overrides=payload.task_resource_requests,
@@ -1456,7 +1188,7 @@ async def _create_batch_record(
             trial_config=trial_config,
         )
     except AgentTaskIncompatibilityError as exc:
-        _reject_submission(
+        reject_submission(
             reason="agent_task_incompat",
             status_code=exc.status_code,
             detail=str(exc.detail),
@@ -1508,7 +1240,7 @@ async def _create_batch_record(
                 else "batch_budget_unpriced_confirmation_required"
             )
             if budget_policy == "hard" or not payload.budget_confirmed:
-                _reject_submission(
+                reject_submission(
                     reason=reason,
                     status_code=400 if budget_policy == "hard" else 409,
                     detail={
@@ -1518,7 +1250,7 @@ async def _create_batch_record(
                 )
         elif budget_value is not None and pre_run_cost > budget_value:
             if budget_policy == "hard":
-                _reject_submission(
+                reject_submission(
                     reason="batch_budget_exceeded",
                     status_code=400,
                     detail={
@@ -1527,7 +1259,7 @@ async def _create_batch_record(
                     },
                 )
             if not payload.budget_confirmed:
-                _reject_submission(
+                reject_submission(
                     reason="batch_budget_confirmation_required",
                     status_code=409,
                     detail={
@@ -1641,7 +1373,7 @@ async def _create_batch_record(
                 state_backend=state_backend,
             )
         except ValueError as exc:
-            _reject_submission(
+            reject_submission(
                 reason="invalid_family_run_spec",
                 status_code=400,
                 detail=f"family_run spec resolution failed: {exc}",
@@ -1678,7 +1410,7 @@ def _reject_required_worker_pools_on_user_batch(raw_body: object) -> None:
         return
     if pools == [] or pools == ():
         return
-    _reject_submission(
+    reject_submission(
         reason="required_worker_pools_not_allowed_on_user_batches",
         status_code=400,
         detail=(
@@ -2718,7 +2450,7 @@ async def rerun_failed_batch(
         )
     ).scalar_one_or_none()
     if b is None:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=404,
             detail="batch not found",
@@ -2726,7 +2458,7 @@ async def rerun_failed_batch(
     require_team_or_admin(ctx, b.team_id)
     if b.backend != NEBIUS_BACKEND and not local_execution_enabled():
         # Historical batch: readable, but a rerun would inherit its backend.
-        _reject_submission(
+        reject_submission(
             reason="unsupported_hosted_backend",
             status_code=400,
             detail={
@@ -2770,7 +2502,7 @@ async def rerun_failed_batch(
     if request_payload.include_operator_approval:
         selected_targets.extend(plan["operator_approval"])
     if not selected_targets:
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail="batch has no rerunnable failed trials",
@@ -2801,7 +2533,7 @@ async def rerun_failed_batch(
             combinations=b.combinations or [],
             trial_config=b.trial_config,
         )
-        _reject_submission(
+        reject_submission(
             reason="invalid_input",
             status_code=400,
             detail="rerun target tasks are missing or no longer runnable",
@@ -2811,7 +2543,7 @@ async def rerun_failed_batch(
         rerun_task_result.task_ids,
     )
     if invalid_rerun_tasks:
-        _reject_submission(
+        reject_submission(
             reason="invalid_task_config",
             status_code=400,
             detail=invalid_task_config_detail(invalid_rerun_tasks),
@@ -2824,7 +2556,7 @@ async def rerun_failed_batch(
         if b.backend != NEBIUS_BACKEND or any(
             item.get("agent_name") != "terminus-2" for item in selections
         ):
-            _reject_submission(
+            reject_submission(
                 reason="invalid_input", status_code=400,
                 detail="current runtime rerun supports only native Nebius terminus-2",
             )
@@ -2834,7 +2566,7 @@ async def rerun_failed_batch(
         for item in combinations:
             item.pop("agent_version", None)
         runtime_profile_json = request.app.state.settings.service_execution_runtime_profile_json
-    service_execution_runtime_profile = await _reject_if_backend_cannot_execute_or_cold_start(
+    service_execution_runtime_profile = await admit_execution_backend(
         s,
         backend=b.backend,
         task_ids=valid_rerun_task_ids,
@@ -2845,7 +2577,7 @@ async def rerun_failed_batch(
         automatic_only=request_payload.use_current_runtime,
     )
     inherited_requests = (b.service_execution_runtime_profile or {}).get("task_resource_requests", {})
-    service_execution_runtime_profile = await _freeze_task_resource_requests(
+    service_execution_runtime_profile = await freeze_task_resource_requests(
         s, backend=b.backend, task_ids=valid_rerun_task_ids,
         trial_config=rerun_trial_config, combinations=combinations,
         profile=service_execution_runtime_profile,
@@ -2859,7 +2591,7 @@ async def rerun_failed_batch(
         task_id = str(target["task_id"])
         combination_idx = int(target["combination_idx"])
         if combination_idx < 0 or (combinations and combination_idx >= len(combinations)):
-            _reject_submission(
+            reject_submission(
                 reason="invalid_input",
                 status_code=400,
                 detail=f"rerun target combination_idx {combination_idx} is invalid",
@@ -2867,7 +2599,7 @@ async def rerun_failed_batch(
         if combinations:
             agent_name = combinations[combination_idx].get("agent_name")
             if not isinstance(agent_name, str) or not agent_name:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=(
@@ -2876,7 +2608,7 @@ async def rerun_failed_batch(
                 )
         else:
             if combination_idx != 0:
-                _reject_submission(
+                reject_submission(
                     reason="invalid_input",
                     status_code=400,
                     detail=f"rerun target combination_idx {combination_idx} is invalid",

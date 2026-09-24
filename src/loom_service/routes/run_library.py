@@ -46,16 +46,16 @@ from loom_service.delivery_export import (
 )
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.execution_admission import (
+    admit_execution_backend,
+    freeze_task_resource_requests,
+)
 from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemental
 from loom_service.monitor_filters import apply_batch_monitor_filters
 from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
-from loom_service.routes.batches import (
-    _freeze_task_resource_requests,
-    _reject_if_backend_cannot_execute_or_cold_start,
-)
 from loom_service.routes.object_downloads import stream_object_response
 from loom_service.submission_compat import validate_submission_agent_task_compatibility
 from loom_service.task_config_validation import expected_trial_count
@@ -2244,12 +2244,12 @@ async def _freeze_derived_runtime_profile(
         session, team_id=team_id, task_ids=task_ids,
         combinations=combinations, trial_config=trial_config,
     )
-    profile = await _reject_if_backend_cannot_execute_or_cold_start(
+    profile = await admit_execution_backend(
         session, backend=backend, task_ids=task_ids,
         trial_config=trial_config, combinations=combinations,
         runtime_profile_json=request.app.state.settings.service_execution_runtime_profile_json,
     )
-    profile = await _freeze_task_resource_requests(
+    profile = await freeze_task_resource_requests(
         session, backend=backend, task_ids=task_ids,
         trial_config=trial_config, combinations=combinations, profile=profile, overrides={},
     )
