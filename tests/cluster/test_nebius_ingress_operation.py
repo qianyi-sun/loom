@@ -16,11 +16,13 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
 from cryptography.hazmat.primitives import serialization
 from scripts.ops.nebius_dns_publication import PublicationError, publish_dns
+from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_operation import (
     LiveIngressAPI,
     OperationError,
@@ -56,6 +58,65 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 @pytest.fixture(autouse=True)
 def live_certificate_clock(monkeypatch):
     monkeypatch.setattr(certificate_material, "NOW", datetime.now(UTC))
+
+
+@pytest.mark.timeout(180)
+def test_capacity_reads_live_pods_without_fetching_large_terminal_history(tmp_path):
+    """Real API filtering prevents history growth from blocking live capacity."""
+    from kubernetes import client
+
+    node_name = "computeinstance-ingresshistory"
+    container = _start_k3s(node_name=node_name, ephemeral_storage_floor="2Gi")
+    try:
+        _, core, _ = _load_client(container)
+        namespace = "ingress-history"
+        ns = core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
+        core.create_namespaced_service_account(namespace, client.V1ServiceAccount(
+            metadata=client.V1ObjectMeta(name="history-fixture"), automount_service_account_token=False))
+        _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
+        _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
+        core.patch_node(node_name, {"metadata": {"labels": {
+            "loom.nebius/node-role": "system", "loom.nebius/platform": "integration"}},
+            "spec": {"providerID": "nebius://" + node_name}})
+        context = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
+        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
+        context["clusters"][0]["cluster"]["server"] = endpoint
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text(yaml.safe_dump(context))
+        kubeconfig.chmod(0o600)
+        binding = TLSBinding(str(uuid4()), str(uuid4()), namespace, ns.metadata.uid,
+                             core.read_namespace("kube-system").metadata.uid,
+                             "dev.example.test", "management.example.test")
+        api = LiveIngressAPI(kubeconfig, binding=binding, executable=Path(shutil.which("kubectl")),
+                             candidate="a" * 40, cluster_id="mk8scluster-test", api_server=endpoint,
+                             ingress_class="loom-shared", image="unused-capacity-only")
+        for index in range(20):
+            name = "history-" + str(index)
+            # Exercise API selection, not containers: these fixture Pods cannot
+            # schedule or pull images. Populate the status subresource directly.
+            core.create_namespaced_pod(namespace, {"apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": name, "annotations": {"fixture-payload": "x" * 225_000}},
+                "spec": {"serviceAccountName": "history-fixture", "automountServiceAccountToken": False,
+                         "nodeSelector": {"fixture.invalid/never": "true"}, "restartPolicy": "Never",
+                         "containers": [{"name": "unused", "image": PYTHON}]}})
+            core.patch_namespaced_pod_status(name, namespace, {"status": {
+                "phase": "Succeeded" if index % 2 == 0 else "Failed"}})
+        raw = _run(container, "kubectl", "get", "pods", "--all-namespaces", "-o", "json")
+        assert len(raw.encode()) > 4 * 1024 * 1024
+        assert api.capacity()["reserved_pods"] == 2
+        # A pending foreign workload must still consume the same capacity.
+        allocatable = core.read_node(node_name).status.allocatable
+        core.create_namespaced_pod(namespace, {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "live-competitor"}, "spec": {"restartPolicy": "Never",
+                "serviceAccountName": "history-fixture", "automountServiceAccountToken": False,
+                "nodeSelector": {"loom.nebius/node-role": "system", "loom.nebius/platform": "integration"},
+                "containers": [{"name": "unused", "image": PYTHON,
+                                "resources": {"requests": {"cpu": allocatable["cpu"]}}}]}})
+        with pytest.raises(OperationError, match="cannot fit"):
+            api.capacity()
+        assert len(core.list_namespaced_pod(namespace).items) == 21
+    finally:
+        container.stop()
 
 
 def _guard_documents(namespace):

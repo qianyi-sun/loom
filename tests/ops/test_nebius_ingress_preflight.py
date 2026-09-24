@@ -1,6 +1,7 @@
 """Protected diagnostics reuse real ingress checks without granting writes."""
 from __future__ import annotations
 
+import copy
 import importlib
 import json
 import subprocess
@@ -58,8 +59,14 @@ def wire(tmp_path, platform_inputs, inventory):
                 raise self.error
             if args[-3:] == ("--ignore-not-found", "-o", "json"):
                 args = args[:-3]
+            live_only = args[-2:] == ("--field-selector", "status.phase!=Succeeded,status.phase!=Failed")
+            if live_only:
+                args = args[:-2]
             assert args in documents, "diagnostic attempted an unapproved request"
             value = documents[args]
+            if live_only and isinstance(value, dict):
+                value = {**value, "items": [row for row in value["items"]
+                    if row.get("status", {}).get("phase") not in {"Succeeded", "Failed"}]}
             return value if isinstance(value, str) else json.dumps(value)
 
     return Wire(), config, documents, inventory
@@ -191,3 +198,29 @@ def test_independent_check_clears_prior_transport_failure(wire):
     inventory["pods"][0]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "900m"
     result = inspect(wire)
     assert result["failures"] == {"foundation": "read_failed", "capacity": "insufficient_capacity"}
+
+
+def test_terminal_history_is_filtered_before_the_gateway_response_bound(wire):
+    inventory = wire[3]
+    for index in range(20):
+        pod = copy.deepcopy(inventory["pods"][0])
+        pod["metadata"].update(name="history-" + str(index), uid=str(uuid4()),
+                               annotations={"private-history": "x" * 225_000})
+        pod["status"]["phase"] = "Failed" if index % 2 else "Succeeded"
+        inventory["pods"].append(pod)
+    result = inspect(wire)
+    assert result["status"] == "passed"
+    assert next(row["bytes"] for row in result["reads"] if row["resource"] == "pods") < 4096
+    assert len(inventory["pods"]) == 21
+    assert "private-history" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("phase", ["Pending", "Running", "Unknown", ""])
+def test_live_pod_filter_retains_nonterminal_terminating_and_foreign_demand(wire, phase):
+    pod = copy.deepcopy(wire[3]["pods"][0])
+    pod["metadata"].update(name="still-live", uid=str(uuid4()), namespace="foreign-two",
+                           deletionTimestamp="2026-09-24T02:00:00Z")
+    pod["status"]["phase"] = phase
+    wire[3]["pods"].append(pod)
+    result = inspect(wire)
+    assert result["failures"] == {"capacity": "insufficient_capacity"}
