@@ -110,6 +110,12 @@ def test_capacity_reads_live_pods_without_fetching_large_terminal_history(tmp_pa
                 "phase": "Succeeded" if index % 2 == 0 else "Failed"}})
         raw = _run(container, "kubectl", "get", "pods", "--all-namespaces", "-o", "json")
         assert len(raw.encode()) > 4 * 1024 * 1024
+        # This namespace is deterministically empty after filtering, even when
+        # k3s system Pods exist elsewhere. Exercise the real bounded transport's
+        # empty-List behavior without changing capacity's all-namespace scope.
+        empty = json.loads(api._run(["get", "pods", "-n", namespace, "--field-selector",
+                                    "status.phase!=Succeeded,status.phase!=Failed", "-o", "json"]))
+        assert empty["kind"] == "List" and empty["items"] == []
         try:
             assert api.capacity()["reserved_pods"] == 2
         except OperationError as exc:
@@ -133,11 +139,15 @@ def test_capacity_reads_live_pods_without_fetching_large_terminal_history(tmp_pa
         core.create_namespaced_pod(namespace, {"apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": "live-competitor"}, "spec": {"restartPolicy": "Never",
                 "serviceAccountName": "history-fixture", "automountServiceAccountToken": False,
+                "schedulerName": "loom-ingress-fixture-no-scheduler",
                 "nodeSelector": {"loom.nebius/node-role": "system", "loom.nebius/platform": "integration"},
                 "containers": [{"name": "unused", "image": PYTHON,
                                 "resources": {"requests": {"cpu": allocatable["cpu"]}}}]}})
         with pytest.raises(OperationError, match="cannot fit"):
             api.capacity()
+        competitor = core.read_namespaced_pod("live-competitor", namespace)
+        assert competitor.status.phase == "Pending"
+        assert not competitor.spec.node_name and not competitor.status.container_statuses
         assert len(core.list_namespaced_pod(namespace).items) == 21
     finally:
         container.stop()
