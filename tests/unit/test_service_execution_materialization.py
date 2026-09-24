@@ -76,6 +76,19 @@ def _trial() -> TrialConfig:
     )
 
 
+@pytest.mark.parametrize("agent_name", ["terminus-2", "direct-completion", "litellm", "oracle"])
+def test_continuation_admission_uses_resolved_agent_not_source_default(agent_name):
+    task = _task(agent={"name": "oracle", "continue_until_timeout": True})
+    trial = _trial().model_copy(update={"agent_name": agent_name})
+    reasons = automatic_service_execution_rejections(task, trial, source_provenance=_provenance())
+    assert ("agent_continuation_unsupported" in reasons) is (agent_name != "terminus-2")
+
+
+def test_default_completion_does_not_restrict_direct_completion():
+    reasons = automatic_service_execution_rejections(_task(), _trial(), source_provenance=_provenance())
+    assert "agent_continuation_unsupported" not in reasons
+
+
 def _provenance() -> dict[str, object]:
     return {
         "service_execution_input": {

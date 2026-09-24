@@ -91,6 +91,23 @@ def test_report_covers_every_task_after_parse_and_adaptation_failures(
     assert {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == original
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_nebius_report_retains_supported_completion_policy(tmp_path, capsys, enabled):
+    import tomllib
+
+    bundle = _write_bundle(tmp_path, "continuation")
+    config = tomllib.loads((bundle / "task.toml").read_text())
+    config["agent"]["continue_until_timeout"] = enabled
+    (bundle / "task.toml").write_text(tomli_w.dumps(config))
+    original = (bundle / "task.toml").read_bytes()
+    rc, payload = _report(tmp_path, capsys)
+    assert rc == 0
+    report, = payload["compatibility_report"]["tasks"]
+    assert report["admission_passed"] is True
+    assert not any(row["code"] == "agent_completion_policy" for row in report["diagnostics"])
+    assert (bundle / "task.toml").read_bytes() == original
+
+
 def test_admission_pass_does_not_hide_changed_declared_requirements(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
