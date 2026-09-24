@@ -99,6 +99,27 @@ def test_preexisting_exact_record_is_external_and_is_never_recreated(target, tmp
     assert provider.posts == ["management.nebius"]
 
 
+def test_existing_txt_is_preserved_during_creation_and_replay(target, tmp_path):
+    provider = Provider()
+    text_record = {"recordId": "verification", "type": "TXT", "name": "*.dev.nebius", "data": "foreign-verification", "ttl": 600}
+    provider.rows["*.dev.nebius"] = [text_record]
+    publish(provider, target, tmp_path)
+    assert publish(provider, target, tmp_path)["status"] == "dns_published"
+    assert provider.posts == ["*.dev.nebius", "management.nebius"]
+    assert provider.rows["*.dev.nebius"][0] == text_record
+
+
+def test_duplicate_identical_a_records_are_not_treated_as_one(target, tmp_path):
+    provider = Provider()
+    provider.rows["*.dev.nebius"] = [
+        {"recordId": identity, "type": "A", "name": "*.dev.nebius", "data": "8.8.8.8", "ttl": 600}
+        for identity in ("first", "second")
+    ]
+    with pytest.raises(publication.PublicationError):
+        publish(provider, target, tmp_path)
+    assert not provider.posts
+
+
 def test_target_drift_between_records_retains_partial_journal(target, tmp_path):
     provider = Provider()
 
