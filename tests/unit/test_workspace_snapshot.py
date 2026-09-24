@@ -309,3 +309,42 @@ async def test_unsafe_destination_fails_before_any_remote_command(
         await _import_workspace_archive(
             UntouchedDriver(), archive, PurePosixPath(destination), policy=policy,  # type: ignore[arg-type]
         )
+
+
+def test_relative_declared_library_reference_retains_literal_target(tmp_path, policy):
+    archive = tmp_path / 'libraries.tar'
+    _write_archive(archive, [_member('libcrypto.so.3', tarfile.SYMTYPE, link='../../lib/libcrypto.so.3'),
+                             _member('libcrypto.so', tarfile.SYMTYPE, link='libcrypto.so.3')])
+    _validate_workspace_archive(archive, policy, root=PurePosixPath('/usr/lib'),
+        external_reference_files=frozenset({PurePosixPath('/lib/libcrypto.so.3')}),
+        allow_relative_references=True)
+    with tarfile.open(archive) as stream:
+        assert [m.linkname for m in stream] == ['../../lib/libcrypto.so.3', 'libcrypto.so.3']
+    # Workspace callers have not qualified root ancestry for relative escapes.
+    with pytest.raises(WorkspaceSnapshotError):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath('/usr/lib'),
+            external_reference_files=frozenset({PurePosixPath('/lib/libcrypto.so.3')}))
+
+
+@pytest.mark.parametrize('target', ['../../lib/unknown', '../../lib/libcrypto.so.3/',
+    '../../lib/libcrypto.so.3/.', '../../lib/libcrypto.so.3/../private',
+    '../../../lib/libcrypto.so.3', 'unknown/../../../lib/libcrypto.so.3',
+    '../../tests/../lib/libcrypto.so.3'])
+def test_relative_references_cannot_normalize_arbitrary_escape_paths(tmp_path, policy, target):
+    archive = tmp_path / 'bad-reference.tar'
+    _write_archive(archive, [_member('library', tarfile.SYMTYPE, link=target)])
+    with pytest.raises(WorkspaceSnapshotError):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath('/usr/lib'),
+            external_reference_files=frozenset({PurePosixPath('/lib/libcrypto.so.3')}),
+            allow_relative_references=True)
+
+
+@pytest.mark.parametrize('target', ['library/..', 'library/child', 'library/', 'library/.'])
+def test_internal_alias_cannot_traverse_after_relative_reference(tmp_path, policy, target):
+    archive = tmp_path / 'bad-alias.tar'
+    _write_archive(archive, [_member('library', tarfile.SYMTYPE, link='../../lib/libcrypto.so.3'),
+                             _member('alias', tarfile.SYMTYPE, link=target)])
+    with pytest.raises(WorkspaceSnapshotError):
+        _validate_workspace_archive(archive, policy, root=PurePosixPath('/usr/lib'),
+            external_reference_files=frozenset({PurePosixPath('/lib/libcrypto.so.3')}),
+            allow_relative_references=True)

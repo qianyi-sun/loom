@@ -251,6 +251,7 @@ def _validate_workspace_archive(
     *,
     root: PurePosixPath | None = None,
     external_reference_files: frozenset[PurePosixPath] = frozenset(),
+    allow_relative_references: bool = False,
 ) -> None:
     """Fail closed unless every archive entry is safe to overlay.
 
@@ -321,7 +322,8 @@ def _validate_workspace_archive(
 
     for path in symlink_targets:
         _resolve_symlink_chain(path, symlink_targets, policy, root=root,
-                               external_reference_files=external_reference_files)
+                               external_reference_files=external_reference_files,
+                               allow_relative_references=allow_relative_references)
 
     for path, target in hardlink_targets.items():
         seen = {path}
@@ -407,6 +409,38 @@ def _hardlink_target(raw: str) -> PurePosixPath:
     return target
 
 
+def _external_reference_target(
+    raw: str, start: PurePosixPath, root: PurePosixPath | None,
+    references: frozenset[PurePosixPath], *, allow_relative: bool,
+) -> PurePosixPath | None:
+    """Recognize exact leaves, without normalizing arbitrary filesystem walks.
+
+    Relative references are only used by mutable-root callers that check root
+    ancestry on both sandboxes. Leading parents traverse those checked ancestors;
+    all remaining components belong to the independently inspected reference.
+    Interior parents and suffix traversal must use the ordinary fail-closed
+    resolver, since collapsing them could hide a symlink or private directory.
+    """
+    target = PurePosixPath(raw)
+    if not raw or str(target) != raw:
+        return None
+    if target in references:
+        return target
+    if not allow_relative or root is None or target.is_absolute():
+        return None
+    components = list((root / start.parent).parts[1:])
+    remaining = list(target.parts)
+    while remaining and remaining[0] == "..":
+        if not components:
+            return None
+        components.pop()
+        remaining.pop(0)
+    if not remaining or ".." in remaining:
+        return None
+    candidate = PurePosixPath("/", *components, *remaining)
+    return candidate if candidate in references else None
+
+
 def _resolve_symlink_chain(
     start: PurePosixPath,
     links: dict[PurePosixPath, str],
@@ -414,6 +448,7 @@ def _resolve_symlink_chain(
     *,
     root: PurePosixPath | None,
     external_reference_files: frozenset[PurePosixPath] = frozenset(),
+    allow_relative_references: bool = False,
 ) -> PurePosixPath:
     """Follow components in filesystem order, including links preceding ``..``.
 
@@ -421,9 +456,10 @@ def _resolve_symlink_chain(
     visited again after a parent component. Check each intermediate path so
     entering private state or leaving the root cannot be hidden by ``..``.
     """
-    raw_target = PurePosixPath(links[start])
-    if links[start] == str(raw_target) and raw_target in external_reference_files:
-        return raw_target
+    reference = _external_reference_target(links[start], start, root, external_reference_files,
+                                          allow_relative=allow_relative_references)
+    if reference is not None:
+        return reference
     absolute, parts = _symlink_components(links[start], root)
     stack = [] if absolute else list(start.parent.parts)
     pending = deque(parts)
@@ -448,11 +484,12 @@ def _resolve_symlink_chain(
                 raise WorkspaceSnapshotError(
                     f"workspace symlink cycle or chain exceeds 40 links: {start}",
                 )
-            raw_target = PurePosixPath(links[current])
-            if links[current] == str(raw_target) and raw_target in external_reference_files:
+            reference = _external_reference_target(links[current], current, root, external_reference_files,
+                                                  allow_relative=allow_relative_references)
+            if reference is not None:
                 if pending:
                     raise WorkspaceSnapshotError("external snapshot reference must be a terminal file")
-                return raw_target
+                return reference
             absolute, parts = _symlink_components(links[current], root)
             if absolute:
                 stack.clear()

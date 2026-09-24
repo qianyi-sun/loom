@@ -786,8 +786,14 @@ A version-2 mutable manifest binds those fingerprints;
 tasks without references retain version 1. Original link strings and internal
 aliases are preserved, but an external reference must terminate the link chain:
 suffix traversal, external hardlinks and archived entries below links remain
-invalid. This declaration applies only to mutable-directory archives and never
-transfers edits to the referenced file.
+invalid. Mutable archives also permit canonical relative links with leading
+parent components followed by the exact declared reference path, for example
+`/usr/lib/libcrypto.so.3 -> ../../lib/libcrypto.so.3`. Mutable source and verifier
+root ancestors must pass their existing no-symlink checks. Interior parent
+traversal, trailing slash/dot and traversal after an external leaf remain invalid;
+this does not permit links between mutable roots. Workspace references retain
+the literal absolute-target requirement. This declaration never transfers edits
+to the referenced file.
 
 `environment.workspace_reference_files` supplies the same exact-leaf contract
 for the workdir. Its required `artifacts/workspace-references.json` binds the
