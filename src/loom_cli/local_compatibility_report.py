@@ -401,18 +401,63 @@ def _dockerfile_runtime_requirements(
                        source=f"{dockerfile}:{effective.line}")
 
 
+class _ShellOperator(str):
+    """An unquoted shell operator, distinct from a quoted word with that value."""
+
+
 def _shell_commands(source: str) -> list[list[str]]:
-    """Recognize literal shell words without evaluating authored commands."""
-    lexer = shlex.shlex(source, posix=True, punctuation_chars="\n;&|<>")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
+    """Keep lexical boundaries before shlex removes quote/comment information.
+
+    Only split literal commands and words; do not evaluate shell expressions.
+    Shlex unquotes each word after its role as data or syntax is established.
+    """
     commands: list[list[str]] = [[]]
+    pending: list[str] = []
+    quote = ""
+    position = 0
+
+    def word() -> None:
+        if pending:
+            values = shlex.split("".join(pending), comments=False, posix=True)
+            if len(values) != 1:
+                raise ValueError("nonliteral shell word")
+            commands[-1].append(values[0])
+            pending.clear()
+
     try:
-        for word in lexer:
-            if word and set(word) <= set("\n;&|"):
+        while position < len(source):
+            char = source[position]
+            position += 1
+            if char == "\\" and quote != "'" and position < len(source):
+                following = source[position]
+                position += 1
+                if following != "\n":
+                    pending.extend((char, following))
+            elif quote:
+                pending.append(char)
+                if char == quote:
+                    quote = ""
+            elif char in "\"'":
+                quote = char
+                pending.append(char)
+            elif char == "#" and not pending:
+                while position < len(source) and source[position] != "\n":
+                    position += 1
+            elif char in "\n;&|":
+                word()
                 commands.append([])
+            elif char in "<>":
+                word()
+                operator = char
+                while position < len(source) and source[position] in "<>":
+                    operator += source[position]
+                    position += 1
+                commands[-1].append(_ShellOperator(operator))
+            elif char.isspace():
+                word()
             else:
-                commands[-1].append(word)
+                pending.append(char)
+        word()
     except ValueError:
         return []  # Unknown shell forms remain subject to task-author review.
     return [command for command in commands if command]
@@ -452,9 +497,12 @@ def _script_private_tests(source: str, bundle: Path) -> set[str]:
             if skip_value:
                 skip_value = False
                 continue
+            if isinstance(word, _ShellOperator):
+                skip_value = True
+                continue
             if word in {"--ignore", "--ignore-glob", "--deselect", "--confcutdir", "--basetemp",
                         "--rootdir", "--junitxml", "--junit-xml", "--junit-prefix", "--log-file",
-                        "-k", "-m", "-c", "-o", "--override-ini", ">", ">>", "<", "<>"}:
+                        "-k", "-m", "-c", "-o", "--override-ini"}:
                 skip_value = True
                 continue
             path = PurePosixPath(word.split("::", 1)[0])
@@ -492,7 +540,7 @@ def _image_script_private_test_diagnostics(
         for command in _shell_commands(instruction.arguments):
             if command[0] not in {"echo", "printf"}:
                 continue
-            redirects = [i for i, word in enumerate(command) if word in {">", ">>"}]
+            redirects = [i for i, word in enumerate(command) if isinstance(word, _ShellOperator) and word in {">", ">>"}]
             if len(redirects) != 1 or redirects[0] != len(command) - 2:
                 continue
             target = PurePosixPath(command[-1])
