@@ -126,7 +126,10 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         if not report.diagnostics:
             report.status = "schema_valid"
         return
-    _dockerfile_runtime_requirements(path.parent, task, report, harbor_input=is_terminal_bench_shape(raw))
+    prepared_workdir = (str(task.environment.workdir)
+                        if _section(normalized, "environment").get("workdir") is not None else "/app")
+    _dockerfile_runtime_requirements(path.parent, task, report,
+                                    prepared_workdir=prepared_workdir, harbor_input=is_terminal_bench_shape(raw))
     _dropped_environment_requirements(raw, normalized, report)
     _dropped_runtime_requirements(raw, normalized, report)
     try:
@@ -313,7 +316,8 @@ def _dockerfile_workdir(
 
 
 def _dockerfile_runtime_requirements(
-    bundle: Path, task: TaskConfig, report: TaskCompatibilityReport, *, harbor_input: bool = False,
+    bundle: Path, task: TaskConfig, report: TaskCompatibilityReport, *, prepared_workdir: str,
+    harbor_input: bool = False,
 ) -> None:
     """Report effective source metadata that preparation/runtime would override.
 
@@ -331,10 +335,10 @@ def _dockerfile_runtime_requirements(
     except (OSError, UnicodeError, ValueError):
         return
     directory, workdir_instruction = _dockerfile_workdir(instructions)
-    if workdir_instruction is not None and directory != str(task.environment.workdir):
+    if workdir_instruction is not None and directory != prepared_workdir:
         report.add("unsupported_conversion", "dockerfile_workdir_overridden",
                    f"Final authored WORKDIR {workdir_instruction.arguments!r} "
-                   f"resolves to {directory!r}; preparation selects {str(task.environment.workdir)!r}.",
+                   f"resolves to {directory!r}; preparation selects {prepared_workdir!r}.",
                    "Declare the supported original environment.workdir explicitly. Resolve variables or "
                    "inherited registry working directories through image inspection; do not silently relocate task state.",
                    source=f"{dockerfile}:{workdir_instruction.line}")
