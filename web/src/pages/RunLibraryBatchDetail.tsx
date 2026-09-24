@@ -65,6 +65,13 @@ function artifactName(artifact: RunLibraryArtifact): string {
   return artifact.relative_path ?? artifact.key.replace(/\/+$/, "").split("/").pop() ?? "Artifact";
 }
 
+function isDiagnosticOutput(artifact: RunLibraryArtifact): boolean {
+  const path = artifact.relative_path ?? artifact.key;
+  // Process captures may be named stderr.txt or files/01-agent.stderr.
+  // Keep the existing stdout-log rule; other nonempty outputs use API eligibility.
+  return artifact.size === 0 || /(^|[/._-])stderr([._-]|$)|(^|\/)stdout(\.|$)/i.test(path);
+}
+
 function artifactDownloadName(artifact: RunLibraryArtifact): string {
   const label = artifact.key.replace(/\/+$/, "");
   return label.split("/").pop() || "artifact";
@@ -155,7 +162,7 @@ function ArtifactRow({
 }): JSX.Element {
   const label = artifactName(artifact);
   const actionsAllowed = Boolean(artifact.download_url && artifact.trial_id && !artifact.key.startsWith("redacted-artifact:"));
-  const reusable = artifactActionsAllowed(artifact) && artifact.role !== "logs_diagnostics" && artifact.role !== "raw_diagnostics" && artifact.size > 0 && !/(^|\/)(stderr|stdout)(\.|$)/i.test(artifact.relative_path ?? artifact.key);
+  const reusable = artifactActionsAllowed(artifact) && artifact.role !== "logs_diagnostics" && artifact.role !== "raw_diagnostics" && artifact.size > 0 && !isDiagnosticOutput(artifact);
   const source = artifactSourceText(artifact);
   const hash = artifactHashText(artifact);
 
@@ -671,7 +678,7 @@ export default function RunLibraryBatchDetail(): JSX.Element {
           ) : null}
           {GROUP_ORDER.map((group) => {
             const all = GROUP_ORDER.flatMap((source) => batch.artifact_inventory[source] ?? []);
-            const isDiagnostic = (artifact: RunLibraryArtifact): boolean => artifact.role === "logs_diagnostics" || artifact.role === "raw_diagnostics" || (artifact.role === "reusable_outputs" && (artifact.size === 0 || /(^|\/)(stderr|stdout)(\.|$)/i.test(artifact.relative_path ?? artifact.key)));
+            const isDiagnostic = (artifact: RunLibraryArtifact): boolean => artifact.role === "logs_diagnostics" || artifact.role === "raw_diagnostics" || (artifact.role === "reusable_outputs" && isDiagnosticOutput(artifact));
             const artifacts = all.filter((artifact) => group === "logs_diagnostics" ? isDiagnostic(artifact) && artifact.role !== "raw_diagnostics" : group === "reusable_outputs" ? artifact.role === group && !isDiagnostic(artifact) : artifact.role === group);
             if (artifacts.length === 0) return null;
             const trials = [...new Set(artifacts.map((artifact) => artifact.trial_id))];

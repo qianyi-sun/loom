@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -34,6 +35,17 @@ function renderNav(
 
 describe("NavBar", () => {
   afterEach(() => setFrontendConfigForTests(null));
+
+  it("closes the menu with Escape while its trigger still has focus", async () => {
+    renderNav(false);
+    const user = userEvent.setup();
+    const trigger = screen.getByRole("button", { name: "Menu" });
+    await user.click(trigger);
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await user.keyboard("{Escape}");
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveFocus();
+  });
 
   it("renders the team nav items", () => {
     renderNav(false);

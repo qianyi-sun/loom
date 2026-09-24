@@ -28,6 +28,10 @@ test("compact mobile menu retains account, version and every navigation destinat
     expect(box!.height).toBeLessThan(110);
     await expect(nav.getByRole("link", { name: "Monitor", exact: true })).toBeHidden();
     await menu.click();
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeFocused();
+    await expect(menu).toHaveAttribute("aria-expanded", "false");
+    await menu.click();
   }
   for (const name of ["Home", "New batch", "Monitor", "Pipelines", "Run Library", "Providers", "Getting started", "Settings", "Team access", "Rate cards"]) {
     await expect(nav.getByRole("link", { name, exact: true })).toBeVisible();

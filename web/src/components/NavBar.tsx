@@ -67,6 +67,7 @@ export default function NavBar({
   return (
     <nav
       aria-label="Primary"
+      onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { setMenuOpen(false); menuButton.current?.focus(); } }}
       className="flex w-full shrink-0 flex-col gap-3 border-b border-slate-200 bg-white px-3 py-3 lg:h-full lg:w-56 lg:flex-col lg:border-b-0 lg:border-r lg:py-5"
     >
       <div className="flex items-center justify-between gap-3 px-3 lg:mb-3 lg:block">
@@ -93,7 +94,7 @@ export default function NavBar({
         </button>
       </div>
       <div id="primary-menu" className={cn(menuOpen ? "flex" : "hidden", "min-h-0 flex-1 flex-col gap-3 lg:flex")}
-        onKeyDown={(event) => { if (event.key === "Escape") { setMenuOpen(false); menuButton.current?.focus(); } }}>
+      >
       <div className="flex min-w-0 flex-1 flex-col gap-1 overflow-y-auto pb-1 lg:pb-0">
         {NAV_ITEMS.map((item) => (
           <NavLink
