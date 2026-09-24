@@ -114,3 +114,45 @@ async def test_directory_promotion_can_exceed_the_healthcheck_rpc_timeout(tmp_pa
                 assert (destination / "new").read_text() == "restored"
             finally:
                 await asyncio.wait_for(finished.wait(), 2)
+
+
+@pytest.mark.parametrize('failure', ['second-stage', 'second-promotion'])
+async def test_group_restore_cleans_all_stages_only_before_promotion(tmp_path, failure):
+    destinations = [tmp_path / str(index) for index in range(2)]
+    archives = []
+    for index, destination in enumerate(destinations):
+        destination.mkdir()
+        (destination / 'baseline').write_text('original')
+        source = tmp_path / f'source{index}'
+        source.mkdir()
+        (source / 'new').write_text('new')
+        archive = tmp_path / f'{index}.tar'
+        with tarfile.open(archive, 'w') as stream:
+            stream.add(source, arcname='.')
+        archives.append((archive, PurePosixPath(str(destination))))
+    if failure == 'second-stage':
+        archives[1][0].write_bytes(b'invalid archive')
+
+    class Transport(LocalFilesystemDriver):
+        promotions = 0
+
+        async def _request(self, method, path, **kwargs):
+            assert method == 'POST' and path == '/restore-directory'
+            # Every extraction must be complete before the first promotion.
+            for destination in destinations:
+                stage, = destination.glob('.loom-restore-*')
+                assert (stage / 'new').read_text() == 'new'
+            self.promotions += 1
+            if self.promotions == 2:
+                raise DriverError('ambiguous second promotion')
+
+    base = driver_for(tmp_path / 'unused.sock')
+    driver = Transport(tmp_path / 'unused.sock', capabilities=base.capabilities,
+                       network_policy=base._network_policy)
+    expected = tarfile.ReadError if failure == 'second-stage' else DriverError
+    with pytest.raises(expected):
+        await driver.replace_mutable_archives(tuple(archives))
+    assert driver.promotions == (0 if failure == 'second-stage' else 2)
+    for destination in destinations:
+        assert (destination / 'baseline').read_text() == 'original'
+        assert len(list(destination.glob('.loom-restore-*'))) == (0 if failure == 'second-stage' else 1)
