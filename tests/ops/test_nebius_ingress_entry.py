@@ -22,6 +22,7 @@ def installed(tmp_path):
 
 
 def test_qualification_imports_without_contacting_live_cluster(tmp_path, monkeypatch, capsys):
+    # Real Nebius managed Kubernetes IDs use mk8scluster-, not mk8s-.
     path, _ = installed(tmp_path)
     monkeypatch.setattr(module(), "LiveIngressAPI", lambda *a, **kw: pytest.fail("qualification touched cluster"))
     assert module().main(str(path), "qualify") == 0
@@ -109,7 +110,7 @@ def test_rollback_does_not_require_certificate_availability(tmp_path, monkeypatc
     assert calls == ["restored"]
 
 
-@pytest.mark.parametrize("change", ["image", "namespace", "api_server", "unknown_action", "public_file"])
+@pytest.mark.parametrize("change", ["image", "namespace", "api_server", "cluster_id", "unknown_action", "public_file"])
 def test_unqualified_authority_rejected_before_constructing_cluster_client(tmp_path, monkeypatch, capsys, change):
     path, config = installed(tmp_path)
     action = "install"
@@ -119,6 +120,8 @@ def test_unqualified_authority_rejected_before_constructing_cluster_client(tmp_p
         config["binding"]["namespace"] = "default; id"
     elif change == "api_server":
         config["api_server"] = "http://192.0.2.1"
+    elif change == "cluster_id":
+        config["cluster_id"] = "mk8s-e00fixture"
     elif change == "unknown_action":
         action = "delete"
     elif change == "public_file":
