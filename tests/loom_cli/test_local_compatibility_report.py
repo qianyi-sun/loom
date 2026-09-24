@@ -95,6 +95,23 @@ def test_report_preserves_authored_workdir_or_explains_mismatch(
     assert {str(p): p.read_bytes() for p in bundle.rglob("*") if p.is_file()} == before
 
 
+@pytest.mark.parametrize(("source_workdir", "blocked"), [("/app", False), ("/workspace", True)])
+def test_report_compares_docker_workdir_with_the_actual_profile_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], source_workdir: str, blocked: bool,
+) -> None:
+    bundle = _write_bundle(tmp_path, "default-working-directory")
+    config = bundle / "task.toml"
+    config.write_text(config.read_text().replace('workdir = "/app"\n', ""))
+    (bundle / "environment/Dockerfile").write_text(f"FROM ubuntu:24.04\nWORKDIR {source_workdir}\n")
+    rc, payload = _report(tmp_path, capsys)
+    report, = payload["compatibility_report"]["tasks"]
+    assert rc == int(blocked)
+    diagnostics = [d for d in report["diagnostics"] if d["code"] == "dockerfile_workdir_overridden"]
+    assert bool(diagnostics) is blocked
+    if blocked:
+        assert "preparation selects '/app'" in diagnostics[0]["reason"]
+
+
 def test_report_covers_every_task_after_parse_and_adaptation_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
