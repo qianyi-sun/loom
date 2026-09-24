@@ -97,6 +97,51 @@ def test_unknown_create_is_read_back_never_repeated(tmp_path, failure):
         assert len(api.created) == 1 and not api.secrets
 
 
+def test_lost_journal_after_unknown_create_never_regenerates(tmp_path):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    api.failure = "before"
+    state = tmp_path / "material"
+    with pytest.raises(MaterialError, match="unresolved"):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    # Simulate loss of only the retained material. API absence cannot prove that
+    # the first create will not complete later, so this must not reopen creation.
+    (state / "material.json").unlink()
+    api.failure = None
+    with pytest.raises(MaterialError, match="journal"):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert api.created == ["loom-platform-db"] and not api.secrets
+    assert not (state / "material.json").exists()
+
+
+@pytest.mark.parametrize("drift", ["missing", "operation", "digest", "binding"])
+def test_missing_or_changed_initialization_evidence_blocks_replay(tmp_path, drift):
+    from scripts.ops.nebius_management_material import MaterialError, deliver_material
+
+    binding, api = delivery()
+    state = tmp_path / "material"
+    deliver_material(binding=binding, api=api, state_dir=state)
+    marker = state / "initialized.json"
+    assert marker.exists()
+    journal = (state / "material.json").read_bytes()
+    evidence = json.loads(marker.read_bytes())
+    if drift == "missing":
+        marker.unlink()
+    else:
+        if drift == "operation":
+            evidence["operation_id"] = str(uuid4())
+        elif drift == "digest":
+            evidence["material_sha256"] = "f" * 64
+        else:
+            evidence["binding"]["namespace_uid"] = str(uuid4())
+        marker.write_text(json.dumps(evidence))
+    with pytest.raises(MaterialError, match="journal"):
+        deliver_material(binding=binding, api=api, state_dir=state)
+    assert len(api.created) == 4
+    assert (state / "material.json").read_bytes() == journal
+
+
 @pytest.mark.parametrize("name", ["loom-platform-db", "loom-management-db-tls", "loom-platform-auth", "loom-admin-secret"])
 def test_any_existing_secret_blocks_all_creation(tmp_path, name):
     from scripts.ops.nebius_management_material import MaterialError, deliver_material
