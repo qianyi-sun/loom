@@ -57,6 +57,13 @@ Changing the current team requires a membership unless the user is a platform
 administrator. A team can be disabled, have new submissions paused, or have
 public registration enabled or disabled through the admin team routes.
 
+The signed-out account-request form discovers eligible teams through the public
+team list. It distinguishes loading, a successful empty result, and discovery
+failure. Failure shows a fixed safe message and a retry action rather than claiming
+that no teams allow registration. Retry is disabled while the list request is
+pending; recovery preserves the requested username and requires an explicit team
+selection. Refreshing a list that removes the selected team clears that selection.
+
 ## Platform administrator changes
 
 Existing active platform administrators (session or user-owned token) and the
