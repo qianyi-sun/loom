@@ -87,6 +87,9 @@ def _configuration(
     # Builder settings include write authority and are activated only with the
     # shared gateway. They cannot be inherited from the standalone installation.
     config.pop("task_image_builder", None)
+    # Standalone root-task admission is bound to its target and namespace.
+    # A closed child keeps restricted PSS, not another target's policy.
+    config.pop("task_identity_policy", None)
     config.pop("shared_ingress_enabled", None)
     return config
 
@@ -165,7 +168,7 @@ def render_environment(
     if foundation.namespace_authority is not None and row.binding_mode == "imported":
         raise ValueError("namespace authority cannot adopt imported bindings")
     config = _configuration(row, foundation)
-    files = _build_platform(config, candidate, profile, keyring, repo_root=repo_root)
+    files = _build_platform(config, candidate, profile, keyring, repo_root=repo_root, execution_enabled=False)
     files["00-namespaces.yaml"] = [_namespace(ns) for ns in row.namespaces]
     if foundation.namespace_authority is not None:
         authority = foundation.namespace_authority

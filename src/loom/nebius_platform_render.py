@@ -1355,8 +1355,16 @@ def _build_platform(
     keyring: dict[str, Any],
     *,
     repo_root: Path,
+    execution_enabled: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Shared stack templates; managed output is finalized by its owning renderer."""
+    """Shared templates; only closed renderers may omit execution components.
+
+    They retain the published profile unchanged and own the final zero-Pod,
+    scheduler and service-mode restrictions. The public standalone renderer
+    always keeps execution validation and enforcement enabled.
+    """
+    if not execution_enabled and ("task_identity_policy" in config or config.get("regional_execution_targets")):
+        raise NebiusPlatformError("non-executing templates cannot inherit execution authority")
     validate_environment(config)
     for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
         if type(profile.get(capability, False)) is not bool:
@@ -1375,7 +1383,7 @@ def _build_platform(
             "runtime profile execution class must match its task egress capability; "
             "new capabilities require distinct class and target identities"
         )
-    if profile.get("supports_task_identity", False) and not validate_identity_policy(config):
+    if execution_enabled and profile.get("supports_task_identity", False) and not validate_identity_policy(config):
         raise NebiusPlatformError(
             "task identity readiness requires a qualified policy; execution namespaces remain restricted"
         )
@@ -1885,7 +1893,7 @@ def _build_platform(
     files["40-services.yaml"] = app_docs
     files["50-configure.yaml"] = [job(f"loom-platform-configure-{short}", "configure")]
     execution_docs = (
-        [] if config["schema_version"] == "loom.nebius-managed-environment.v1"
+        [] if not execution_enabled or config["schema_version"] == "loom.nebius-managed-environment.v1"
         else _execution_documents(config, images, repo_root)
     )
     for regional in config.get("regional_execution_targets", []):

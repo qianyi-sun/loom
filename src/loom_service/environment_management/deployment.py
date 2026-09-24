@@ -114,10 +114,12 @@ def render_management(
                   db_tls_secret_name="loom-management-db-tls", public_tls_bootstrap=False)
     config["buckets"]["backup"] = deployment.backup_bucket
     config.pop("task_image_builder", None)
-    # The standalone template validates its original execution policy. None of
-    # that policy, its execution manifests or its configure Job is emitted here.
+    config.pop("task_identity_policy", None)
+    # Image capability is not installed execution authority. Retain the approved
+    # profile, but inherit neither standalone policy nor execution components.
     revision = digest({"deployment": deployment.model_dump(mode="json"), "candidate": candidate, "profile": profile})
-    templates = _build_platform(config, candidate, profile, deployment.installation.keyring, repo_root=repo_root)
+    templates = _build_platform(config, candidate, profile, deployment.installation.keyring,
+                                repo_root=repo_root, execution_enabled=False)
     # The shared bootstrap/backup commands consume only these fields. Do not
     # mount the old environment's task/model/storage configuration into management.
     runtime_config = {

@@ -1111,6 +1111,16 @@ def test_task_identity_readiness_cannot_relax_restricted_execution_policy(platfo
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
+def test_closed_templates_refuse_inherited_task_identity_policy(platform_inputs: tuple) -> None:
+    from loom.nebius_platform_render import _build_platform
+
+    config, candidate, profile = platform_inputs
+    config['task_identity_policy'] = {'mode': 'private-root-v1', 'target_id': config['target_id'],
+                                      'execution_namespace': config['execution_namespace']}
+    with pytest.raises(NebiusPlatformError, match='cannot inherit execution authority'):
+        _build_platform(config, candidate, profile, {}, repo_root=ROOT, execution_enabled=False)
+
+
 def test_node_share_profile_does_not_publish_retired_default_template(platform_inputs):
     config, candidate, profile = platform_inputs
     profile["resource_allocation_policy"] = "node-share-v1"
