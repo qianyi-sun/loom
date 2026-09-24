@@ -18,6 +18,7 @@ import dns.name
 import dns.query
 import dns.rcode
 import dns.rdatatype
+import dns.resolver
 import httpx
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_dns_challenge import _authorities, _validate_token
@@ -50,7 +51,7 @@ def validate_target(target: dict[str, Any]) -> tuple[str, str]:
                 or management == child or management.endswith("." + child)):
             raise ValueError()
         address = ipaddress.IPv4Address(target["address"])
-        if not address.is_global or str(address) != target["address"]:
+        if not address.is_global or address.is_multicast or str(address) != target["address"]:
             raise ValueError()
         return "*." + child[:-(len(zone) + 1)], management[:-(len(zone) + 1)]
     except (ValueError, TypeError, KeyError, AttributeError):
@@ -235,6 +236,34 @@ def wait_for_addresses(target: dict[str, Any], *, timeout: float = 600) -> None:
         raise
     except Exception:
         raise PublicationError("authoritative DNS propagation unavailable") from None
+
+
+def qualify_public_routes(target: dict[str, Any], *, timeout: float = 30) -> None:
+    """Verify normal recursive resolution and trusted wildcard/management TLS."""
+    from scripts.ops.nebius_ingress_probe import probe_management
+
+    deadline = _dns_deadline(target, timeout)
+    try:
+        resolver = dns.resolver.Resolver()
+        label = uuid4().hex[:min(32, 252 - len(target["child_domain"]))]
+        names = (label + "." + target["child_domain"], target["management_host"])
+        for hostname in names:
+            for kind in ("A", "AAAA"):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PublicationError("recursive DNS observation deadline")
+                answer = resolver.resolve(hostname, kind, lifetime=remaining, search=False, raise_on_no_answer=False)
+                if (answer.canonical_name != dns.name.from_text(hostname)
+                        or [str(row) for row in answer] != ([target["address"]] if kind == "A" else [])):
+                    raise PublicationError("recursive DNS differs from qualified ingress")
+            probe_management(address=target["address"], port=443, hostname=hostname,
+                             fingerprint=target["fingerprint_sha256"])
+        if time.monotonic() >= deadline:
+            raise PublicationError("public route qualification deadline")
+    except PublicationError:
+        raise
+    except Exception:
+        raise PublicationError("public DNS or trusted HTTPS route unavailable") from None
 
 
 def publish_dns(provider: DNSProvider, *, target: dict[str, Any], state_dir: Path,

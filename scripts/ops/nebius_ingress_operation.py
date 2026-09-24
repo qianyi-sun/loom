@@ -18,6 +18,7 @@ from uuid import UUID
 from cryptography import x509
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops import nebius_ingress_probe as probes
+from scripts.ops.nebius_dns_publication import validate_target
 from scripts.ops.nebius_ingress_cutover import MARKER, KubectlCutoverAPI, cutover, rollback
 from scripts.ops.nebius_ingress_cutover import _identity as resource_identity
 from scripts.ops.nebius_ingress_cutover import _stable as stable_resource
@@ -202,8 +203,6 @@ def qualify_dns_target(*, api: InstallationAPI, certificate_config: dict[str, An
     revision. The exact installed authority and fresh HTTPS probes bind the
     current candidate, allowing ordinary approved application upgrades.
     """
-    from scripts.ops.nebius_dns_publication import validate_target
-
     try:
         binding = api.binding
         root = Path(certificate_config["state_dir"])
@@ -299,6 +298,45 @@ def qualify_dns_target(*, api: InstallationAPI, certificate_config: dict[str, An
         raise
     except Exception:
         raise OperationError("installed DNS target unavailable; preserve ingress and certificate state") from None
+
+
+def publish_ingress_dns(*, api: InstallationAPI, certificate_config: dict[str, Any],
+                        state_dir: Path) -> dict[str, Any]:
+    """Fixed protected DNS action; credentials stay in the private gateway."""
+    from scripts.ops.nebius_dns_challenge import load_token
+    from scripts.ops.nebius_dns_publication import (
+        GoDaddyPublication,
+        publish_dns,
+        qualify_authority,
+        qualify_public_routes,
+        wait_for_addresses,
+    )
+
+    try:
+        def installed() -> dict[str, Any]:
+            return qualify_dns_target(api=api, certificate_config=certificate_config, state_dir=state_dir)
+
+        target = installed()
+        credential = Path(certificate_config["credential_file"])
+        token = load_token(credential)
+
+        def qualify() -> dict[str, Any]:
+            if load_token(credential) != token:
+                raise OperationError("DNS credential changed during publication")
+            current = installed()
+            qualify_authority(current)
+            return current
+
+        def wait(current: dict[str, Any]) -> None:
+            wait_for_addresses(current)
+            qualify_public_routes(current)
+
+        with GoDaddyPublication(target, token) as provider:
+            return publish_dns(provider, target=target, state_dir=state_dir / "dns", qualify=qualify, wait=wait)
+    except OperationError:
+        raise
+    except Exception:
+        raise OperationError("DNS publication incomplete; preserve private ingress and DNS journals") from None
 
 
 class LiveIngressAPI(KubectlCutoverAPI):
