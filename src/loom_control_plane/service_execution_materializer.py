@@ -280,6 +280,27 @@ def validate_usage_accounting(
         raise MaterializationIntegrityError("usage_output_totals_drift")
 
 
+def _legacy_verifier_reward_projection(runtime: ExecutionRuntimeResultV1) -> bool:
+    """Recognize the old runtime reading exception JSON as the verifier score."""
+    if runtime.status != "verifier_error" or not runtime.partial_evidence or runtime.verifier_rewards is not None:
+        return False
+    outputs = [item for item in runtime.outputs if item.kind == "verifier" and item.state == "captured"]
+    phases = [phase for phase in runtime.phases if phase.role == "verifier"]
+    return (
+        len(outputs) == 2
+        and outputs[0].relative_path == "diagnostics/verifier-exception.json"
+        and outputs[0].source_path == ".loom/verifier/exception.json"
+        and not outputs[0].required
+        and outputs[1].relative_path == _VERIFIER_PATH
+        and outputs[1].source_path == ".loom/verifier/output.json"
+        and outputs[1].required
+        and len(phases) == 1
+        and phases[0].exit_code not in {None, 0}
+        and not phases[0].timed_out
+        and phases[0].signal is None
+    )
+
+
 def build_canonical_events(
     *,
     trial_id: UUID,
@@ -402,7 +423,13 @@ def build_canonical_events(
             verifier = VerifierResult.model_validate_json(verifier_body)
         except ValidationError as exc:
             raise MaterializationIntegrityError("verifier_result_invalid") from exc
-        if runtime_result.verifier_rewards != verifier.rewards:
+        legacy_projection = (
+            _legacy_verifier_reward_projection(runtime_result)
+            and exception_info is not None
+            and exception_info.exception_type == "ServiceExecutionTaskError"
+            and exception_info.exception_message == "isolated verifier process failed"
+        )
+        if runtime_result.verifier_rewards != verifier.rewards and not legacy_projection:
             raise MaterializationIntegrityError("verifier_reward_drift")
         events.extend(
             (
