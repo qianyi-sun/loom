@@ -17,7 +17,7 @@ from tests.system import docker_compose
 
 def test_compose_uses_available_pinned_minio_fixture() -> None:
     compose = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text(encoding="utf-8"))
-    assert compose["services"]["minio"]["image"] == MINIO_TEST_IMAGE
+    assert compose["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"
 
 
 def test_compose_uses_one_test_only_step_jwt_signing_key() -> None:
@@ -129,6 +129,7 @@ def test_stack_up_migrates_blank_database_before_starting_services(
     def fake_canary(team_token: str, *, timeout_sec: float) -> None:
         events.append(("claim-canary", team_token, timeout_sec))
 
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fake_wait)
     monkeypatch.setattr(
@@ -182,12 +183,13 @@ def test_stack_up_migrates_blank_database_before_starting_services(
         "team-token",
         docker_compose._CANARY_MAX_TIMEOUT_SEC,
     )
+    assert all(env and env["LOOM_SYSTEM_MINIO_IMAGE"] == "local-minio-source" for _, env in compose_envs)
     builder_env = next(
         env for args, env in compose_envs if args and args[-1] == "task-image-builder"
     )
     worker_env = next(env for args, env in compose_envs if args and args[-1] == "worker")
-    assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token"}
-    assert worker_env == {"LOOM_WORKER_TOKEN": "worker-token"}
+    assert builder_env == {"LOOM_TASK_IMAGE_BUILDER_TOKEN": "builder-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
+    assert worker_env == {"LOOM_WORKER_TOKEN": "worker-token", "LOOM_SYSTEM_MINIO_IMAGE": "local-minio-source"}
 
 
 def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> None:
@@ -202,6 +204,7 @@ def test_wait_services_healthy_bounds_compose_inspection(monkeypatch: Any) -> No
             stderr="",
         )
 
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
 
     docker_compose._wait_services_healthy(["postgres"], timeout_sec=30.0)
@@ -265,6 +268,7 @@ def test_stack_up_cleans_partial_compose_state_on_setup_failure(
     def fail_wait(services: list[str], timeout_sec: float) -> None:
         raise RuntimeError(f"failed waiting for {services} after {timeout_sec}")
 
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose, "_wait_services_healthy", fail_wait)
 
@@ -523,6 +527,7 @@ def test_failed_teardown_redacts_diagnostics_before_down(
             stderr="",
         )
 
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
     monkeypatch.setattr(docker_compose.subprocess, "run", fake_run)
     monkeypatch.setenv(docker_compose.DIAGNOSTICS_ENV, str(diagnostics))
@@ -617,6 +622,7 @@ def test_diagnostics_failure_does_not_mask_teardown(monkeypatch: Any) -> None:
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     monkeypatch.setattr(docker_compose, "preserve_compose_diagnostics", fail_diagnostics)
+    monkeypatch.setattr(docker_compose, "prepare_test_image", lambda image: "local-minio-source")
     monkeypatch.setattr(docker_compose, "_compose", fake_compose)
 
     docker_compose.stack_down_with_diagnostics(failed=True)
@@ -652,4 +658,4 @@ def test_system_stack_uses_shared_digest_pinned_minio() -> None:
     from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 
     config = yaml.safe_load(docker_compose.COMPOSE_FILE.read_text())
-    assert config["services"]["minio"]["image"] == MINIO_TEST_IMAGE
+    assert config["services"]["minio"]["image"] == "${LOOM_SYSTEM_MINIO_IMAGE:-" + MINIO_TEST_IMAGE + "}"

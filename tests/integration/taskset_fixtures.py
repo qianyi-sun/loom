@@ -30,6 +30,7 @@ from loom.db.schema import (
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
+from tests.support.minio_images import prepare_test_image
 
 _MANIFEST_YAML = """
 apiVersion: loom.taskset/v1
@@ -76,7 +77,7 @@ def _manifest_bytes(*, intents: str = "", verifier: str = "", display_name: str 
 @pytest.fixture(scope="module")
 def tasksets_minio() -> MinioContainer:
     # The pinned MinIO image reports liveness before its object layer is writable.
-    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
+    with MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

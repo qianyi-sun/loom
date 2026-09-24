@@ -54,6 +54,7 @@ from loom_service.taskset_intake import delete_task_set, get_latest_job, rebuild
 from loom_service.taskset_materializer import run_once
 from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.support.minio import ensure_test_bucket
+from tests.support.minio_images import prepare_test_image
 
 _MANIFEST_INLINE = """
 apiVersion: loom.taskset/v1
@@ -246,7 +247,7 @@ def _unsafe_traversal_bundle_tar_bytes() -> bytes:
 @pytest.fixture(scope="module")
 def materialization_minio() -> MinioContainer:
     # The pinned MinIO image reports liveness before its object layer is writable.
-    with MinioContainer(MINIO_TEST_IMAGE).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
+    with MinioContainer(prepare_test_image(MINIO_TEST_IMAGE)).waiting_for(HttpWaitStrategy(9000, "/minio/health/cluster")) as m:
         yield m
 
 

@@ -20,7 +20,7 @@ services:
 
   minio:
     # Shared upstream release and digest: tests/integration/minio_test_images.py.
-    image: quay.io/minio/minio@sha256:031fd97adca056cdbfd416a26670898d93adb9a79a3cf126aac5a41ddc22c5a3
+    image: ${LOOM_SYSTEM_MINIO_IMAGE:-quay.io/minio/minio@sha256:031fd97adca056cdbfd416a26670898d93adb9a79a3cf126aac5a41ddc22c5a3}
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: loomtest
