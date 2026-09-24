@@ -329,6 +329,24 @@ and lease heartbeats before closing HTTP/SDK/database clients. Database outages
 leave uncertain intents charged and restart polling, without exposing exception
 contents. Without this option, accepted requests remain pending.
 
+Enabling that runtime also requires an explicit
+`foundation.provisioning_project_id`, distinct from the cluster's project and
+tenant/quota parent. Newly planned service accounts, IAM groups, access keys and
+buckets use this dedicated project; memberships use their recorded group IDs.
+This scope is a protected operation-plan field, not part of child platform
+configuration. It does not change cluster/pool identity or regional storage
+endpoints. The installer must qualify the actual project's region and effective
+permissions; choosing an ID does not grant authority. Runtime credentials must
+not receive tenant-wide or cluster-project administration merely to create IAM.
+
+Creation freezes this project in PostgreSQL before provisioning. Replays and
+retained credential revocation use the original operation's scope even if current
+installation settings change. Historical plans without this field retain their
+original cluster-project resources and tenant-scoped groups; they are not silently
+moved or re-created. Insufficient credentials for a historical scope require
+explicit recovery, not broader automatic grants. Registry-only/offline settings
+remain compatible without an active provider or provisioning-project field.
+
 `LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN` is a read-only credential for
 publication metadata, PR checks and artifacts. Configuration is rejected outside
 management mode or without that credential. It must not enter child manifests,
@@ -381,8 +399,8 @@ effects have individual intents and deterministic idempotency keys. Credentials
 are encrypted atomically with their journal confirmation before immutable child
 Secrets are published. Each child gets distinct DB roles, TLS, session/secret-store
 keys, admin/collector/batch credentials and canonical/source/backup object identities;
-the installation's model-provider credentials are not copied. IAM permissions are
-bucket-scoped, not project-wide data grants. Database TLS leaf certificates last
+the installation's model-provider credentials are not copied. Child object IAM
+permissions are bucket-scoped, not project-wide data grants. Database TLS leaf certificates last
 365 days; rotation remains a lifecycle obligation, not an automatic immutable-Secret
 feature.
 
