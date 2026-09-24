@@ -245,17 +245,23 @@ Heavier suites are opt-in:
 
 ```bash
 # Integration tier — Docker + Postgres + MinIO via testcontainers
-pytest tests/integration                 # full
-pytest tests/integration -m "not slow"   # exclude @slow tests (Docker driver, e2e)
-pytest tests/integration -m slow         # only the heavy ones
+uv run --no-sync pytest tests/integration                # full directory
+uv run --no-sync pytest tests/integration -m "not docker" # exclude docker-marked tests
+uv run --no-sync pytest tests/integration -m docker       # Docker driver and runtime tests
 
 # System tier — full docker-compose stack
-pytest tests/system -v
+uv run --no-sync pytest tests/system -v
 
 # Live Modal — requires provider credentials
 LOOM_RUN_MODAL_INTEGRATION=1 \
   uv run --no-sync pytest tests/integration/test_modal_driver_live.py -v
 ```
+
+The `not docker` subset can still require Docker for PostgreSQL and MinIO
+fixtures. These directory/marker commands include retained compatibility tests;
+for CI's current Nebius scope, use `scripts/component_ownership.py test-paths`
+with `--lane integration` or `--lane integration-docker` and `--test-scope nebius`,
+following the manifest-based fast-tier commands above.
 
 MinIO fixtures preserve two pinned releases: the Testcontainers 2022 release
 and the 2025 TLS fixture. Run `uv run --no-sync python -m tests.support.minio_images`
