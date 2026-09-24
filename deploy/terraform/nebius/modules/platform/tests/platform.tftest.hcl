@@ -102,6 +102,64 @@ run "reject_fractional_node_ceiling" {
   expect_failures = [var.integration_platform]
 }
 
+run "system_capacity_and_safe_replacement_are_opt_in" {
+  command = plan
+  variables {
+    integration_platform = {
+      bucket_prefix              = "loom-platform-test"
+      system_preset              = "8vcpu-32gb"
+      system_disk_gib            = 200
+      system_create_before_drain = true
+    }
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["system"].template.resources.preset == "8vcpu-32gb" &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 200 &&
+      nebius_mk8s_v1_node_group.integration["system"].fixed_node_count == 1 &&
+      nebius_mk8s_v1_node_group.integration["system"].strategy.max_surge.count == 1 &&
+      nebius_mk8s_v1_node_group.integration["system"].strategy.max_unavailable.count == 0
+    )
+    error_message = "Explicit system sizing must create the replacement before draining, with one steady node."
+  }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["execution"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.resources.preset == "16vcpu-64gb" &&
+      nebius_mk8s_v1_node_group.integration["execution"].strategy.max_surge.count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].strategy.max_unavailable.count == 1
+    )
+    error_message = "System replacement settings must never resize or replace execution nodes."
+  }
+}
+run "existing_system_defaults_are_preserved" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test" } }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["system"].strategy.max_surge.count == 0 &&
+      nebius_mk8s_v1_node_group.integration["system"].strategy.max_unavailable.count == 1
+    )
+    error_message = "An unchanged configuration must not resize or replace the existing system node."
+  }
+}
+run "reject_undersized_system_disk" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_disk_gib = 79 } }
+  expect_failures = [var.integration_platform]
+}
+run "reject_fractional_system_disk" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_disk_gib = 200.5 } }
+  expect_failures = [var.integration_platform]
+}
+run "reject_oversized_system_disk" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_disk_gib = 1025 } }
+  expect_failures = [var.integration_platform]
+}
+
 run "disabled_preserves_existing_buckets" {
   command = plan
   variables { integration_platform = { bucket_prefix = "loom-native-test-artifacts" } }
