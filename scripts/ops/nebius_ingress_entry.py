@@ -13,12 +13,17 @@ from scripts.ops.nebius_certificates import load_installation
 from scripts.ops.nebius_ingress_bootstrap import validate_config
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_image import DIGEST
-from scripts.ops.nebius_ingress_operation import LiveIngressAPI, install_ingress, rollback_ingress
+from scripts.ops.nebius_ingress_operation import (
+    LiveIngressAPI,
+    install_ingress,
+    publish_ingress_dns,
+    rollback_ingress,
+)
 
 
 def main(config_path: str, action: str) -> int:
     try:
-        if action not in {"install", "rollback", "qualify", "image-intent"}:
+        if action not in {"install", "rollback", "qualify", "image-intent", "dns"}:
             raise ValueError()
         config = json.loads(_read(Path(config_path), 16_384))
         validate_config(config)
@@ -51,7 +56,7 @@ def main(config_path: str, action: str) -> int:
                               "candidate": config["candidate"], "namespace": binding.namespace}, sort_keys=True))
             return 0
         certificate = None
-        if action == "install":
+        if action in {"install", "dns"}:
             certificate = load_installation(Path(config["certificate_config"]))
             if (certificate["installation_id"] != binding.certificate_installation_id
                     or certificate["child_domain"] != binding.child_domain
@@ -63,6 +68,10 @@ def main(config_path: str, action: str) -> int:
         state = Path(config["state_dir"])
         if action == "rollback":
             result = rollback_ingress(api=api, state_dir=state)
+        elif action == "dns":
+            assert certificate is not None
+            result = {**publish_ingress_dns(api=api, certificate_config=certificate, state_dir=state),
+                      "namespace": binding.namespace}
         else:
             assert certificate is not None
             result = install_ingress(api=api, certificate_config=certificate, state_dir=state)

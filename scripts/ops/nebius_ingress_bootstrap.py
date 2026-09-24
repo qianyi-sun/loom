@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
@@ -22,13 +23,14 @@ SCRIPTS = (
     "scripts/ops/nebius_ingress_gateway.py", "scripts/ops/nebius_ingress_stage.py",
     "scripts/ops/nebius_ingress_cutover.py", "scripts/ops/nebius_ingress_image.py",
     "scripts/ops/nebius_ingress_operation.py", "scripts/ops/nebius_ingress_probe.py",
+    "scripts/ops/nebius_dns_challenge.py", "scripts/ops/nebius_dns_publication.py",
 )
 LIMITS = {**dict.fromkeys(SCRIPTS, 262_144), "uv": 80 * 1024 * 1024,
           "requirements.txt": 262_144, "installation.json": 16_384, "manifest.json": 16_384}
 MAX_BUNDLE = 100 * 1024 * 1024
 MAX_WHEEL = 16 * 1024 * 1024
 COMMANDS = {"loom-nebius-ingress-v1": "install", "loom-nebius-ingress-rollback-v1": "rollback",
-            "loom-nebius-ingress-image-intent-v1": "image-intent"}
+            "loom-nebius-ingress-image-intent-v1": "image-intent", "loom-nebius-ingress-dns-v1": "dns"}
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_ingress_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -97,7 +99,7 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
 
 
 def command(release: Path, action: str) -> list[str]:
-    if action not in {"install", "rollback", "qualify", "image-intent"}:
+    if action not in {"install", "rollback", "qualify", "image-intent", "dns"}:
         raise BootstrapError("ingress action outside installed authority")
     return [str(release / "venv/bin/python"), "-I", "-c", _ENTRY,
             str(release), str(release / "installation.json"), action]
@@ -153,7 +155,7 @@ def safe_report(raw: bytes) -> dict[str, Any]:
         if len(raw) > 65_536:
             raise ValueError()
         value = json.loads(raw)
-        if value["status"] not in {"complete", "rolled_back", "skipped_busy", "skipped_locked", "image_copy_once", "image_readback_only"}:
+        if value["status"] not in {"complete", "rolled_back", "skipped_busy", "skipped_locked", "image_copy_once", "image_readback_only", "dns_published"}:
             raise ValueError()
         result = {key: value[key] for key in ("status", "installation_id", "candidate", "namespace")}
         if (str(UUID(result["installation_id"])) != result["installation_id"] or UUID(result["installation_id"]).int == 0
@@ -175,6 +177,33 @@ def safe_report(raw: bytes) -> dict[str, Any]:
             if not re.fullmatch(r"cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+/loom-shared-ingress@sha256:[0-9a-f]{64}", value["image"]):
                 raise ValueError()
             result["image"] = value["image"]
+        if value["status"] == "dns_published":
+            if not {"service_uid", "fingerprint_sha256"} <= result.keys():
+                raise ValueError()
+            for key in ("zone", "child_domain", "management_host"):
+                host = value[key]
+                if (not isinstance(host, str) or len(host) > 251 or not re.fullmatch(
+                        r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+", host)):
+                    raise ValueError()
+                result[key] = host
+            zone, child, management = (result[key] for key in ("zone", "child_domain", "management_host"))
+            if (not child.endswith("." + zone) or not management.endswith("." + zone)
+                    or management == child or management.endswith("." + child)):
+                raise ValueError()
+            address = ipaddress.IPv4Address(value["address"])
+            if not address.is_global or address.is_multicast or str(address) != value["address"]:
+                raise ValueError()
+            result["address"] = str(address)
+            names = ["*." + child[:-(len(zone) + 1)], management[:-(len(zone) + 1)]]
+            if not isinstance(value["records"], list) or len(value["records"]) != 2:
+                raise ValueError()
+            records = []
+            for row, name in zip(value["records"], names, strict=True):
+                if (row["name"] != name or row["origin"] not in {"created", "external", "uncertain"}
+                        or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", row["record_id"])):
+                    raise ValueError()
+                records.append({key: row[key] for key in ("name", "record_id", "origin")})
+            result["records"] = records
         return result
     except Exception:
         raise BootstrapError("invalid ingress operation report") from None
@@ -191,7 +220,7 @@ def authorized_main(expected_sha256: str) -> int:
         release, _ = prepare_release(content)
         report = safe_report(run_private(command(release, action), timeout=1800))
         print(json.dumps(report, sort_keys=True))
-        return 0 if report["status"] in {"complete", "rolled_back", "image_copy_once", "image_readback_only"} else 1
+        return 0 if report["status"] in {"complete", "rolled_back", "image_copy_once", "image_readback_only", "dns_published"} else 1
     except Exception:
         print("protected ingress operation incomplete; preserve private recovery state", file=sys.stderr)
         return 1

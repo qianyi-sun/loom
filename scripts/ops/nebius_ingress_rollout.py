@@ -192,6 +192,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
             raise RolloutError("ingress operation incomplete; reconcile gateway state before retry")
         report = safe_report(result.stdout)
         expected = {"install": {"complete"}, "rollback": {"rolled_back"},
+                    "dns": {"dns_published"},
                     "image-intent": {"image_copy_once", "image_readback_only"}}
         if report["status"] not in expected[action]:
             raise RolloutError("ingress report differs from requested operation")
@@ -202,7 +203,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--operation", choices=("install", "rollback"), required=True)
+    parser.add_argument("--operation", choices=("install", "rollback", "dns"), required=True)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--prepare-bundle", type=Path, help="Operator preparation only; no registry or remote operations")
@@ -277,7 +278,7 @@ def main() -> int:
     args.evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     (args.evidence_dir / "ingress-result.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] in {"prepared", "complete", "rolled_back"} else 1
+    return 0 if result["status"] in {"prepared", "complete", "rolled_back", "dns_published"} else 1
 
 
 if __name__ == "__main__":

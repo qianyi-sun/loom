@@ -43,6 +43,7 @@ def test_bundle_reproducible_contains_both_first_party_wheels_and_unchanged_supe
 
 @pytest.mark.parametrize("action,command", [("image-intent", "loom-nebius-ingress-image-intent-v1"),
                                              ("install", "loom-nebius-ingress-v1"),
+                                             ("dns", "loom-nebius-ingress-dns-v1"),
                                              ("rollback", "loom-nebius-ingress-rollback-v1")])
 def test_transport_only_uses_fixed_command_with_host_checking(action, command, monkeypatch):
     report = {"status": "complete" if action == "install" else "rolled_back", "candidate": "b" * 40, "namespace": "loom-dev",
@@ -52,6 +53,12 @@ def test_transport_only_uses_fixed_command_with_host_checking(action, command, m
                       fingerprint_sha256="c" * 64)
     elif action == "image-intent":
         report.update(status="image_copy_once", image="cr.eu-north1.nebius.cloud/registry/loom-shared-ingress@" + module().DIGEST)
+    elif action == "dns":
+        report.update(status="dns_published", service_uid="afc90687-cd28-4c9d-a2da-eb08a94b1d5b",
+                      fingerprint_sha256="c" * 64, address="8.8.8.8", zone="example.test",
+                      child_domain="dev.example.test", management_host="management.example.test",
+                      records=[{"name": "*.dev", "record_id": "record-1", "origin": "uncertain"},
+                               {"name": "management", "record_id": "record-2", "origin": "external"}])
 
     def run(args, **kwargs):
         assert args[-1] == command and args[-2] == "codex@192.0.2.1"
@@ -227,8 +234,9 @@ def test_operator_prepares_without_registry_scan_or_remote_operations(tmp_path, 
     assert module().main() == 1, "preparation overwrote approved bundle"
 
 
-def test_rollback_skips_scanner_and_registry_but_uses_restricted_transport(tmp_path, monkeypatch):
-    cli(tmp_path, monkeypatch, operation="rollback")
+@pytest.mark.parametrize("action,status", [("rollback", "rolled_back"), ("dns", "dns_published")])
+def test_readback_operations_skip_scanner_and_registry_but_use_restricted_transport(tmp_path, monkeypatch, action, status):
+    cli(tmp_path, monkeypatch, operation=action)
     for name in ("scan_ingress_image", "refresh_registry_auth", "mirror_ingress_image"):
         monkeypatch.setattr(module(), name, lambda *a, **kw: pytest.fail("rollback depended on image publication"))
     calls = []
@@ -236,10 +244,10 @@ def test_rollback_skips_scanner_and_registry_but_uses_restricted_transport(tmp_p
     def transfer(content, **kwargs):
         calls.append(kwargs["action"])
         assert content == b"approved tooling"
-        return {"status": "rolled_back"}
+        return {"status": status}
 
     monkeypatch.setattr(module(), "transfer", transfer)
-    assert module().main() == 0 and calls == ["rollback"]
+    assert module().main() == 0 and calls == [action]
 
 
 def test_scan_failure_prevents_registry_credentials_use_and_remote_mutation(tmp_path, monkeypatch, capsys):
@@ -381,7 +389,7 @@ def test_actual_bundle_bootstraps_with_both_wheels_and_parent_death_cleanup(tmp_
 def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_key():
     workflow = yaml.load((Path(__file__).resolve().parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == [
-        "rollout", "inspect", "certificate", "ingress", "ingress-rollback",
+        "rollout", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
     ]
     job = workflow["jobs"]["ingress"]
     assert job["environment"] == {"name": "nebius-integration", "deployment": "false"}
@@ -389,11 +397,15 @@ def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_
     assert "concurrency" not in job, "ingress must use the same exclusion as application rollout"
     assert workflow["concurrency"]["cancel-in-progress"] == "false"
     for guard in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
-                  "github.event_name == 'workflow_dispatch'", "inputs.operation == 'ingress'", "inputs.operation == 'ingress-rollback'"):
+                  "github.event_name == 'workflow_dispatch'", "inputs.operation == 'ingress'", "inputs.operation == 'ingress-rollback'",
+                  "inputs.operation == 'ingress-dns'"):
         assert guard in job["if"]
     transport = next(step for step in job["steps"] if step.get("name") == "Run the exact ingress operation")
     assert transport["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_INGRESS_SSH_KEY }}"
     assert transport["env"]["INGRESS_OPERATION"] == "${{ inputs.operation }}"
+    assert transport["env"]["NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON"] == (
+        "${{ inputs.operation == 'ingress' && secrets.NEBIUS_REGISTRY_SERVICE_ACCOUNT_JSON || '' }}"
+    )
     assert all("NEBIUS_DEPLOY_SSH_KEY" not in value and "NEBIUS_CERTIFICATE_SSH_KEY" not in value
                for value in transport["env"].values())
     artifact = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@"))
