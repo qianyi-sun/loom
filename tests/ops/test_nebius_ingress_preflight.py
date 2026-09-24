@@ -20,6 +20,7 @@ def module():
 def wire(tmp_path, platform_inputs, inventory):
     config = configuration(tmp_path)
     platform, _, profile = platform_inputs
+    platform["cluster_id"] = "mk8scluster-test"
     config.update(cluster_id=platform["cluster_id"], api_server=platform["kubernetes_api_server"],
                   image="cr.eu-north1.nebius.cloud/registry/loom-shared-ingress@sha256:3429c14149401de2ac82fc72ddc6a92642332b90deb3012301ff211b9d2d0f18")
     config["binding"]["namespace"] = platform["namespace"]
