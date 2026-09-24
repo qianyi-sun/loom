@@ -183,6 +183,30 @@ def test_target_drift_between_records_retains_partial_journal(target, tmp_path):
     assert (tmp_path / "state/dns-publication.json").is_file()
 
 
+@pytest.mark.parametrize("changed_name", ["*.dev.nebius", "management.nebius"])
+def test_inventory_time_target_drift_is_rechecked_before_post(target, tmp_path, changed_name):
+    current = dict(target)
+
+    class DriftProvider(Provider):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+
+        def records(self, name):
+            if name == changed_name:
+                self.reads += 1
+                if self.reads == 2:
+                    current["address"] = "1.1.1.1"
+            return super().records(name)
+
+    provider = DriftProvider()
+    with pytest.raises(publication.PublicationError):
+        publish(provider, target, tmp_path, qualify=lambda: dict(current))
+    assert provider.posts == ([] if changed_name == "*.dev.nebius" else ["*.dev.nebius"])
+    journal = json.loads((tmp_path / "state/dns-publication.json").read_text())
+    assert journal["records"][changed_name]["phase"] == "unstarted"
+
+
 def test_propagation_failure_retains_records_and_replay_does_not_post(target, tmp_path):
     provider = Provider()
 
@@ -274,6 +298,9 @@ def dns_wire(monkeypatch):
         response = dns.message.make_response(request)
         response.flags |= dns.flags.AA
         response.answer = replies.get((server, kind), [])
+        if kind == 6:
+            response.authority = [dns.rrset.from_text("example.test.", 600, "IN", "SOA",
+                                                     "ns.example.test. hostmaster.example.test. 1 3600 600 86400 600")]
         if not response.answer and kind == 1:
             response.answer = [dns.rrset.from_text(name, 600, "IN", "A", "8.8.8.8")]
         return response
@@ -368,6 +395,31 @@ def test_prepublication_authority_allows_absent_names_but_not_referrals(target, 
         return response
 
     monkeypatch.setattr(publication.dns.query, "udp", referral)
+    with pytest.raises(publication.PublicationError):
+        publication.qualify_authority(target)
+
+
+@pytest.mark.parametrize("problem", ["delegated", "missing", "alias", "non_authoritative"])
+def test_prepublication_requires_parent_zone_soa_even_on_shared_nameservers(target, dns_wire, monkeypatch, problem):
+    _, _, _, original = dns_wire
+
+    def query(request, server, *, timeout):
+        response = original(request, server, timeout=timeout)
+        if request.question[0].rdtype == 6:
+            response.answer = []
+            if problem == "delegated":
+                response.set_rcode(dns.rcode.NXDOMAIN)
+                response.authority = [dns.rrset.from_text("nebius.example.test.", 600, "IN", "SOA",
+                                                         "ns.example.test. hostmaster.example.test. 1 3600 600 86400 600")]
+            elif problem == "missing":
+                response.authority = []
+            elif problem == "alias":
+                response.answer = [dns.rrset.from_text(request.question[0].name, 600, "IN", "CNAME", "other.example.test.")]
+            else:
+                response.flags &= ~dns.flags.AA
+        return response
+
+    monkeypatch.setattr(publication.dns.query, "udp", query)
     with pytest.raises(publication.PublicationError):
         publication.qualify_authority(target)
 

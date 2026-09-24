@@ -151,7 +151,8 @@ def test_dns_qualification_does_not_recreate_missing_evidence(installed, evidenc
     assert not paths[evidence].exists()
 
 
-@pytest.mark.parametrize("failure", [None, "expired", "changed", "expires_midway", "authority", "public"])
+@pytest.mark.parametrize("failure", [None, "expired", "changed", "expires_midway", "changed_after_authority",
+                                    "expired_after_authority", "authority", "public"])
 def test_fixed_dns_operation_checks_credentials_authority_and_public_route_before_success(target, tmp_path, monkeypatch, failure):
     from scripts.ops import nebius_dns_challenge as credentials
     from scripts.ops import nebius_dns_publication as publication
@@ -170,9 +171,11 @@ def test_fixed_dns_operation_checks_credentials_authority_and_public_route_befor
     def token(path):
         assert path == tmp_path / "credential.json"
         events.append("credential")
-        if failure == "expired" or (failure == "expires_midway" and events.count("credential") > 1):
+        if (failure == "expired" or (failure == "expires_midway" and events.count("credential") > 1)
+                or (failure == "expired_after_authority" and events.count("authority") >= 2)):
             raise credentials.DNSChallengeError("expired")
-        if failure == "changed" and events.count("credential") > 1:
+        if ((failure == "changed" and events.count("credential") > 1)
+                or (failure == "changed_after_authority" and events.count("authority") >= 2)):
             return "replacement-private-token"
         return "private-fixture-token"
 
@@ -219,7 +222,7 @@ def test_fixed_dns_operation_checks_credentials_authority_and_public_route_befor
         assert result["status"] == "dns_published" and result["service_uid"] == target["service_uid"]
         assert events.index("authority") < events.index("create:*.dev.nebius")
         assert events.index("propagation") < events.index("public")
-    if failure in {"expired", "changed", "expires_midway", "authority"}:
+    if failure in {"expired", "changed", "expires_midway", "changed_after_authority", "expired_after_authority", "authority"}:
         assert not any(event.startswith("create:") for event in events)
     if failure == "expired":
         assert "provider" not in events
