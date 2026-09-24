@@ -311,10 +311,21 @@ fixture checks alone do not establish that evidence.
 That profile selects `cpu_arch=x86_64`, preserves an explicit `web-allowlist`
 policy, and otherwise selects `gateway-only` networking. It fills missing
 `cpus`/`memory_mb`/`storage_mb` (defaults 1 / 2048 / 4096), defaults missing
-`user` to `agent`, preserves explicit task and verifier identities, and uses
-`/app` when the declared workdir is neither `/app` nor `/workspace`.
-The compatibility report flags changes to declared network or workdir
-requirements for review. The profile points the verifier at relative
+`user` to `agent`, preserves explicit task and verifier identities, and preserves
+supported declared working directories. Only a missing workdir defaults to `/app`.
+Task working directories must be absolute canonical paths containing ASCII
+letters, digits, `-`, `_`, and `.` within components. Dot components, `/`, `/tmp`,
+and paths overlapping runtime or private verifier roots are rejected before
+preparation writes generated files. For example, `/media/project` and
+`/opt/project` are supported; `/loom`, `/tests`, `/opt/verifier`, and their
+ancestors or descendants are not.
+The compatibility report flags declared network changes and authored Dockerfile
+`WORKDIR` mismatches for review. It follows known local stage inheritance and
+relative directories after a known absolute path; unresolved variables and
+relative paths inherited from registry images require image inspection. The
+trusted controller keeps its fixed `/app` cwd and isolated Python imports;
+the declared task cwd belongs only to the private task and verifier sandboxes.
+The profile points the verifier at relative
 `verifier/run.sh`, drops Harbor TB2.1 artifact globs that admission rejects,
 and prepares a derived Dockerfile for the selected numeric identity.
 Explicit identity and web egress require qualified deployment opt-ins;
@@ -504,7 +515,7 @@ Review these fields when publishing without the profile:
 | Task environment | A supported Dockerfile when native preparation is enabled, or an admitted immutable image. |
 | Resource limits | Explicit `cpus`, `memory_mb`, and `storage_mb`; preserve requirements of the task. Scheduling requests are a separate policy. |
 | Network | `gateway-only` baseline policy; model access goes through the gateway. |
-| Workspace identity | `/app` or `/workspace`, default `agent` user, no custom agent/verifier user overrides. |
+| Workspace identity | A supported declared task directory, default `agent` user, or an explicitly qualified task/verifier identity. Custom agent identity overrides remain unsupported. |
 | Verifier | Shared script verifier with an exact relative `verifier/...` path; no absolute path, glob or traversal. |
 | Execution shape | One step with an exact instruction path and supported environment features; private verifier isolation remains enabled. |
 

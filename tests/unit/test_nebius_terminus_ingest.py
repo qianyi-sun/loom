@@ -94,7 +94,7 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert env["storage_mb"] == DEFAULT_STORAGE_MB
     assert env["cpu_arch"] == "x86_64"
     assert env["user"] == "root"
-    assert env["workdir"] == "/app"
+    assert env["workdir"] == "/home/root"
     assert env["network_policies_supported"] == ["gateway-only"]
     assert env["baseline_network_policy"] == {"kind": "gateway-only"}
     assert adapted["verifier"]["user"] == "root"
@@ -106,7 +106,7 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert not stats.verifier_identity_stripped
     assert stats.verifier_path_forced
     assert stats.cpu_arch_forced
-    assert stats.workspace_identity_forced
+    assert not stats.workspace_identity_forced
     assert stats.verifier_wrapper_installed
     wrapper = staged / "verifier" / "run.sh"
     assert wrapper.is_file()
@@ -245,10 +245,49 @@ def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:
     reasons = preflight_nebius_terminus_admission(_harbor_shaped_config(), _SEI)
     assert "gateway_only_network_required" in reasons
     assert "resource_limits_required" in reasons
-    assert "standard_workspace_identity_required" in reasons
+    assert "standard_workspace_identity_required" not in reasons
     assert "custom_verifier_identity_unsupported" not in reasons
     assert "shared_script_verifier_required" in reasons
     assert "private_verifier_directory_required" in reasons
+
+
+@pytest.mark.parametrize("workdir", ["/media/project", "/opt/project", "/root", "/data/project"])
+def test_adaptation_preserves_declared_task_workdir(tmp_path: Path, workdir: str) -> None:
+    _write_runtime_inputs(tmp_path)
+    adapted, stats = adapt_bundle_for_nebius_terminus(
+        tmp_path, _harbor_shaped_config(workdir=workdir),
+    )
+    assert adapted["environment"]["workdir"] == workdir
+    assert not stats.workspace_identity_forced
+    assert preflight_nebius_terminus_admission(adapted, _SEI) == ()
+
+
+@pytest.mark.parametrize("workdir", [
+    "/", "/loom/task", "/opt", "/opt/verifier", "/opt/verifier-python/project",
+    "/proc/self", "/var", "/var/run/task", "/tests/project", "/tmp",
+    "relative", "/app/../tests", "/app;touch /tmp/unsafe", "/app/$(id)",
+    "", "/app/", "//app", "/app/./state", "/app//state", "/app\n", "/app/\x00state",
+])
+def test_adaptation_rejects_unsafe_workdir_before_writing_outputs(
+    tmp_path: Path, workdir: str,
+) -> None:
+    _write_runtime_inputs(tmp_path)
+    before = {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(ValueError, match="workdir"):
+        adapt_bundle_for_nebius_terminus(tmp_path, _harbor_shaped_config(workdir=workdir))
+    assert {str(p): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_adaptation_defaults_only_an_absent_workdir(tmp_path: Path, explicit_null: bool) -> None:
+    _write_runtime_inputs(tmp_path)
+    raw = _harbor_shaped_config()
+    raw["environment"].pop("workdir")
+    if explicit_null:
+        raw["environment"]["workdir"] = None
+    adapted, stats = adapt_bundle_for_nebius_terminus(tmp_path, raw)
+    assert adapted["environment"]["workdir"] == "/app"
+    assert stats.workspace_identity_forced
 
 
 def test_offline_template_preserves_full_harbor_runner() -> None:

@@ -60,6 +60,15 @@ or SELinux labels. Undeclared tasks retain the ordinary mode/link transfer
 contract, including BusyBox tar compatibility; ACL-bearing archives cannot be
 silently restored through that ordinary path.
 
+The Nebius profile preserves a declared safe absolute task working directory
+through image preparation, staging and isolated verification. Protected runtime
+and verifier paths cannot be workspace roots or descendants. The trusted
+controller retains its fixed `/app` working directory and isolated Python
+imports; selecting a task directory never changes controller process discovery.
+Authored Dockerfile `WORKDIR` mismatches remain intake diagnostics until the task
+declaration preserves the original location, including separately declared
+mutable state outside that workspace.
+
 ## Runtime shape
 
 ```

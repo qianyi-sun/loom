@@ -354,7 +354,7 @@ def test_rejects_source_and_output_symlinks(tmp_path: Path, link: str) -> None:
     [
         ({"docker_image": "ubuntu:24.04"}, "original Dockerfile"),
         ({"docker_build_target": "base"}, "build targets"),
-        ({"workdir": "/root"}, "workdir"),
+        ({"workdir": "/loom"}, "workdir"),
     ],
 )
 def test_rejects_unreviewed_image_modes(tmp_path: Path, changes: dict, match: str) -> None:
