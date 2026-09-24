@@ -514,50 +514,64 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
-def retire_target(target_id, *, secret_file, origin):
+def target_action(action, previous_id, target_id, *, secret_file, origin):
     with Path(secret_file).open("rb") as stream:
         token = tomllib.load(stream)["admin"]["token"]
-    expected = {"target_id": target_id, "desired_state": "retired",
-                "observed_state": "retired", "health_status": "unknown"}
-    body = {key: value for key, value in expected.items() if key != "target_id"}
-    body.update(observed_at=datetime.now(UTC).isoformat(), error_code="target_replaced")
-    request = urllib.request.Request(
-        origin + "/admin/service-execution/targets/" + target_id + "/health",
-        data=json.dumps(body).encode(), method="POST",
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-    )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(request, timeout=30) as response:
-        if response.status != 200:
-            raise ValueError("target retirement rejected")
-        result = json.load(response)
-    if any(result.get(key) != value for key, value in expected.items()):
-        raise ValueError("target retirement readback mismatch")
-    return expected
+    def request(method, path, body=None):
+        req = urllib.request.Request(origin + path,
+            data=json.dumps(body).encode() if body is not None else None, method=method,
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        with opener.open(req, timeout=30) as response:
+            if response.status != 200:
+                raise ValueError("target request rejected")
+            return json.load(response)
+    rows = request("GET", "/admin/execution-capacity/status")["targets"]
+    states = {row["target_id"]: row["desired_state"] for row in rows}
+    if len(states) != len(rows) or previous_id not in states:
+        raise ValueError("target inventory mismatch")
+    if action in {"validate", "retire"}:
+        if target_id in states:
+            raise ValueError("replacement target must be a fresh identity")
+        if action == "retire":
+            expected = {"target_id": previous_id, "desired_state": "retired",
+                        "observed_state": "retired", "health_status": "unknown"}
+            body = {key: value for key, value in expected.items() if key != "target_id"}
+            body.update(observed_at=datetime.now(UTC).isoformat(), error_code="target_replaced")
+            result = request("POST", "/admin/service-execution/targets/" + previous_id + "/health", body)
+            if any(result.get(key) != value for key, value in expected.items()):
+                raise ValueError("target retirement readback mismatch")
+    elif action == "verify":
+        if states.get(previous_id) != "retired" or states.get(target_id) != "active":
+            raise ValueError("target replacement activation mismatch")
+    else:
+        raise ValueError("invalid target action")
+    return {"previous_target_id": previous_id, "target_id": target_id, "status": action}
 
 if __name__ == "__main__":
     try:
-        print(json.dumps(retire_target(sys.argv[1],
+        print(json.dumps(target_action(sys.argv[1], sys.argv[2], sys.argv[3],
             secret_file=os.environ["LOOM_CP_ADMIN_SECRET_FILE"],
             origin="http://127.0.0.1:8080")))
     except Exception:
-        print("Target retirement failed; retain the owned dispatch pause", file=sys.stderr)
+        print("Target replacement check failed", file=sys.stderr)
         sys.exit(1)
 '''
 
 
-def retire_execution_target(kube: Kubectl, namespace: str, target_id: str) -> None:
-    expected = {"target_id": target_id, "desired_state": "retired",
-                "observed_state": "retired", "health_status": "unknown"}
+def execution_target_action(
+    kube: Kubectl, namespace: str, action: str, previous_id: str, target_id: str,
+) -> None:
+    expected = {"previous_target_id": previous_id, "target_id": target_id, "status": action}
     try:
         result = json.loads(kube.run(
             "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python",
-            "-c", TARGET_RETIRE_PROGRAM, target_id,
+            "-c", TARGET_RETIRE_PROGRAM, action, previous_id, target_id,
         ))
     except Exception:
-        raise DeploymentError("target retirement request failed; retain the owned dispatch pause") from None
+        raise DeploymentError("target replacement request failed; inspect the recorded deployment phase") from None
     if result != expected:
-        raise DeploymentError("target retirement readback mismatch; retain the owned dispatch pause")
+        raise DeploymentError("target replacement readback mismatch; inspect the recorded deployment phase")
 
 
 def verify_deployed_images(kube: Kubectl, files: dict[str, list[dict[str, Any]]]) -> None:
@@ -631,7 +645,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                 raise DeploymentError("target retirement requires an existing platform database")
             evidence["target_replacement"] = {
                 "previous_target_id": retire_target, "target_id": config["target_id"],
-                "previous_target_retired": False,
+                "previous_target_retired": False, "active_target_verified": False,
             }
         if not args.apply:
             evidence["status"] = "planned"
@@ -669,6 +683,9 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
                     guard_acquired = False
                     evidence["status"] = "skipped_superseded"
                     return evidence
+            if retire_target is not None:
+                phase("validate-fresh-target")
+                execution_target_action(kube, ns, "validate", retire_target, config["target_id"])
 
         def apply_file(filename: str) -> None:
             nonlocal mutation_started
@@ -709,7 +726,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # point every failure must retain the durable operator-owned pause.
             mutation_started = True
             phase("retire-previous-target")
-            retire_execution_target(kube, ns, retire_target)
+            execution_target_action(kube, ns, "retire", retire_target, config["target_id"])
             evidence["target_replacement"]["previous_target_retired"] = True
         if config.get("task_identity_policy") is not None:
             mutation_started = True
@@ -764,6 +781,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         public_smoke(manifest["public_origin"], config["environment"])
         phase("candidate-readback")
         verify_deployed_images(kube, files)
+        if retire_target is not None:
+            phase("target-replacement-readback")
+            execution_target_action(kube, ns, "verify", retire_target, config["target_id"])
+            evidence["target_replacement"]["active_target_verified"] = True
         if guard_acquired:
             rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
             guard_acquired = False

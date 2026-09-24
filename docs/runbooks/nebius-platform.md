@@ -1334,8 +1334,9 @@ cluster, kubeconfig and evidence arguments, adding
 `--retire-target <currently-installed-primary-id>`. Run without `--apply` first.
 The deployer rejects a changed primary ID without the exact retirement option,
 and rejects retirement of the destination or a fresh installation. It checks
-the installed source again after acquiring the ordinary idle guard. Busy or
-locked platforms are skipped without retirement.
+the installed source again after acquiring the ordinary idle guard, and queries
+the authenticated target inventory to reject reuse of a registered destination
+ID before mutation. Busy or locked platforms are skipped without retirement.
 
 After a successful backup and before applying manifests, the deployer retires
 the old target through the authenticated admin health API inside the existing
@@ -1343,7 +1344,9 @@ control-plane Pod. Credentials stay in that Pod. Normal configuration bootstrap
 registers and activates the fresh target, and the deployment keeps its guard
 through workload and HTTPS readback. Actuator health reports preserve the old
 target's retired desired state. The evidence records both target IDs and whether
-retirement was confirmed.
+retirement was confirmed. Before releasing its pause, the deployer independently
+checks the admin API reports the previous target retired and the replacement
+active; healthy Deployments alone do not establish target activation.
 
 An ambiguous retirement response or later failure retains the deployment's
 owned pause, even before the first manifest was applied. Inspect the target
