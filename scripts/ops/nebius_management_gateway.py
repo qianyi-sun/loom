@@ -167,6 +167,15 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if value["phase"] not in {"database", "migration", "backup", "service"}:
                 raise ValueError()
             result["phase"] = value["phase"]
+        if status == "management_installed":
+            backup = value["backup"]
+            uid, checksum, size, key = (backup[name] for name in ("job_uid", "sha256", "bytes", "key"))
+            if (str(UUID(uid)) != uid or UUID(uid).int == 0 or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+                    or type(size) is not int or not 0 < size <= 1024**4
+                    or not re.fullmatch(re.escape(operation["namespace"]) + r"/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9]{6}-"
+                                        + checksum[:12] + r"\.dump", key)):
+                raise ValueError()
+            result["backup"] = {"job_uid": uid, "sha256": checksum, "bytes": size, "key": key}
         return result
     except Exception:
         raise GatewayError("invalid management operation report") from None
