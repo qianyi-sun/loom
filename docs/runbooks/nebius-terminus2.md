@@ -378,8 +378,15 @@ and preinstalled `uvx -p ... -w package==version ... pytest` (including the
 equivalent `--python` and `--with` options),
 pip with exactly pinned pytest plus pytest/python-module invocations, and explicit uv
 venv/activation/pip/run forms. Combined apt update/install commands are handled
-only when their package list is explicit. Official Debian-based Python full
-and slim images are supported; Alpine images are not. Prebuilt images, malformed
+only when their package list is explicit. Supported derived bases include
+official Debian-based Python and numeric Node tags (full or slim, including
+Bullseye, Bookworm and Trixie variants), and numeric `rootproject/root` versions
+with an explicit Ubuntu 20.04, 22.04 or 24.04 suffix. Preparation retains the
+original application interpreter and PATH; plain pip verifiers inherit system
+packages so compiled PyROOT dependencies remain available. Validate the actual
+image and original verifier before execution; accepting a tag does not qualify
+its upstream contents. Alpine and Fedora variants remain unsupported.
+Prebuilt images, malformed
 Dockerfile `SHELL`, selected build targets, floating Git dependencies and
 unrecognized shell/installer forms need explicit adaptation. An upstream asset
 URL can still change on a future rebuild; a prepared image fixes the bytes used

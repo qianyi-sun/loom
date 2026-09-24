@@ -365,7 +365,11 @@ def _preparation_dockerfile(
                 raise ValueError("nebius-terminus: duplicate Dockerfile stage alias")
             stages[alias] = final_base
     if not re.fullmatch(
-        r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?))",
+        r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+"
+        r"|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?"
+        r"|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?)"
+        r"|node:[0-9]+(?:\.[0-9]+){0,2}(?:-(?:bookworm|bullseye|trixie)(?:-slim)?|-slim)?"
+        r"|rootproject/root:[0-9]+\.[0-9]+\.[0-9]+-ubuntu(?:20\.04|22\.04|24\.04))",
         final_base,
     ):
         raise ValueError(
