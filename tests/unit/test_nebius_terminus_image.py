@@ -1,6 +1,7 @@
 """Behavioral boundaries for the bounded Harbor image preparation adapter."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 
 from loom.nebius_terminus_image import (
     OFFLINE_SCRIPT,
+    _arch_package_install,
     adapt_harbor_test_script,
     prepare_nebius_terminus_image,
 )
@@ -371,6 +373,67 @@ def test_rejects_unknown_base_before_writing_outputs(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Debian/Ubuntu"):
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
+
+
+@pytest.mark.parametrize("base", ["archlinux:latest", "archlinux:base", "archlinux:base-devel"])
+def test_arch_preparation_preserves_source_and_uses_its_package_manager(tmp_path: Path, base: str) -> None:
+    environment = bundle(tmp_path)
+    original = f"FROM {base} AS original\nRUN touch /authored-input\nFROM original\nWORKDIR /app\n"
+    (tmp_path / "environment/Dockerfile").write_text(original)
+    script = SCRIPT.replace("apt-get update\napt-get install -y curl primer3\n", "")
+    (tmp_path / "tests/test.sh").write_text(script)
+
+    assert prepare_nebius_terminus_image(tmp_path, environment)
+
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    assert derived.startswith(original)
+    assert "pacman" in derived and "apt-get" not in derived
+    assert "pandas==2.3.3" in derived
+    assert "ENV PATH=" not in derived and "COPY tests" not in derived
+    assert (tmp_path / "tests/test.sh").read_text() == script
+    assert (tmp_path / OFFLINE_SCRIPT).read_text().endswith(script[script.index("if [ $? -eq 0 ]") :])
+    assert not prepare_nebius_terminus_image(tmp_path, environment)
+
+
+def test_arch_rejects_debian_bootstrap_dependencies_before_preparation(tmp_path: Path) -> None:
+    environment = bundle(tmp_path)
+    (tmp_path / "environment/Dockerfile").write_text("FROM archlinux:latest\n")
+
+    with pytest.raises(ValueError, match=r"Arch.*Debian.*bootstrap"):
+        prepare_nebius_terminus_image(tmp_path, environment)
+
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
+    assert not (tmp_path / "environment/Dockerfile.loom-nebius").exists()
+
+
+@pytest.mark.parametrize("transaction,accepted", [("python 3.14\n", True),
+                                                ("bash 5.3\npython 3.14\n", True),
+                                                ("bash 5.4\npython 3.14\n", False)])
+def test_arch_package_transaction_never_changes_authored_packages(
+    tmp_path: Path, transaction: str, accepted: bool,
+) -> None:
+    # Isolate only the package-manager process. Execute the real generated shell
+    # guard, including its inventory, transaction parsing and failure ordering.
+    manager = tmp_path / "pacman"
+    manager.write_text("#!/bin/sh\nset -eu\ncase \"$1\" in\n"
+                       "-Q) printf 'bash 5.3\\n' ;;\n"
+                       "-Sy) exit 0 ;;\n"
+                       "-Sp|-S) for arg; do test \"$arg\" != bash || exit 43; done; "
+                       "if [ \"$1\" = -Sp ]; then printf '%s' \"$LOOM_TEST_TRANSACTION\"; "
+                       "else touch \"$LOOM_TEST_INSTALL_CALLED\"; fi ;;\n"
+                       "*) exit 42 ;;\nesac\n")
+    manager.chmod(0o755)
+    installed = tmp_path / "install-called"
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+           "LOOM_TEST_TRANSACTION": transaction, "LOOM_TEST_INSTALL_CALLED": str(installed)}
+
+    result = subprocess.run(["/bin/sh", "-c", _arch_package_install()],
+                            capture_output=True, text=True, env=env)
+
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert installed.exists() is accepted
+    if not accepted:
+        assert "would change authored package bash (5.3 -> 5.4)" in result.stderr
 
 
 def test_plain_pip_keeps_base_dependencies_and_both_pytest_results(tmp_path: Path) -> None:

@@ -406,6 +406,39 @@ def _without_packaged_openhands_runtime(original: str) -> str:
     )
 
 
+def _arch_package_install() -> str:
+    """Add harness packages without upgrading the authored Arch environment.
+
+    A refreshed rolling repository may require an existing package upgrade.
+    Reject that transaction before installation instead of silently changing
+    task toolchains. Use a separate cache so authored offline inputs survive.
+    """
+    packages = "bash ca-certificates curl tmux asciinema shadow python tar"
+    return f"""loom_prep_cache=$(mktemp -d /tmp/loom-arch-preparation.XXXXXX) && \
+    trap 'rm -rf "$loom_prep_cache"' EXIT && \
+    chmod 755 "$loom_prep_cache" && \
+    pacman -Q > "$loom_prep_cache/installed" && \
+    loom_missing='' && \
+    for loom_package in {packages}; do \
+        loom_existing=$(awk -v package="$loom_package" '$1 == package {{print $2}}' "$loom_prep_cache/installed") || exit 1; \
+        if [ -z "$loom_existing" ]; then loom_missing="$loom_missing $loom_package"; fi; \
+    done && \
+    if [ -n "$loom_missing" ]; then \
+    pacman -Sy --noconfirm && \
+    pacman -Sp --needed --print-format '%n %v' $loom_missing > "$loom_prep_cache/transaction" && \
+    while read -r loom_package loom_version; do \
+        [ -n "$loom_package" ] || continue; \
+        loom_existing=$(awk -v package="$loom_package" '$1 == package {{print $2}}' "$loom_prep_cache/installed") || exit 1; \
+        if [ -n "$loom_existing" ] && [ "$loom_existing" != "$loom_version" ]; then \
+            echo "nebius-terminus: Arch harness preparation would change authored package $loom_package ($loom_existing -> $loom_version); use an explicitly reviewed compatible image/repository snapshot" >&2; \
+            exit 1; \
+        fi; \
+    done < "$loom_prep_cache/transaction" && \
+    pacman -S --needed --noconfirm --cachedir "$loom_prep_cache" $loom_missing; \
+    fi && \
+    rm -rf "$loom_prep_cache" && trap - EXIT"""
+
+
 def _preparation_dockerfile(
     original: str, bootstrap: HarborOfflineBootstrap, workdir: str, identity: SandboxIdentityV1,
 ) -> str:
@@ -432,7 +465,8 @@ def _preparation_dockerfile(
             if alias in stages:
                 raise ValueError("nebius-terminus: duplicate Dockerfile stage alias")
             stages[alias] = final_base
-    if not re.fullmatch(
+    arch = final_base in {"archlinux:latest", "archlinux:base", "archlinux:base-devel"}
+    if not arch and not re.fullmatch(
         r"(?:ubuntu:[A-Za-z0-9_.-]+|debian:[A-Za-z0-9_.-]+"
         r"|python:(?:[A-Za-z0-9_.-]*slim(?:-(?:bookworm|bullseye|trixie))?"
         r"|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-(?:bookworm|bullseye|trixie))?)"
@@ -442,7 +476,13 @@ def _preparation_dockerfile(
         final_base,
     ):
         raise ValueError(
-            "nebius-terminus: image preparation supports Debian/Ubuntu final base images only"
+            "nebius-terminus: image preparation supports Debian/Ubuntu final base images "
+            "and official Arch Linux latest/base/base-devel images only"
+        )
+    if arch and bootstrap.apt_packages:
+        raise ValueError(
+            "nebius-terminus: Arch Linux images cannot use a Debian package bootstrap; "
+            "provide an explicitly reviewed verifier dependency preparation"
         )
     custom_shell = False
     for instruction in instructions:
@@ -530,12 +570,15 @@ def _preparation_dockerfile(
         )
     # Authored caches may be offline task inputs (for example Poetry wheels).
     # Disable only our uv download cache; never delete the image's HOME cache.
-    preparation = run(f"""export UV_NO_CACHE=1 && apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
+    package_install = (_arch_package_install() if arch else
+                       f"apt-get update -qq && apt-get install -y --no-install-recommends {' '.join(packages)}")
+    package_cleanup = "true" if arch else "rm -rf /var/lib/apt/lists/*"
+    preparation = run(f"""export UV_NO_CACHE=1 && {package_install} && \\
     {python_setup} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
     {identity_setup} && \\
     {workspace_setup} && \\
-    rm -rf /var/lib/apt/lists/*""")
+    {package_cleanup}""")
     return (
         original.rstrip()
         + "\n\n# Loom Nebius: build-only harness/verifier preparation; original task above.\n"
