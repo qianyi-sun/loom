@@ -403,12 +403,13 @@ def _dockerfile_runtime_requirements(
 
 def _shell_commands(source: str) -> list[list[str]]:
     """Recognize literal shell words without evaluating authored commands."""
-    lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|<>")
+    lexer = shlex.shlex(source, posix=True, punctuation_chars="\n;&|<>")
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     commands: list[list[str]] = [[]]
     try:
         for word in lexer:
-            if word in {";", "&&", "||", "|", "&"}:
+            if word and set(word) <= set("\n;&|"):
                 commands.append([])
             else:
                 commands[-1].append(word)
@@ -425,14 +426,37 @@ def _script_private_tests(source: str, bundle: Path) -> set[str]:
         if not command:
             continue
         executable = PurePosixPath(command[0]).name
-        pytest_command = (
-            executable == "pytest"
-            or (executable in {"python", "python3"} and command[1:3] == ["-m", "pytest"])
-            or (executable == "uvx" and "pytest" in command[1:])
-        )
-        if not pytest_command:
+        arguments: list[str] | None = None
+        if executable == "pytest":
+            arguments = command[1:]
+        elif executable in {"python", "python3"} and command[1:3] == ["-m", "pytest"]:
+            arguments = command[3:]
+        elif executable == "uvx":
+            position = 1
+            while position < len(command):
+                option = command[position]
+                if option in {"-p", "--python", "-w", "--with", "--from"}:
+                    position += 2
+                elif option.startswith(("--python=", "--with=", "--from=")):
+                    position += 1
+                else:
+                    break
+            if command[position:position + 1] == ["pytest"]:
+                arguments = command[position + 1:]
+        if arguments is None:
             continue
-        for word in command[1:]:
+        # Only positional pytest selection paths establish this dependency.
+        # Option values such as --ignore and -k are not selected test files.
+        skip_value = False
+        for word in arguments:
+            if skip_value:
+                skip_value = False
+                continue
+            if word in {"--ignore", "--ignore-glob", "--deselect", "--confcutdir", "--basetemp",
+                        "--rootdir", "--junitxml", "--junit-xml", "--junit-prefix", "--log-file",
+                        "-k", "-m", "-c", "-o", "--override-ini", ">", ">>", "<", "<>"}:
+                skip_value = True
+                continue
             path = PurePosixPath(word.split("::", 1)[0])
             if not path.is_relative_to("/tests") or ".." in path.parts or "$" in word:
                 continue
@@ -478,8 +502,15 @@ def _image_script_private_test_diagnostics(
             if command[0] == "printf":
                 if not content or content[0] not in {"%s\\n", "%s"}:
                     continue
+                separator = "\n" if content[0] == "%s\\n" else ""
                 content = content[1:]
-            for reference in sorted(_script_private_tests("\n".join(content), bundle)):
+            else:
+                separator = " "
+                if content[:1] == ["-n"]:
+                    content = content[1:]
+                if content and content[0].startswith("-"):
+                    continue  # Escape-interpreting echo variants need shell evaluation.
+            for reference in sorted(_script_private_tests(separator.join(content), bundle)):
                 report.add(
                     "package_defect", "agent_private_verifier_dependency",
                     f"Image source writes a pytest invocation of bundled private test {reference!r} "
