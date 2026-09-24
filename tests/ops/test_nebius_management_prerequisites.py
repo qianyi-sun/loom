@@ -283,3 +283,52 @@ def test_live_capacity_shortfall_prevents_installation_qualification(connected_c
                      "resources": {"requests": {"storage": "99Gi"}}}, "status": {"phase": "Pending"}}]
     with pytest.raises(ManagementPrerequisiteError):
         client.preflight(request, render_installation(request))
+
+
+@pytest.mark.parametrize("demand", ["expansion", "future_claims", "hpa_claims"])
+def test_outstanding_storage_demand_prevents_overpromising_quota(connected_checks, demand):
+    from scripts.ops.nebius_management_install import render_installation
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+    from tests.ops.test_nebius_management_capacity import workload
+
+    client, request, resources, _, _ = connected_checks
+    storage_class = request.deployment.installation.foundation.platform_config["storage_class"]
+    if demand == "expansion":
+        resources["persistentvolumeclaims"] = [{"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+            "metadata": {"name": "expanding", "namespace": "foreign", "uid": str(uuid4())},
+            "spec": {"storageClassName": storage_class, "resources": {"requests": {"storage": "100Gi"}}},
+            "status": {"phase": "Bound", "capacity": {"storage": "10Gi"},
+                       "conditions": [{"type": "Resizing", "status": "True"}]}}]
+    else:
+        row = workload("StatefulSet", "growing")
+        row["spec"].update(replicas=1 if demand == "hpa_claims" else 2, volumeClaimTemplates=[{
+            "metadata": {"name": "data"}, "spec": {"storageClassName": storage_class,
+                "accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "50Gi"}}}}])
+        resources["statefulsets"] = [row]
+        if demand == "hpa_claims":
+            resources["horizontalpodautoscalers"] = [{"metadata": {"namespace": "loom-platform"}, "spec": {
+                "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "growing"}, "maxReplicas": 2}}]
+    with pytest.raises(ManagementPrerequisiteError):
+        client.preflight(request, render_installation(request))
+
+
+def test_stateful_claims_count_missing_ordinals_without_double_counting_existing(connected_checks):
+    from scripts.ops.nebius_management_install import render_installation
+    from tests.ops.test_nebius_management_capacity import workload
+
+    client, request, resources, _, _ = connected_checks
+    rendered = render_installation(request)
+    baseline = client.platform_capacity(request, rendered)
+    row = workload("StatefulSet", "growing")
+    row["spec"].update(replicas=3, ordinals={"start": 5}, volumeClaimTemplates=[{
+        "metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "10Gi"}}}}])
+    resources["statefulsets"] = [row]
+    resources["persistentvolumeclaims"] = [{"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data-growing-5", "namespace": "loom-platform", "uid": str(uuid4())},
+        "spec": {"resources": {"requests": {"storage": "10Gi"}}}, "status": {"phase": "Pending"}}, {
+        "apiVersion": "v1", "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "data-growing-6", "namespace": "loom-platform", "uid": str(uuid4())},
+        "spec": {"resources": {"requests": {"storage": "10Gi"}}},
+        "status": {"phase": "Bound", "capacity": {"storage": "10Gi"}}}]
+    # Ordinal 5 needs 10Gi, ordinal 6 already exists, ordinal 7 needs 10Gi.
+    assert client.platform_capacity(request, rendered) == baseline + 20 * 1024
