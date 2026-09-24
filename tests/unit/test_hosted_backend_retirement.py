@@ -6,8 +6,8 @@ import pytest
 from fastapi import HTTPException
 
 from loom.service_execution_backend import local_execution_enabled
+from loom_service.execution_admission import admit_execution_backend
 from loom_service.routes.backends import list_backends
-from loom_service.routes.batches import _reject_if_backend_cannot_execute_or_cold_start
 
 
 @pytest.mark.parametrize("environment", [None, "", "development", "staging", "production"])
@@ -31,7 +31,7 @@ async def test_hosted_admission_rejects_non_nebius_before_capacity_lookup(monkey
     monkeypatch.setenv("LOOM_ENV", "production")
     session = AsyncMock()
     with pytest.raises(HTTPException) as error:
-        await _reject_if_backend_cannot_execute_or_cold_start(
+        await admit_execution_backend(
             session, backend=backend, task_ids=[], trial_config={}, combinations=[],
             runtime_profile_json="",
         )

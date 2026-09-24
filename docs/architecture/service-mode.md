@@ -18,6 +18,15 @@ Docker execution are local-development facilities. Compose explicitly enables
 `LOOM_LOCAL_EXECUTION=1` in the `development` environment; hosted services do
 not expose worker registration or claim routes.
 
+Batch creation, failed-case reruns and Run Library clone/reuse share execution
+admission and task-resource freezing in `loom_service.execution_admission`.
+Routes retain authorization, attribution and transaction ownership, including
+the atomic batch-plus-audit write for admin submissions. New submissions and
+clone/reuse resolve current deployment policy; ordinary reruns retain their
+stored runtime snapshot, with current-runtime selection available only through
+the explicit rerun option. The admission module owns shared rejection metrics
+and errors and does not depend on route modules.
+
 Local service-mode development uses `docker compose`, so operators need Docker
 CLI with the Compose plugin before running
 `loom service up`, `down`, or `status`. On macOS, install
