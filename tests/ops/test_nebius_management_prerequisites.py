@@ -88,7 +88,7 @@ def checks(installation, cloud, tmp_path):
         management_host=request.deployment.public_host), foundation=lambda: foundation)
     settings = ManagementPrerequisiteSettings(candidate_id=uuid4(), cloud=cloud.scope,
         storage_class_uid=uuid4(), storage_parameters={}, storage_quota_name="compute-disks-size-nonreplicated-ssd",
-        storage_quota_unit="bytes")
+        storage_quota_unit="bytes", backup_quota_name="storage-size", backup_quota_unit="bytes")
     client = HTTPSManagementPrerequisites(settings=settings, ingress=ingress, certificate_config={},
         ingress_state=tmp_path / "ingress", operator_cloud_credentials=tmp_path / "operator.json",
         api_server=config["kubernetes_api_server"], ssl_context=ssl.create_default_context(), token="operator-test-token")
@@ -217,7 +217,13 @@ def connected_checks(checks, installation, publication, cloud, monkeypatch):
         "unit": "bytes", "usage": str(100 * 1024**3)}}
     async def list_quotas(request, **kwargs):
         assert kwargs == {"timeout": 30, "retries": 0}
-        return quotas.ListQuotaAllowancesResponse.from_json(json.dumps({"items": [quota]}))
+        backup_quota = copy.deepcopy(quota)
+        backup_quota["metadata"].update(id="quota-backup", name=client.settings.backup_quota_name)
+        backup_quota["status"]["service"] = "storage"
+        backup_quota["spec"]["limit"] = str(200 * 1024**3)
+        if quota.get("spec", {}).get("description") == "backup-full":
+            backup_quota["spec"]["limit"] = backup_quota["status"]["usage"]
+        return quotas.ListQuotaAllowancesResponse.from_json(json.dumps({"items": [quota, backup_quota]}))
     monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(list=list_quotas))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
@@ -332,3 +338,13 @@ def test_stateful_claims_count_missing_ordinals_without_double_counting_existing
         "status": {"phase": "Bound", "capacity": {"storage": "10Gi"}}}]
     # Ordinal 5 needs 10Gi, ordinal 6 already exists, ordinal 7 needs 10Gi.
     assert client.platform_capacity(request, rendered) == baseline + 20 * 1024
+
+
+def test_provider_object_quota_exhaustion_blocks_before_installation(connected_checks):
+    from scripts.ops.nebius_management_install import render_installation
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+
+    client, request, _, quota, _ = connected_checks
+    quota["spec"]["description"] = "backup-full"
+    with pytest.raises(ManagementPrerequisiteError):
+        client.preflight(request, render_installation(request))

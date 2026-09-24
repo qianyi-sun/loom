@@ -99,6 +99,7 @@ async def qualify(cloud):
 
     return await qualify_cloud_material(sdk=None, scope=ManagementCloudScope.model_validate(cloud.scope),
         material=cloud.material, bucket_name="loom-management-backup", clients=cloud.clients,
+        backup_bytes=10 * 1024**3,
         now=datetime(2026, 9, 24, tzinfo=UTC))
 
 
@@ -242,3 +243,40 @@ async def test_typed_provider_readback_not_an_invented_key_prefix_identifies_the
     credentials["subject-credentials"]["kid"] = "publickey-e00example"
     cloud.material["loom-management-cloud"]["credentials.json"] = json.dumps(credentials)
     assert (await qualify(cloud))["provisioning_account_id"] == "serviceaccount-manager"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["tiny", "used", "versions", "parts", "negative", "deleting", "expiration"])
+async def test_backup_bucket_requires_room_for_a_complete_dump_and_retains_it(cloud, mutation):
+    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
+
+    bucket = cloud.rows["bucket-management"][1]
+    bucket["spec"]["max_size_bytes"] = str(20 * 1024**3)
+    if mutation == "tiny":
+        bucket["spec"]["max_size_bytes"] = "1"
+    elif mutation == "negative":
+        bucket["spec"]["max_size_bytes"] = "-1"
+    elif mutation == "deleting":
+        bucket["status"]["deleted_at"] = "2026-09-25T00:00:00Z"
+    elif mutation == "expiration":
+        bucket["spec"]["lifecycle_configuration"] = {"rules": [{
+            "id": "expire", "status": "ENABLED", "expiration": {"days": 1}}]}
+    else:
+        fields = {"used": ("counters", "simple_objects_size"),
+                  "versions": ("non_current_counters", "multipart_objects_size"),
+                  "parts": ("counters", "inflight_parts_size")}
+        section, field = fields[mutation]
+        bucket["status"]["counters"] = [{"storage_class": "STANDARD", section: {field: str(11 * 1024**3)}}]
+    with pytest.raises(ManagementCloudScopeError):
+        await qualify(cloud)
+
+
+@pytest.mark.asyncio
+async def test_backup_bucket_exact_headroom_includes_all_version_and_part_counters(cloud):
+    bucket = cloud.rows["bucket-management"][1]
+    bucket["spec"]["max_size_bytes"] = str(20 * 1024**3)
+    bucket["status"]["counters"] = [{"storage_class": "STANDARD",
+        "counters": {"simple_objects_size": str(2 * 1024**3), "multipart_objects_size": str(3 * 1024**3),
+                     "inflight_parts_size": str(1 * 1024**3)},
+        "non_current_counters": {"simple_objects_size": str(1 * 1024**3), "multipart_objects_size": str(3 * 1024**3)}}]
+    assert (await qualify(cloud))["backup_bucket_id"] == "bucket-management"
