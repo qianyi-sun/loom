@@ -4,8 +4,9 @@ Use this operation only for a deleted, finalized current-attempt execution whose
 committed source failed canonical publication with `verifier_reward_drift` because
 the old runtime read `diagnostics/verifier-exception.json` before
 `verifier/output.json`. Deploy the compatible Control Plane and apply migration
-`0157` through the normal guarded rollout first. Inspect the original source,
-lease/team identity, runtime failure and retention state before requesting recovery.
+`0158` (including `0157`) through the normal guarded rollout first. Inspect the
+original source, lease/team identity, runtime failure and retention state before
+requesting recovery.
 
 Run the deployed module inside the Control Plane environment, using its existing
 database and source-spool configuration:
@@ -27,6 +28,11 @@ another integrity failure returns the archive to `unavailable` and consumes the
 one-use recovery. The new archive error is retained on the lease, while the Trial's
 original state, result, reward, attempt, failure and finish time remain unchanged.
 Do not clear the audit timestamp or patch a terminal state to repeat the operation.
+
+Migration `0158` also appends a current history snapshot for an already-requested
+recovery whose original timestamp was not recorded by the `0157` history trigger.
+It preserves all existing lease values and history rows and does not repeat the
+recovery. A downgrade/re-upgrade retains the snapshot without duplicating it.
 
 After the archive becomes `committed`, download its ordinary Trial bundle and ATIF.
 Verify the unchanged original runtime result, the independent verifier score,

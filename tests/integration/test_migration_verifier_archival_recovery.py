@@ -27,3 +27,22 @@ def test_archival_retry_migration_round_trip(isolated_migration_postgres_url: st
         command.upgrade(config, "head")
     finally:
         engine.dispose()
+
+
+def test_archival_history_trigger_round_trip(isolated_migration_postgres_url: str) -> None:
+    config = _config(isolated_migration_postgres_url)
+    engine = create_engine(isolated_migration_postgres_url)
+    query = text("SELECT pg_get_triggerdef(oid) FROM pg_trigger "
+                 "WHERE tgrelid='public.execution_leases'::regclass "
+                 "AND tgname='execution_leases_history_trigger'")
+    try:
+        command.downgrade(config, "0157")
+        with engine.connect() as connection:
+            before = connection.scalar(query)
+        command.upgrade(config, "0158")
+        command.downgrade(config, "0157")
+        with engine.connect() as connection:
+            assert connection.scalar(query) == before
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()

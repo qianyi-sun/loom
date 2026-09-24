@@ -559,27 +559,6 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 for _ in range(2)
             ))
             assert sorted(requeues) == [False, True]
-            if archival_history_upgrade:
-                async with sessions() as session:
-                    lease_before = await session.scalar(text(
-                        "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id})
-                await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
-                async with sessions() as session:
-                    assert await session.scalar(text(
-                        "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id}) == lease_before
-                    trial = await session.get(Trial, trial_id)
-                    assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
-                            trial.failure_message, trial.attempt_count) == original_outcome
-                    first_history = (await session.execute(text(
-                        "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
-                        "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all()
-                # A rollback/re-upgrade must retain the first audit and never append a duplicate.
-                await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
-                await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
-                async with sessions() as session:
-                    assert (await session.execute(text(
-                        "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
-                        "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all() == first_history
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
                 assert current.materialization_recovery_requested_at is not None
@@ -588,11 +567,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert {item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
                         for item in histories if item.id in histories_before} == histories_before
                 new_history = [item for item in histories if item.id not in histories_before]
-                assert len(new_history) == 1, "Recovery must append exactly one audit snapshot"
-                assert datetime.fromisoformat(new_history[0].snapshot_json[
-                    "materialization_recovery_requested_at"
-                ]) == current.materialization_recovery_requested_at
-                assert new_history[0].snapshot_json["materialization_state"] == "pending"
+                assert len(new_history) == (0 if archival_history_upgrade else 1)
+                if not archival_history_upgrade:
+                    assert datetime.fromisoformat(new_history[0].snapshot_json[
+                        "materialization_recovery_requested_at"
+                    ]) == current.materialization_recovery_requested_at
+                    assert new_history[0].snapshot_json["materialization_state"] == "pending"
                 with pytest.raises(DBAPIError, match="archival recovery requires one diagnosed deleted verifier attempt"):
                     await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
                         "WHERE id=:id"), {"id": lease.id})
@@ -679,6 +659,41 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 assert next(event.payload for event in events if event.kind == "verifier_end")["result"]["rewards"] == {"passed": 0.0}
                 assert artifact.artifact_metadata["legacy_verifier_archival_recovery"]["error_code"] == "verifier_reward_drift"
             assert len({event.seq for event in events}) == len(events)
+
+        if archival_history_upgrade:
+            async with sessions() as session:
+                lease_before = await session.scalar(text(
+                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id})
+            await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
+            async with sessions() as session:
+                assert await session.scalar(text(
+                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id}) == lease_before
+                trial = await session.get(Trial, trial_id)
+                assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
+                        trial.failure_message, trial.attempt_count) == original_outcome
+                first_history = (await session.execute(text(
+                    "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
+                    "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all()
+            # A rollback/re-upgrade must retain the first audit and never append a duplicate.
+            await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
+            await asyncio.to_thread(command.upgrade, _config(isolated_migration_postgres_url), "head")
+            async with sessions() as session:
+                assert (await session.execute(text(
+                    "SELECT to_jsonb(h) FROM execution_lease_history h WHERE lease_id=:id "
+                    "ORDER BY transition_ordinal"), {"id": lease.id})).scalars().all() == first_history
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                histories = (await session.scalars(select(ServiceExecutionLeaseHistory).where(
+                    ServiceExecutionLeaseHistory.lease_id == lease.id))).all()
+                assert {item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
+                        for item in histories if item.id in histories_before} == histories_before
+                new_history = [item for item in histories if item.id not in histories_before]
+                assert len(new_history) == 1, "Upgrade must observe the already-committed recovery"
+                assert datetime.fromisoformat(new_history[0].snapshot_json[
+                    "materialization_recovery_requested_at"
+                ]) == current.materialization_recovery_requested_at
+                assert new_history[0].snapshot_json["materialization_state"] == "committed"
+                assert new_history[0].changed_at >= current.materialization_committed_at
 
         if legacy_repair:
             from loom_control_plane.service_execution_accounting_repair import repair_accounting
