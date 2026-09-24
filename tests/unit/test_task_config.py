@@ -35,6 +35,23 @@ def test_minimal_config_parses():
     assert cfg.steps == []
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_agent_continuation_round_trip_preserves_legacy_serialization(enabled):
+    agent = AgentDefaults(name="oracle", continue_until_timeout=enabled)
+    payload = agent.model_dump(mode="json")
+    assert AgentDefaults.model_validate(payload).continue_until_timeout is enabled
+    assert ("continue_until_timeout" in payload) is enabled
+    assert AgentDefaults.model_validate_json(agent.model_dump_json()) == agent
+    legacy = AgentDefaults(name="oracle").model_dump(mode="json")
+    assert "continue_until_timeout" not in legacy
+
+
+@pytest.mark.parametrize("value", ["true", "false", 0, 1, None])
+def test_agent_continuation_requires_a_boolean(value):
+    with pytest.raises(ValidationError, match="continue_until_timeout"):
+        AgentDefaults(name="oracle", continue_until_timeout=value)
+
+
 def test_docker_build_inputs_round_trip_without_coercing_values() -> None:
     environment = EnvironmentConfig.model_validate(
         {

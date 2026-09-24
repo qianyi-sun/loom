@@ -217,6 +217,16 @@ private verifier sandbox use the image associated with the frozen task revision.
 Direct-completion cannot use this Dockerfile path. The other existing CPU,
 workspace, networking, verifier and single-step restrictions still apply.
 
+An original `agent.continue_until_timeout = true` declaration is preserved by
+task conversion and supported when the resolved trial agent is `terminus-2`.
+It keeps the same agent session active after completion requests until the
+configured attempt deadline; reaching that deadline is reported as a timeout,
+with the existing partial trajectory and verifier handling. Errors and
+cancellation still stop the attempt. Do not drop the declaration to make an
+unsupported agent pass admission, or submit another model attempt to replace
+an existing original result. Qualify the deployed runtime before acceptance;
+the static compatibility report does not prove installation.
+
 Resubmitting an existing Trial preserves its original task-image links even
 when the TaskSet has since been rebuilt. Submit a new Trial to use the new
 revision. Cancelling a waiting Trial does not cancel a shared image build needed

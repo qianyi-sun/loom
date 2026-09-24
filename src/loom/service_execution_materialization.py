@@ -318,6 +318,8 @@ def automatic_service_execution_rejections(
     env = task.environment
     terminus = trial.agent_name == "terminus-2"
     reasons: list[str] = []
+    if task.agent.continue_until_timeout and not terminus:
+        reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(env.execution_requirements))
     if service_execution_input_binding(source_provenance) is None:
         reasons.append("immutable_task_input_unavailable")

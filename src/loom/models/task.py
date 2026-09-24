@@ -173,6 +173,9 @@ class AgentDefaults(BaseModel):
     model: ModelSpec | None = None
     timeout_sec: float = Field(default=1800, gt=0)
     setup_timeout_sec: float = Field(default=360, gt=0)
+    continue_until_timeout: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: value is False,
+    )
     user: str | int | None = None
     extra_mcp_servers: list[MCPConnection] = []
     skills: list[SkillRef] = []

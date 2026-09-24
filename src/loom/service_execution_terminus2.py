@@ -240,6 +240,7 @@ async def run_terminus2(
         gateway_url=gateway_url,
         workdir=workdir,
         max_turns=max_turns,
+        continue_until_timeout=task_config.agent.continue_until_timeout,
         request_params=dict(trial_config.request_params),
         local_artifact_sink=retain_native_artifacts,
     )

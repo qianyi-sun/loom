@@ -395,11 +395,12 @@ def test_ambiguous_or_conflicting_harbor_resources_are_rejected(environment) -> 
 
 
 @pytest.mark.parametrize("identity", [{"metadata": {"id": "one"}}, {"task": {"name": "one"}}])
-def test_continue_until_timeout_is_retained_for_explicit_rejection(identity) -> None:
+def test_continue_until_timeout_survives_normalization_and_frozen_config(identity) -> None:
     normalized = normalize_terminal_bench_task_toml({**identity, "agent": {"continue_until_timeout": True}})
     assert normalized["agent"]["continue_until_timeout"] is True
-    with pytest.raises(ValidationError, match="continue_until_timeout"):
-        TaskConfig.model_validate(normalized)
+    task = TaskConfig.model_validate(normalized)
+    assert task.agent.continue_until_timeout is True
+    assert TaskConfig.model_validate_json(task.model_dump_json()).agent.continue_until_timeout is True
 
 
 @pytest.mark.parametrize("stamp", [{"version": "1.0"}, {"schema_version": "1.1"}])
