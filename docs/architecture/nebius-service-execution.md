@@ -752,9 +752,10 @@ container layer or expose private verifier dependencies to task mutations.
 For a mutable-directory virtualenv that links to an unchanged image interpreter,
 the task may declare exact `environment.mutable_path_reference_files`, such as
 `["/usr/local/bin/python3.9"]`. This default-empty declaration permits at most
-16 executable regular-file leaves, outside the workdir, mutable directories,
-runtime mounts and private verifier paths. No component of a reference path may
-be a symlink. Source and fresh-verifier SHA-256, size, mode and numeric ownership
+16 executable leaves, outside the workdir, mutable directories,
+runtime mounts and private verifier paths. Ancestors may not be symlinks. Leaves
+are regular files unless explicitly declared as aliases below.
+Source and fresh-verifier SHA-256, size, mode and numeric ownership
 must match before any mutable directory is cleared. Reference inspection is
 bounded to 256 MiB in total. The native file RPC pins each path component without
 following links, reads metadata from the file descriptor, and applies the remaining
@@ -766,8 +767,26 @@ A version-2 mutable manifest binds those fingerprints;
 tasks without references retain version 1. Original link strings and internal
 aliases are preserved, but an external reference must terminate the link chain:
 suffix traversal, external hardlinks and archived entries below links remain
-invalid. This declaration applies only to mutable-directory archives; it does
-not relax workdir snapshot validation or transfer edits to the referenced file.
+invalid. This declaration applies only to mutable-directory archives and never
+transfers edits to the referenced file.
+
+`environment.workspace_reference_files` supplies the same exact-leaf contract
+for the workdir. Its required `artifacts/workspace-references.json` binds the
+workspace archive SHA-256 and root to the reference records. These workspaces
+have a 256 MiB archived/expanded content and 100,000-entry limit. The controller
+captures the manifest after source archive commands finish; the fresh verifier
+must match it before public files are removed and references are checked again
+after extraction.
+
+Both reference groups can use `environment.reference_file_symlinks`, a mapping
+from a declared alias to its literal absolute target or one relative basename.
+The target must be a regular executable in every group containing that alias;
+chains, cycles and protected/transferred paths remain rejected. The native
+`/readlink` RPC pins every ancestor without following links and reads only the
+leaf's bounded literal target. It never follows the alias or calls task-owned
+tools. This permits normal virtualenv interpreter links without rewriting them.
+Empty declarations remain omitted from task serialization, preserving existing
+checksums. Workspace references require the native Terminus execution profile.
 
 The workdir snapshot also replaces public image and bundle contents rather than
 overlaying them, so files and symlinks removed by the agent stay absent during

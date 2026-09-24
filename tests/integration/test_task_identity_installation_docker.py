@@ -332,3 +332,59 @@ ln -s /usr/local/bin/python3.11 /cache/python
     with pytest.raises(WorkspaceSnapshotError, match="reference"):
         await import_mutable_paths(verifier, paths, tmp_path / "snapshot", **options)
     assert (await verifier.exec("cat /cache/baseline")).stdout.strip() == b"untouched"
+
+
+@pytest.mark.parametrize("drift", [None, "alias", "executable"])
+async def test_workspace_venv_preserves_real_image_aliases_and_rejects_drift(sandboxes, tmp_path, drift):
+    from loom.trial.workspace import WorkspaceStagingPolicy
+    from loom.trial.workspace_references import (
+        export_workspace_references,
+        import_workspace_with_references,
+    )
+    from loom.trial.workspace_snapshot import (
+        WorkspaceSnapshotError,
+        _export_workspace_archive,
+        _strip_private_entries,
+    )
+
+    agent, verifier, independent = sandboxes
+    root = PurePosixPath("/app")
+    references = (PurePosixPath("/usr/local/bin/python3"), PurePosixPath("/usr/local/bin/python3.11"))
+    aliases = {"/usr/local/bin/python3": "python3.11"}
+    policy = WorkspaceStagingPolicy(("tests/**",), ("tests/**",), ())
+    created = await agent.exec(
+        "mkdir -p /app/tests && echo private > /app/tests/secret && "
+        "python3 -m venv /app/venv && echo agent-output > /app/answer"
+    )
+    assert created.return_code == 0, created.stderr
+    assert (await agent.exec("readlink /app/venv/bin/python3")).stdout.strip() == b"/usr/local/bin/python3"
+    baseline = await verifier.exec("mkdir -p /app/tests; echo trusted > /app/tests/secret; echo baseline > /app/baseline")
+    assert baseline.return_code == 0, baseline.stderr
+    await agent.stop_processes()
+    archive = tmp_path / "workspace.tar"
+    await _export_workspace_archive(agent, root, archive)
+    _strip_private_entries(archive, policy)
+    await export_workspace_references(agent, archive, root=root, policy=policy,
+                                     reference_files=references, reference_symlinks=aliases)
+    if drift:
+        command = ("ln -sfn /usr/local/bin/python3.11 /usr/local/bin/python3" if drift == "alias"
+                   else "chmod 0700 /usr/local/bin/python3.11")
+        assert (await verifier.exec(command)).return_code == 0
+        with pytest.raises(WorkspaceSnapshotError):
+            await import_workspace_with_references(verifier, archive, root, policy=policy,
+                                                    reference_files=references, reference_symlinks=aliases)
+        result = await verifier.exec("test ! -e /app/venv && test ! -e /app/answer && cat /app/baseline /app/tests/secret")
+        assert result.return_code == 0 and result.stdout.splitlines() == [b"baseline", b"trusted"]
+    else:
+        await import_workspace_with_references(verifier, archive, root, policy=policy,
+                                                reference_files=references, reference_symlinks=aliases)
+        result = await verifier.exec(
+            "set -eu; test ! -e /app/baseline; test \"$(cat /app/tests/secret)\" = trusted; "
+            "test \"$(cat /app/answer)\" = agent-output; "
+            "test \"$(readlink /app/venv/bin/python3)\" = /usr/local/bin/python3; "
+            "test \"$(readlink /usr/local/bin/python3)\" = python3.11; "
+            "/app/venv/bin/python -c 'import sys; assert sys.prefix == \"/app/venv\"; print(\"venv-ok\")'"
+        )
+        assert result.return_code == 0 and result.stdout.strip() == b"venv-ok", result.stderr
+    untouched = await independent.exec("test ! -e /app/venv && test ! -e /app/answer")
+    assert untouched.return_code == 0
