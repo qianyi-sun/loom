@@ -564,7 +564,7 @@ def test_preparation_identifies_final_stage_without_changing_task_python(
     "dockerfile,match",
     [
         ("FROM python:3.13-slim\nRUN cat <<EOF\nFROM ubuntu:24.04\n", "unterminated heredoc"),
-        ("FROM ubuntu:24.04 AS base\nFROM alpine:3.20\n", "Debian/Ubuntu"),
+        ("FROM ubuntu:24.04 AS base\nFROM alpine:3.20\n", "Alpine.*Debian.*bootstrap"),
         ("FROM python:3.13-slim\nSHELL bash -c\n", "SHELL"),
         ("ARG BASE=ubuntu:24.04\nFROM ${BASE}\n", "Debian/Ubuntu"),
         ("FROM node:18-alpine\n", "Debian/Ubuntu"),
@@ -761,7 +761,8 @@ def test_apk_bootstrap_preserves_task_commands_and_reward():
 
 
 @pytest.mark.parametrize('command', ['apk add curl', 'apk add --no-cache --allow-untrusted curl',
-                                     'apk add --no-cache ./curl.apk', 'apk upgrade',
+                                     'apk add --no-cache ./curl.apk', 'apk add --no-cache curl.apk', 'apk add --no-cache curl.apk=1',
+                                     'apk add --no-cache curl.apk-1', 'apk upgrade',
                                      'apk add --no-cache curl; touch /solved'])
 def test_rejects_unknown_apk_bootstrap(command):
     script = SCRIPT.replace('apt-get update\napt-get install -y curl primer3', command)
@@ -796,6 +797,61 @@ def test_rejects_mismatched_bootstrap_manager(tmp_path, base, manager):
         (tmp_path / 'tests/test.sh').write_text(SCRIPT.replace(
             'apt-get update\napt-get install -y curl primer3\n', 'apk add --no-cache curl\n'))
     with pytest.raises(ValueError, match='bootstrap'):
+        prepare_nebius_terminus_image(tmp_path, environment)
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
+    assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
+
+
+@pytest.mark.parametrize('transaction,drift,accepted', [
+    ('(1/2) Installing curl (8.0-r0)', False, True),
+    ('(1/2) Upgrading musl (1.2.5-r0 -> 1.2.5-r1)', False, False),
+    ('(1/2) Downgrading musl (1.2.5-r0 -> 1.2.4-r1)', False, False),
+    ('(1/2) Purging musl (1.2.5-r0)', False, False),
+    ('(1/2) Reinstalling musl (1.2.5-r0)', False, False),
+    ('(1/2) Installing curl (8.0-r0)', True, False),
+])
+def test_alpine_transaction_rejects_changes_to_authored_packages(tmp_path, transaction, drift, accepted):
+    from loom.nebius_terminus_image import _alpine_package_install
+    database = tmp_path / 'installed'
+    database.write_text('P:musl\nV:1.2.5-r0\n\n')
+    called = tmp_path / 'install-called'
+    manager = tmp_path / 'apk'
+    manager.write_text('#!/bin/sh\nset -eu\ncase "$*" in\n'
+                       '*--simulate*) printf "%s\\n" "$LOOM_TEST_TRANSACTION" ;;\n'
+                       '*) touch "$LOOM_TEST_INSTALL_CALLED"; '
+                       'if [ "$LOOM_TEST_DRIFT" = 1 ]; then '
+                       'printf "P:musl\\nV:1.2.5-r1\\n\\n" > "$LOOM_TEST_DB"; fi ;;\nesac\n')
+    manager.chmod(0o755)
+    env = {**os.environ, 'PATH': f"{tmp_path}:{os.environ['PATH']}",
+           'LOOM_TEST_TRANSACTION': transaction, 'LOOM_TEST_INSTALL_CALLED': str(called),
+           'LOOM_TEST_DB': str(database), 'LOOM_TEST_DRIFT': str(int(drift))}
+    command = _alpine_package_install(('curl',)).replace('/lib/apk/db/installed', str(database))
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, env=env)
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert called.exists() is (accepted or drift)
+    if not accepted:
+        assert 'authored package' in result.stderr
+
+
+def test_alpine_rejects_apt_update_even_without_apt_packages(tmp_path):
+    environment = bundle(tmp_path)
+    (tmp_path / 'environment/Dockerfile').write_text('FROM alpine:3.20\n')
+    (tmp_path / 'tests/test.sh').write_text(SCRIPT.replace(
+        'apt-get install -y curl primer3', 'apk add --no-cache curl'))
+    with pytest.raises(ValueError, match=r'Alpine.*Debian.*bootstrap'):
+        prepare_nebius_terminus_image(tmp_path, environment)
+    assert not (tmp_path / OFFLINE_SCRIPT).exists()
+
+
+@pytest.mark.parametrize('wrapped', ['if false; then\napk add --no-cache wget\nfi',
+                                   'bootstrap() {\napk add --no-cache wget\n}',
+                                   '(\napk add --no-cache wget\n)',
+                                   'for value in a; do\napk add --no-cache wget\ndone'])
+def test_rejects_apk_in_unreviewed_control_flow_before_writing(tmp_path, wrapped):
+    environment = bundle(tmp_path)
+    (tmp_path / 'environment/Dockerfile').write_text('FROM alpine:3.20\n')
+    (tmp_path / 'tests/test.sh').write_text(wrapped + '\nuvx --with pytest==8.4.1 pytest /tests/test_state.py\n')
+    with pytest.raises(ValueError, match=r'APK.*unconditional preamble'):
         prepare_nebius_terminus_image(tmp_path, environment)
     assert not (tmp_path / OFFLINE_SCRIPT).exists()
     assert not (tmp_path / 'environment/Dockerfile.loom-nebius').exists()
