@@ -338,7 +338,7 @@ Prepare `NEBIUS_INGRESS_INSTALLATION_JSON` as non-secret protected configuration
   "certificate_config": "/home/operator/.loom/nebius-certificates/state/installation.json",
   "kubeconfig": "/home/operator/.kube/approved-nebius-config",
   "kubectl": "/usr/local/bin/kubectl",
-  "cluster_id": "<approved mk8s identifier>",
+  "cluster_id": "mk8scluster-<approved identifier suffix>",
   "api_server": "https://<approved API endpoint>",
   "ingress_class": "loom-shared",
   "image": "cr.<region>.nebius.cloud/<registry>/loom-shared-ingress@sha256:3429c14149401de2ac82fc72ddc6a92642332b90deb3012301ff211b9d2d0f18",
@@ -354,7 +354,9 @@ Prepare `NEBIUS_INGRESS_INSTALLATION_JSON` as non-secret protected configuration
 }
 ```
 
-Resolve placeholders from protected readback, not historical examples. The
+Resolve placeholders from protected readback, not historical examples. Nebius
+managed Kubernetes cluster IDs use `mk8scluster-`, not `mk8s-`; malformed IDs
+are rejected before private tooling is installed. The
 application candidate must already contain `loom.nebius_rollout_guard observe`;
 an older candidate fails before acquiring a pause. The live ConfigMap remains
 the configuration authority: the installer reads it freshly and checks candidate,

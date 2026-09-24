@@ -332,7 +332,20 @@ def _load_client(container: object) -> tuple[object, object, object]:
                         raise
                     last_error = "kube-system namespace bootstrap pending"
                 else:
-                    return client, core, batch
+                    # Namespace discovery precedes ServiceCIDR allocator
+                    # initialization. On a fresh disposable server, its own
+                    # bootstrap Service is proof that allocation has succeeded.
+                    # Never probe readiness by retrying a test Service write.
+                    try:
+                        service = core.read_namespaced_service("kubernetes", "default", _request_timeout=5)
+                    except client.exceptions.ApiException as exc:
+                        if exc.status != 404:
+                            raise
+                        last_error = "bootstrap Service allocation pending"
+                    else:
+                        if service.spec.cluster_ip not in (None, "", "None"):
+                            return client, core, batch
+                        last_error = "bootstrap Service has no allocated ClusterIP"
         time.sleep(1)
     raise AssertionError(f"disposable k3s did not become ready: {last_error}")
 

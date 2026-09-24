@@ -66,11 +66,11 @@ async def test_signal_and_finalization_budget_do_not_grant_unsafe_handoff(
     (tmp_path / "instruction.md").write_text("work")
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
-    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.05))
-    # The successful handoff performs real archive IO on worker threads. Give
-    # it scheduling headroom under the full suite; expiry cases keep the short
-    # budget so they still prove the grace period cannot restart.
-    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "2" if mode == "deadline_signal" else "0.1")
+    # An explicit early signal must precede the deadline even on a busy runner.
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + (5 if mode == "early_cancel" else 0.05)))
+    # Successful handoff and early-cancel cleanup both perform real archive IO
+    # on worker threads. Only expiry cases require a short grace budget.
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "2" if mode in {"deadline_signal", "early_cancel"} else "0.1")
     callbacks = []
     loop = asyncio.get_running_loop()
     monkeypatch.setattr(loop, "add_signal_handler", lambda _, callback: callbacks.append(callback))
@@ -78,6 +78,10 @@ async def test_signal_and_finalization_budget_do_not_grant_unsafe_handoff(
 
     class SignalSandbox(Sandbox):
         async def export_workspace_archive(self, src, dst):
+            if mode == "early_cancel":
+                # Model archive-thread scheduling delay seen in the full CI
+                # suite; early cancellation must not become a deadline test.
+                await asyncio.sleep(0.2)
             if mode in {"deadline_signal", "second_signal"}:
                 callbacks[0]()  # Same deadline signal must not interrupt cleanup.
             if mode == "second_signal":
