@@ -110,6 +110,22 @@ an empty historical message.
 
 ## Attempt deadline and step-credential lifecycle (#1748)
 
+Tasks may declare `agent.continue_until_timeout = true` to keep the selected
+Terminus-2 session working until its existing absolute attempt deadline. The
+default is `false`; default values are omitted from serialized task configs so
+existing task checksums remain stable. The frozen task retains a true declaration.
+Admission checks the resolved trial agent, which may differ from the source
+task's default agent. Other runtimes reject the policy as incompatible.
+
+For this policy, Loom disables its ordinary 50-turn limit and adapts the pinned
+Harbor instance's completion confirmation. Completion requests remain recorded
+as real `mark_task_complete` actions, but do not return from the session. The
+adaptation is local to that instance; it does not restart Harbor or create a
+second attempt. Deadline expiry remains a timeout with partial evidence, while
+cancellation, runtime errors and existing resource limits remain terminal.
+The shared worker/local trial pipeline and native Nebius adapter both carry
+the task declaration into this runtime. An absolute attempt deadline is required.
+
 > **Evidence boundary:** this section defines the repository contract. It does
 > not prove that a particular environment has deployed the change, that its
 > worker/Gateway/Control Plane images have the same candidate, or that the

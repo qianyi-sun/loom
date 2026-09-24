@@ -54,6 +54,10 @@ class AgentSetupTimeoutError(AgentError):
     """`agent.setup()` exceeded the configured setup timeout."""
 
 
+class AgentContinuationError(AgentError):
+    """The selected runtime cannot honor the task's continuation policy."""
+
+
 # Verifier framework ───────────────────────────────────────────────────────────
 
 
@@ -414,6 +418,11 @@ def classify_failure(exc: BaseException) -> tuple[FailureReason, str | None]:
     if transport_result is not None:
         return transport_result
 
+    if isinstance(exc, AgentContinuationError):
+        return FailureReason.TASK_COMPATIBILITY, (
+            "agent.continue_until_timeout requires the pinned Terminus-2 runtime "
+            "and an absolute attempt deadline."
+        )
     if isinstance(exc, AgentSetupTimeoutError):
         return FailureReason.AGENT_ERROR, None
     # #1169: previously every DriverError was reported with a `None` message, so

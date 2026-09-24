@@ -29,7 +29,7 @@ from loom.agent.terminus2.model_switch import (
 from loom.agent.terminus2.provenance import HARBOR_COMPAT_SHA, LOOM_BRIDGE_REVISION
 from loom.attempt_deadline import AttemptDeadline, AttemptDeadlineExceededError
 from loom.driver.base import Driver
-from loom.errors import AgentError, exception_info
+from loom.errors import AgentContinuationError, AgentError, exception_info
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import (
     Terminus2EpisodeCheckpointEvent,
@@ -439,6 +439,30 @@ class _RouterEventSink:
         )
 
 
+def _install_continuation_policy(agent: Any, deadline: AttemptDeadline) -> None:
+    """Keep the pinned Harbor session running after real completion actions.
+
+    Harbor remembers a completion request and returns on the next one. Reset
+    only that instance's confirmation state: its parser, commands and recorded
+    mark_task_complete actions remain untouched. The existing supervisor owns
+    the absolute deadline, cancellation and terminal errors.
+    """
+    if not callable(getattr(agent, "_get_completion_confirmation_message", None)):
+        raise AgentContinuationError("Harbor runtime does not support continue_until_timeout")
+
+    def continue_message(terminal_output: str) -> str:
+        remaining = deadline.require_remaining()
+        agent._pending_completion = False
+        return (
+            f"Current terminal state:\n{terminal_output}\n\n"
+            "This task declares agent.continue_until_timeout=true. "
+            f"Continue checking and improving your work for the remaining {remaining:.1f} seconds. "
+            "A completion request does not end this attempt; its deadline remains unchanged."
+        )
+
+    agent._get_completion_confirmation_message = continue_message
+
+
 @dataclass
 class LoomTerminus2Runtime:
     """Worker-side wrapper around pinned Harbor ``Terminus2``."""
@@ -458,6 +482,7 @@ class LoomTerminus2Runtime:
     multi_model: MultiModelSwitchSpec | None = None
     model_switch_plan: dict[str, Any] | None = None
     max_turns: int = 50
+    continue_until_timeout: bool = False
     workdir: PurePosixPath = field(default_factory=lambda: PurePosixPath("/workspace"))
     step_token_ttl_sec: int = 1800
     local_artifact_sink: Callable[[Path], None] | None = field(default=None, repr=False)
@@ -495,6 +520,8 @@ class LoomTerminus2Runtime:
         step_id: str,
     ) -> None:
         del mcp, skills_dir
+        if self.continue_until_timeout and self._attempt_deadline is None:
+            raise AgentContinuationError("continue_until_timeout requires an absolute attempt deadline")
         terminus2_cls, agent_context_cls = _import_terminus2()
 
         if self._attempt_deadline is None:
@@ -593,13 +620,16 @@ class LoomTerminus2Runtime:
         agent = terminus2_cls(
             logs_dir=logs_root,
             model_name=_harbor_model_name(self.model),
-            max_turns=self.max_turns,
+            max_turns=None if self.continue_until_timeout else self.max_turns,
             api_base=api_base,
             session_id=str(self.trial_id),
             record_terminal_session=True,
             enable_summarize=False,
             llm_kwargs={**sanitize_request_extras(self.request_params), "api_key": step_token},
         )
+        if self.continue_until_timeout:
+            assert self._attempt_deadline is not None
+            _install_continuation_policy(agent, self._attempt_deadline)
         # Student LiteLLM already received the step JWT via constructor kwargs.
         # Multi-model invariant (all policies): never redact agent._llm_kwargs
         # before install_role_router. Teacher construction copies gateway auth
@@ -785,7 +815,6 @@ class LoomTerminus2Runtime:
         trajectory_path = logs_root / "trajectory.json"
         completeness = "full"
         poll_stop = asyncio.Event()
-        bridge_error: CheckpointBridgeError | None = None
 
         last_checkpointed_episode = 0
 
@@ -838,34 +867,48 @@ class LoomTerminus2Runtime:
             )
 
         async def _poll_checkpoints() -> None:
-            nonlocal bridge_error
             while not poll_stop.is_set():
-                try:
-                    _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-                    await bridge.sync_trajectory_file(
-                        trajectory_path,
-                        allow_incomplete=True,
-                    )
-                    await _write_episode_checkpoint()
-                except CheckpointBridgeError as exc:
-                    bridge_error = exc
-                    poll_stop.set()
-                    return
-                except (AttemptDeadlineExceededError, AttemptTrajectoryFencedError):
-                    poll_stop.set()
-                    return
+                _require_attempt_mutation_active(trajectory, self._attempt_deadline)
+                await bridge.sync_trajectory_file(
+                    trajectory_path,
+                    allow_incomplete=True,
+                )
+                await _write_episode_checkpoint()
                 try:
                     await asyncio.wait_for(poll_stop.wait(), timeout=0.5)
                 except TimeoutError:
                     continue
 
-        poll_task = asyncio.create_task(_poll_checkpoints())
-
-        try:
+        async def _run_session() -> None:
             await _reset_harbor_tmux_session(env)
             await agent.setup(harbor_env)
             _install_tmux_session_alive_guard(agent)
             await agent.run(instruction, harbor_env, context)
+
+        async def _supervise_session() -> None:
+            poll_task = asyncio.create_task(_poll_checkpoints())
+            session_task = asyncio.create_task(_run_session())
+            try:
+                done, _ = await asyncio.wait(
+                    (poll_task, session_task), return_when=asyncio.FIRST_COMPLETED,
+                )
+                if poll_task in done:
+                    # Persistence/resource failures are terminal while Harbor
+                    # is running, not deferred until its next completion.
+                    poll_task.result()
+                await session_task
+                if poll_task.done():
+                    poll_task.result()
+            finally:
+                poll_stop.set()
+                for task in (poll_task, session_task):
+                    if not task.done():
+                        task.cancel()
+                # Never leave a session or writer running after this attempt.
+                await asyncio.gather(poll_task, session_task, return_exceptions=True)
+
+        try:
+            await _supervise_session()
         except asyncio.CancelledError:
             completeness = "partial"
             try:
@@ -890,10 +933,6 @@ class LoomTerminus2Runtime:
             info = exception_info(exc)
             raise AgentError(f"{info.exception_type}: {info.exception_message}") from exc
         finally:
-            poll_stop.set()
-            await poll_task
-            if bridge_error is not None:
-                raise AgentError(str(bridge_error)) from bridge_error
             try:
                 _require_attempt_mutation_active(trajectory, self._attempt_deadline)
                 await bridge.sync_trajectory_file(

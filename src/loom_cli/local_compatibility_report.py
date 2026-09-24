@@ -219,11 +219,6 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                   "supports_task_identity")
     if agent.get("user") is not None:
         add("agent_identity", "agent.user", "Custom agent identity is not admitted by this profile.", 2049)
-    if agent.get("continue_until_timeout") is not None:
-        report.add("runtime_capability", "agent_completion_policy",
-                   "The declared continue_until_timeout agent behavior has no supported Loom execution contract.",
-                   "Retain this task as blocked until the agent completion policy is supported; do not drop the declaration.",
-                   source=f"{report.source_location}#agent.continue_until_timeout")
     if verifier.get("user") is not None:
         readiness("verifier_identity", "verifier.user",
                   "The verifier identity declaration is preserved; execution requires a qualified task identity runtime.",

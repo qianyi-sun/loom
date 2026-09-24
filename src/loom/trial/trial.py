@@ -17,6 +17,7 @@ from loom.agent.base import AgentRuntime, InBoxAgentRuntime
 from loom.agent.oracle import OracleAgent
 from loom.driver.base import Driver, StartOptions
 from loom.errors import (
+    AgentContinuationError,
     classify_failure,
     classify_failure_message,
     is_platform_setup_agent_failure,
@@ -213,6 +214,12 @@ class Trial:
             async with writer:
                 driver_started = False
                 try:
+                    from loom.agent.terminus2.runtime import LoomTerminus2Runtime
+
+                    if isinstance(self.ctx.agent, LoomTerminus2Runtime):
+                        self.ctx.agent.continue_until_timeout = self.ctx.task_config.agent.continue_until_timeout
+                    elif self.ctx.task_config.agent.continue_until_timeout:
+                        raise AgentContinuationError("continue_until_timeout requires the Terminus-2 runtime")
                     # Bug 1 fix: driver.start() + TrialStartEvent must land
                     # inside the broad-Exception catch so ENV_START_FAILURE
                     # (DriverError) becomes a classified TrialResult instead
