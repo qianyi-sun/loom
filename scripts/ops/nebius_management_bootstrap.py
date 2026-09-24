@@ -190,6 +190,8 @@ def bootstrap_management(*, binding: BootstrapBinding, api: BootstrapAPI, state_
                     for name in ("initialized.json", "material.json")
                 ):
                     raise BootstrapError("management material recovery evidence missing; preserve bootstrap journal")
+            elif material.exists() or material.is_symlink():
+                raise BootstrapError("untracked management material state; refusing adoption")
             if record["stage"] == "namespace_prepared":
                 if api.get_namespace() is not None:
                     raise BootstrapError("untracked management namespace; refusing adoption")
@@ -206,8 +208,6 @@ def bootstrap_management(*, binding: BootstrapBinding, api: BootstrapAPI, state_
                 private_state._atomic_json(path, record)
             material_binding = ManagementBinding(binding.installation_id, binding.namespace, uid, binding.kube_system_uid)
             if record["stage"] == "namespace_created":
-                if material.exists() or material.is_symlink():
-                    raise BootstrapError("untracked management material state; refusing adoption")
                 record["stage"] = "material_intent"
                 private_state._atomic_json(path, record)
             with api.material_api(material_binding) as material_api:

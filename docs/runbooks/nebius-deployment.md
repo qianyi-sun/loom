@@ -627,6 +627,18 @@ namespace-adoption procedure. Cloud/Kubernetes/publication/backup credentials
 remain separate inputs. This internal primitive has no shared-cluster CLI and
 does not yet connect a protected management installation or prove readiness.
 
+The `nebius_management_bootstrap` primitive composes create-only namespace setup
+with that generated-material delivery. It journals the namespace create intent,
+freezes the observed namespace UID, and checks installation ownership and restricted
+Pod policy before each Secret write. Lost create replies permit readback only;
+untracked namespaces, conflicting recovery state, and missing material after
+delivery intent block rather than authorize adoption or regeneration. Retain its
+outer journal as well as the nested material directory. Independent installation
+evidence must still detect loss of the entire state tree. Its receipt means only
+`management_bootstrapped`, not an installed API: scoped external credentials,
+runtime authority, database/migration, backup, HTTPS readiness and protected
+workflow integration remain installer responsibilities.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
