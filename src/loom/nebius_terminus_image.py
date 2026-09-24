@@ -22,7 +22,7 @@ _PACKAGE = re.compile(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9.+:~_-]+)?\Z")
 _REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?\Z")
 _DISTRIBUTION_SUFFIXES = (".whl", ".zip", ".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz", ".txz")
 _UV_INSTALL = re.compile(
-    r"curl -LsSf https://astral\.sh/uv/\d+\.\d+\.\d+/install\.sh\s*\|\s*sh\s*\Z",
+    r"curl -LsSf https://astral\.sh/uv/(?:\d+\.\d+\.\d+/)?install\.sh\s*\|\s*sh\s*\Z",
 )
 _UV_SOURCE = re.compile(
     r'(?:source\s+(?:"\$HOME/\.local/bin/env"|\$HOME/\.local/bin/env)'

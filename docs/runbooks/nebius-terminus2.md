@@ -358,11 +358,11 @@ during image preparation. The image records installed versions in
 environment offline. A future rebuild may resolve different auxiliary versions.
 Version ranges, arbitrary URLs, local paths and shell expressions are rejected.
 Recognized
-installer forms include apt's `-qq` and pip's `--no-cache-dir` flags, pinned uv
+installer forms include apt's `-qq` and pip's `--no-cache-dir` flags, recognized uv
 installation followed by `source "$HOME/.local/bin/env"` or
 `export PATH="$HOME/.local/bin:$PATH"`, and simple missing-command guards for
 curl or uv. A curl guard may install only curl; a uv guard may install curl and
-must contain the complete pinned uv installation and activation. Task commands,
+must contain the complete recognized uv installation and activation. Task commands,
 nested branches, or other conditional packages inside that guard require
 explicit adaptation. A removed guard leaves a shell no-op to preserve any
 enclosing branch or function. The converter does not evaluate arbitrary shell
@@ -396,10 +396,17 @@ alone is not proof that an arbitrary task image can execute. Validate a newly
 adapted image through sandbox upload, agent setup and offline verification
 before a model batch. This adapter supports Debian/Ubuntu final images and the
 Harbor version-pinned `curl -LsSf https://astral.sh/uv/X.Y.Z/install.sh | sh`
+or exact canonical `curl -LsSf https://astral.sh/uv/install.sh | sh` installer,
 and preinstalled `uvx -p ... -w package==version ... pytest` (including the
 equivalent `--python` and `--with` options),
 pip with exactly pinned pytest plus pytest/python-module invocations, and explicit uv
-venv/activation/pip/run forms. Combined apt update/install commands are handled
+venv/activation/pip/run forms. Both recognized installer forms relocate into
+image preparation using Loom's pinned uv provisioner; the canonical URL is not
+fetched during verification. Original scripts remain available, Python and
+dependency declarations are retained, and the derived Dockerfile records the
+provisioner version. This is an explicit bootstrap conversion. Altered hosts,
+query strings, fragments and appended installer commands remain unsupported.
+Combined apt update/install commands are handled
 only when their package list is explicit. Supported derived bases include
 official Debian-based Python and numeric Node tags (full or slim, including
 Bullseye, Bookworm and Trixie variants), and numeric `rootproject/root` versions
