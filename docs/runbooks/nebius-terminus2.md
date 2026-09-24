@@ -409,6 +409,11 @@ The build uses Loom's pinned uv provisioner and installs an explicitly declared
 verifier Python under `/opt/verifier-python`, preserving the task interpreter
 and PATH even when the task image uses an older Python. Incompatible dependency
 pins still fail the image build; they are never silently omitted or relaxed.
+Authored HOME caches are retained because they can contain required offline
+dependencies. Only the verifier preparation commands disable uv caching; that
+setting does not change the task's runtime environment. Declare any cache or
+virtualenv state the agent changes outside its workdir as a mutable path when
+the private verifier needs the resulting state.
 
 Task users are container-local declarations. With a deployment profile that
 explicitly enables `supports_task_identity`, Terminus accepts `environment.user`

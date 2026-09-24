@@ -443,13 +443,15 @@ def _preparation_dockerfile(
             f"mkdir -p /tests /logs/verifier /loom/verifier && "
             f"chown -R {uid}:{gid} /tests /logs/verifier /loom/verifier"
         )
-    preparation = run(f"""apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
+    # Authored caches may be offline task inputs (for example Poetry wheels).
+    # Disable only our uv download cache; never delete the image's HOME cache.
+    preparation = run(f"""export UV_NO_CACHE=1 && apt-get update -qq && apt-get install -y --no-install-recommends {" ".join(packages)} && \\
     {python_setup} && \\
     loom-nebius-uv pip install --python /opt/verifier/bin/python {requirements} && \\
     loom-nebius-uv pip freeze --python /opt/verifier/bin/python > /opt/verifier/resolved-requirements.txt && \\
     {identity_setup} && \\
     {workspace_setup} && \\
-    rm -rf /var/lib/apt/lists/* /root/.cache""")
+    rm -rf /var/lib/apt/lists/*""")
     return (
         original.rstrip()
         + "\n\n# Loom Nebius: build-only harness/verifier preparation; original task above.\n"

@@ -19,6 +19,74 @@ from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_pat
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(180)]
 
 
+@pytest.mark.parametrize("custom_shell", [False, True])
+def test_image_preparation_preserves_authored_package_caches(tmp_path, custom_shell):
+    """Execute generated preparation; only external package downloads are fixtures."""
+    import docker
+
+    from loom.dockerfile_instructions import dockerfile_instructions
+    from loom.nebius_terminus_image import prepare_nebius_terminus_image
+
+    (tmp_path / "environment").mkdir()
+    (tmp_path / "tests").mkdir()
+    source = "FROM python:3.11-slim\n"
+    if custom_shell:
+        source += 'SHELL ["/bin/bash", "-e", "-c"]\n'
+    (tmp_path / "environment/Dockerfile").write_text(source)
+    (tmp_path / "tests/test.sh").write_text("uvx --with pytest==8.4.1 pytest /tests/test.py\n")
+    environment = {"dockerfile": "environment/Dockerfile", "docker_build_context": "environment",
+                   "workdir": "/app", "user": "root", "environment": {"HOME": "/root"}}
+    prepare_nebius_terminus_image(tmp_path, environment)
+    derived = (tmp_path / environment["dockerfile"]).read_text()
+    runs = [item.arguments for item in dockerfile_instructions(derived) if item.keyword == "RUN"]
+    assert len(runs) == 1
+    argv = json.loads(runs[0]) if custom_shell else ["/bin/sh", "-c", runs[0]]
+    (tmp_path / "prepare.json").write_text(json.dumps(argv))
+    # Keep filesystem and shell effects real. These two network installers are
+    # replaced at their executable boundary so the regression runs offline.
+    (tmp_path / "apt-get").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "loom-nebius-uv").write_text("""#!/bin/sh
+set -eu
+printf '%s\\n' "${UV_NO_CACHE-unset}" >> /tmp/verifier-cache-policy
+case "$1" in
+  venv) mkdir -p /opt/verifier/bin ;;
+  pip) test "$2" = install || test "$2" = freeze ;;
+  *) exit 2 ;;
+esac
+""")
+    for name in ("apt-get", "loom-nebius-uv"):
+        (tmp_path / name).chmod(0o755)
+    script = """import json, os, pathlib, subprocess
+cache = pathlib.Path('/root/.cache')
+for name in ('pypoetry/artifacts/wheel', 'pip/wheel', 'uv/task-owned'):
+    path = cache / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'original offline dependency')
+    path.chmod(0o640)
+subprocess.run(json.loads(pathlib.Path('/fixture/prepare.json').read_text()), check=True,
+               env={**os.environ, 'PATH': '/fixture:' + os.environ['PATH']})
+for path in (cache/'pypoetry/artifacts/wheel', cache/'pip/wheel', cache/'uv/task-owned'):
+    assert path.is_file(), f'preparation deleted authored cache: {path}'
+    assert path.read_bytes() == b'original offline dependency'
+    assert path.stat().st_mode & 0o777 == 0o640
+assert pathlib.Path('/tmp/verifier-cache-policy').read_text().splitlines() == ['1', '1', '1']
+assert 'UV_NO_CACHE' not in os.environ
+print('authored caches preserved; verifier downloads uncached')
+"""
+    client = docker.from_env()
+    try:
+        output = client.containers.run(
+            "python:3.11-slim", ["-c", script], entrypoint="python", remove=True,
+            network_mode="none", cap_drop=["ALL"], cap_add=list(ROOT_INSTALL_CAPABILITIES),
+            security_opt=["no-new-privileges"], mem_limit="256m", nano_cpus=250_000_000,
+            environment={"HOME": "/root"},
+            volumes={str(tmp_path): {"bind": "/fixture", "mode": "ro"}},
+        )
+        assert output.strip() == b"authored caches preserved; verifier downloads uncached"
+    finally:
+        client.close()
+
+
 @pytest.fixture(scope="module")
 def native_binary(tmp_path_factory):
     directory = tmp_path_factory.mktemp("identity-runtime")
