@@ -274,6 +274,8 @@ source_paths = [
   "src/loom/driver/task_image.py",
   "src/loom/execution_architecture.py",
   "src/loom/execution_contract.py",
+  "src/loom/execution_diagnosis_store.py",
+  "src/loom/execution_failure_diagnosis.py",
   "src/loom/execution_image_admission.py",
   "src/loom/execution_requirements.py",
   "src/loom/execution_runtime_contract.py",

@@ -1047,6 +1047,19 @@ def test_task_declaration_changes_select_actuator_image(module: str) -> None:
     assert any(item["image"] == "execution-actuator" for item in selected)
 
 
+@pytest.mark.parametrize("module", ["execution_diagnosis_store", "execution_failure_diagnosis"])
+def test_native_diagnosis_changes_select_actuator_image(module: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest,
+        changed_paths=(f"src/loom/{module}.py",),
+        force_all=False,
+        image_set="nebius",
+        fallback_all=True,
+    )
+    assert any(item["image"] == "execution-actuator" for item in selected)
+
+
 
 
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:

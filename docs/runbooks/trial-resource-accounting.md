@@ -75,6 +75,12 @@ Exit 137 alone is insufficient. A replacement container's OOM cannot reclassify
 an earlier failure, and subsequent cleanup errors cannot overwrite a confirmed
 cause. Terminal outcomes and already-produced artifacts are preserved.
 
+The execution-actuator image includes the diagnosis store and its classifier.
+These modules are loaded when execution observations are recorded, so importing
+the service entrypoint alone does not verify their availability. The image build
+also imports the diagnosis store and its dependencies without opening a database
+connection. A missing module fails the build before publication.
+
 `GET /api/v1/trials/{id}/debug` includes `execution_failure` with stage, role,
 incarnation, termination/start times, exit code, effective limits and supporting
 event ordinal. The diagnosis report used by the CLI and Web includes the same
