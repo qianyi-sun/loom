@@ -31,6 +31,9 @@ from scripts.ops.nebius_ingress_operation import (
     rollback_ingress,
 )
 from scripts.ops.nebius_ingress_rollout import build_wheels
+from scripts.ops.nebius_ingress_stage import _snapshot as staged_snapshot
+
+from loom.nebius_platform_render import _service
 
 from tests.cluster.test_nebius_shared_ingress import (
     PYTHON,
@@ -58,6 +61,53 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 @pytest.fixture(autouse=True)
 def live_certificate_clock(monkeypatch):
     monkeypatch.setattr(certificate_material, "NOW", datetime.now(UTC))
+
+
+@pytest.mark.timeout(180)
+def test_origin_readback_survives_ordinary_application_apply(tmp_path, monkeypatch):
+    """kubectl bookkeeping is not backend drift; routing changes still are."""
+    from kubernetes import client
+
+    container = _start_k3s(ephemeral_storage_floor="2Gi")
+    try:
+        _, core, _ = _load_client(container)
+        namespace = "ingress-origin"
+        ns = core.create_namespace(client.V1Namespace(metadata=client.V1ObjectMeta(name=namespace)))
+        context = yaml.safe_load(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output)
+        endpoint = "https://127.0.0.1:" + str(container.get_exposed_port(6443))
+        context["clusters"][0]["cluster"]["server"] = endpoint
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text(yaml.safe_dump(context))
+        kubeconfig.chmod(0o600)
+        binding = TLSBinding(str(uuid4()), str(uuid4()), namespace, ns.metadata.uid,
+                             core.read_namespace("kube-system").metadata.uid,
+                             "dev.example.test", "management.example.test")
+        api = LiveIngressAPI(kubeconfig, binding=binding, executable=Path(shutil.which("kubectl")),
+                             candidate="a" * 40, cluster_id="mk8scluster-test", api_server=endpoint,
+                             ingress_class="loom-shared", image="unused-readback-only")
+        # This is the same Service emitted by the shared installer and ordinary
+        # platform renderer; only initial ingress ownership is decorated here.
+        ordinary = _service("loom-web-origin", namespace, 443, 8443)
+        ordinary["spec"]["selector"] = {"app": "loom-web"}
+        initial = json.loads(json.dumps(ordinary))
+        initial["metadata"].setdefault("labels", {})["loom.nebius/ingress-installation-id"] = binding.installation_id
+        initial["metadata"]["annotations"] = {"loom.nebius/ingress-stage-id": str(uuid4())}
+        _run(container, "kubectl", "create", "-f", "-", payload=json.dumps(initial))
+        before = api._get(["get", "service", "loom-web-origin", "-n", namespace])
+        origin = {"uid": before["metadata"]["uid"], "observed": staged_snapshot(before)}
+        _run(container, "kubectl", "apply", "-f", "-", payload=json.dumps(ordinary))
+        after = api._get(["get", "service", "loom-web-origin", "-n", namespace])
+        assert "kubectl.kubernetes.io/last-applied-configuration" in after["metadata"]["annotations"]
+        assert after["spec"] == before["spec"] and after["metadata"]["uid"] == origin["uid"]
+        # Only skip sockets: the full production ownership readback uses real
+        # kubectl/API responses. Composed TLS proof is exercised below.
+        monkeypatch.setattr(api, "_forward_legacy", lambda subject, port, verify: verify())
+        api.probe_original_backend(origin)
+        core.patch_namespaced_service("loom-web-origin", namespace, {"spec": {"selector": {"app": "foreign"}}})
+        with pytest.raises(OperationError, match="differs from staged ownership"):
+            api.probe_original_backend(origin)
+    finally:
+        container.stop()
 
 
 @pytest.mark.timeout(180)
