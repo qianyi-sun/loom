@@ -144,6 +144,18 @@ def test_application_manager_can_manage_apps_but_not_shared_or_legacy_resources(
             assert http.post(local + "/serviceaccounts/loom-platform/token", json={
                 "apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest", "spec": {"audiences": []},
             }).status_code == 403
+            legacy_token = {"apiVersion": "v1", "kind": "Secret", "metadata": {
+                "name": "legacy-token", "annotations": {"kubernetes.io/service-account.name": "loom-platform"},
+            }, "type": "kubernetes.io/service-account-token"}
+            denied = http.post(local + "/secrets?dryRun=All", json=legacy_token)
+            assert denied.status_code == 403, denied.status_code
+            # An operator-created old token must not be mutable into another
+            # issuance by the manager either. No token is printed or consumed.
+            core.create_namespaced_secret("loom-dev-alice", legacy_token)
+            denied = http.patch(local + "/secrets/legacy-token?dryRun=All",
+                                json={"metadata": {"annotations": {"probe": "changed"}}},
+                                headers={"Content-Type": "application/merge-patch+json"})
+            assert denied.status_code == 403, denied.status_code
             deployments = "/apis/apps/v1/namespaces/loom-dev-alice/deployments"
             for name in ("loom-service", "loom-web"):
                 doc = named(rendered, "Deployment", name)

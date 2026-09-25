@@ -82,6 +82,7 @@ def test_application_authority_is_minimal_and_admission_precedes_bootstrap(platf
     assert [doc["kind"] for doc in docs] == [
         "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
         "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
+        "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
         "ClusterRole", "ClusterRole", "ClusterRoleBinding",
     ]
     roles = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "ClusterRole"}
