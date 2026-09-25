@@ -101,8 +101,8 @@ readiness: their caller must qualify the release and shared binding first.
 
 The API selects `api_only`, the application session audience and shared CP/Gateway
 endpoints. Namespace-local Secrets supply its individually revocable database
-login and CA (`loom-application-db`), object access (`loom-application-storage`),
-and the **shared** encryption keyring (`loom-application-auth`); the renderer does
+login and CA (`loom-application-db-…`), object access (`loom-application-storage-…`),
+and the **shared** encryption keyring (`loom-application-auth-…`); the renderer does
 not create those Secrets. It supplies no admin/worker/batch-runner/JWT-signing or
 backup credentials and no workload Kubernetes permissions. The static frontend
 receives no secrets. Developer-controlled backend code still has trusted
@@ -287,8 +287,8 @@ request digest and exact UID/resourceVersion preconditions before dispatch. It
 never stores Secret bodies in this table. Secret request digests are appropriate
 only for high-entropy managed material, not guessable credentials. Targets are
 limited to frozen application manifest names, Secret names referenced by those
-Deployments' environment/CA-volume bindings,
-the fixed retirement quota, and exact-identity Pod deletion in the application
+Deployments' environment/CA-volume bindings, the fixed retirement quota, and
+exact-identity Pod deletion in the application
 namespace. Namespace and RoleBinding identities remain create-only.
 
 Effect keys have immutable replay semantics. Within each operation, only one
