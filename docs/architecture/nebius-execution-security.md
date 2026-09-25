@@ -39,6 +39,11 @@ root private containers add `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID
 and `KILL` after dropping all capabilities; they retain no-new-privileges and
 private PID namespaces. This supports package installation and cleanup of
 task descendants that drop UID, without host/device/kernel privileges.
+Each private sandbox receives its own writable `/etc/hosts` and
+`/etc/resolv.conf` files. The trusted materializer copies the Pod's initial files
+into that sandbox's socket `emptyDir` before task processes start; exact file
+mounts replace the container runtime's potentially shared network files.
+Task changes cannot alter the controller's or independent verifier's copies.
 Admission cannot infer arbitrary named users from image passwd metadata.
 An older runtime profile defaults to rejecting this extension; enabling it
 requires a compatible runtime and the explicitly target-bound

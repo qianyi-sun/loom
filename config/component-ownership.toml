@@ -867,6 +867,7 @@ exclude_paths = [
   "tests/integration/test_workspace_acls_docker.py",
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_network_files_docker.py",
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
   "tests/integrations/behavior/**/*.py",
@@ -925,6 +926,7 @@ include_paths = [
   "tests/integration/test_workspace_acls_docker.py",
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
+  "tests/integration/test_task_network_files_docker.py",
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
 ]

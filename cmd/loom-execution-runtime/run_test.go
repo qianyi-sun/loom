@@ -312,6 +312,10 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 	planPath := filepath.Join(destination, "plan.json")
 	sandboxPath := filepath.Join(destination, "sandbox")
 	sandboxSource := filepath.Join(destination, "sandbox-source")
+	sandboxRoot := filepath.Join(destination, "sandboxes")
+	if err := os.MkdirAll(filepath.Join(sandboxRoot, "task-sandbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(sandboxSource, []byte("bundled sandbox binary"), 0555); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +323,7 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),
 		"--runtime-dest", runtimePath, "--plan-dest", planPath,
 		"--sandbox-source", sandboxSource, "--sandbox-dest", sandboxPath,
+		"--sandbox-root", sandboxRoot,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +336,16 @@ func TestMaterializeCopiesOnlyDigestVerifiedRuntimeAndPlan(t *testing.T) {
 	}
 	if data, err := os.ReadFile(sandboxPath); err != nil || string(data) != "bundled sandbox binary" {
 		t.Fatalf("sandbox materialization failed: %v", err)
+	}
+	for _, name := range []string{"hosts", "resolv.conf"} {
+		want, err := os.ReadFile(filepath.Join("/etc", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(filepath.Join(sandboxRoot, "task-sandbox", "network", name))
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("private network file %s differs: %v", name, err)
+		}
 	}
 	if err := materialize([]string{
 		"--encoded-plan", base64.RawURLEncoding.EncodeToString(payload),

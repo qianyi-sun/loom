@@ -204,7 +204,11 @@ and a namespace-bound, fail-closed `ValidatingAdmissionPolicy`. The policy
 preserves non-root controllers, no privilege escalation, RuntimeDefault seccomp,
 restricted volumes and capability dropping. Only the native private task/verifier
 init sidecars may use UID 0 and the six installation capabilities. Their commands,
-private socket/binary mounts and target annotation are checked. Host resources,
+private socket/binary mounts, per-sandbox hosts/resolver file mounts and target
+annotation are checked. Network files must use the owning sandbox's socket
+volume and exact `network/hosts` or `network/resolv.conf` subpath. Deploy or roll
+back the runtime materializer, actuator renderer and policy as one candidate
+under the existing idle guard. Host resources,
 shared PID, device claims, added controller capabilities and credential mounts
 into private sidecars are rejected. Pod updates and ephemeral-container updates
 are subject to the same policy. Managed and regional targets remain unsupported

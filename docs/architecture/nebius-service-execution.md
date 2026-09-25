@@ -729,6 +729,15 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
+For private task and verifier sandboxes, the materializer also initializes
+independent copies of `/etc/hosts` and `/etc/resolv.conf` in each sandbox's
+existing socket volume. The renderer mounts those exact files through `subPath`;
+the controller retains its original Pod-generated files. Container-local root
+can change its own name resolution without changing the controller or another
+sandbox. Initialization rejects pre-existing directories or linked destinations.
+The materializer, renderer and constrained-root admission policy must be deployed
+or rolled back together through the idle rollout guard.
+
 Task identity, web egress, mutable paths and retained-service declarations require
 automatic native execution. A task-supplied `service_execution.runtime_template`
 cannot enable these extensions or bypass deployment readiness; intake rejects
