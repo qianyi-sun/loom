@@ -38,13 +38,14 @@ def test_empty_effect_downgrade_and_upgrade_preserve_frozen_operation_and_orm_sh
         NebiusApplicationEffect.__table__.columns.keys())
 
 
-@pytest.mark.parametrize("phase", ["prepared", "dispatched", "observed"])
+@pytest.mark.parametrize("phase", ["prepared", "dispatched", "observed", "rejected"])
 def test_every_effect_phase_blocks_destructive_downgrade(application_database, phase):
     with application_database.begin() as connection:
         owner = operation(connection)
         connection.execute(insert(NebiusApplicationEffect).values(
             operation_id=owner, effect_key="preserved", sequence=1, intent_json={}, phase=phase,
             dispatch_epoch=None if phase == "prepared" else 1, observed_uid="uid" if phase == "observed" else None,
+            rejection_status=409 if phase == "rejected" else None,
         ))
         before = connection.execute(select(NebiusApplicationEffect)).mappings().all()
     with pytest.raises(DBAPIError, match="cannot remove application effect history"):
@@ -58,6 +59,9 @@ def test_every_effect_phase_blocks_destructive_downgrade(application_database, p
     {"phase": "dispatched"}, {"phase": "observed", "dispatch_epoch": 1}, {"dispatch_epoch": 1},
     {"phase": "dispatched", "dispatch_epoch": 0}, {"observed_uid": "uid"}, {"observed_resource_version": "4"},
     {"sequence": 0}, {"effect_key": "bad/key"}, {"intent_json": []}, {"operation_id": uuid4()},
+    {"rejection_status": 409}, {"phase": "rejected", "dispatch_epoch": 1},
+    {"phase": "rejected", "dispatch_epoch": 1, "rejection_status": 500},
+    {"phase": "rejected", "dispatch_epoch": 1, "rejection_status": 409, "observed_uid": "uid"},
 ])
 def test_database_rejects_broken_dispatch_identity_state(application_database, changes):
     with application_database.begin() as connection:

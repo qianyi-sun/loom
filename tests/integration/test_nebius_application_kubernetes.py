@@ -10,7 +10,7 @@ import pytest
 
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
-from tests.integration.test_nebius_application_effects import started
+from tests.integration.test_nebius_application_effects import expire, started
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
@@ -107,13 +107,18 @@ async def test_namespace_create_is_single_winner_and_observed_replay_never_resen
     assert history == [observed]
 
 
-async def test_uncertain_create_and_absence_never_authorize_resend(provider):
+async def test_uncertain_create_and_absence_never_authorize_resend(provider, applications):
     client, api, registry, plan, lease = provider
     document = named(plan["prepared"], "Namespace", "loom-dev-alice")
     api.lose_response = True
     with pytest.raises(ProviderWaitingError) as error:
         await client.create(lease, "namespace", document)
     assert "protected-detail" not in str(error.value)
+    await expire(applications[1], lease)
+    stale = lease
+    lease = await registry.claim(lease.operation_id)
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await client.create(stale, "namespace", document)
     api.hide_objects = True
     with pytest.raises(ProviderWaitingError):
         await client.create(lease, "namespace", document)
@@ -135,6 +140,19 @@ async def test_namespaced_create_requires_recorded_unchanged_namespace(provider)
     with pytest.raises(ProviderBlockedError, match="namespace_identity"):
         await client.create(lease, "api", document)
     assert len(api.mutations) == 1
+
+
+async def test_credential_contents_never_enter_effect_journal(provider):
+    client, api, _, plan, lease = await namespace_ready(provider)
+    namespace = plan["prepared"].registration.application_namespace
+    name = f"loom-application-auth-{lease.incarnation.hex}-g1"
+    document = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+                "metadata": {"name": name, "namespace": namespace}, "data": {"key": "dGVzdC1vbmx5LW1hdGVyaWFs"}}
+    created = await client.create(lease, "auth", document)
+    assert created.phase == "observed"
+    serialized = json.dumps(created.intent.model_dump())
+    assert "dGVzdC1vbmx5LW1hdGVyaWFs" not in serialized and "data" not in created.intent.model_dump()
+    assert api.objects[f"/api/v1/namespaces/{namespace}/secrets/{name}"]["data"] == document["data"]
 
 
 async def test_patch_and_delete_send_exact_preconditions_and_wait_for_retirement(provider):

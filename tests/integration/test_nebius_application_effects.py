@@ -306,3 +306,28 @@ async def test_concurrent_distinct_intents_cannot_both_prepare_before_reconcilia
     failure = next(result for result in results if isinstance(result, Exception))
     assert isinstance(failure, ManagementError) and failure.code == "application_effect_unresolved"
     assert len(await registry.effect_history(lease)) == 1
+
+
+async def test_definitively_rejected_effect_is_retained_but_allows_a_fresh_preconditioned_attempt(applications):
+    registry, _, _, plan, _, lease = await started(applications)
+    request = intent(plan, action="delete", uid="old-uid", resource_version="1")
+    await registry.prepare_effect(lease, "stale-delete", request)
+    with pytest.raises(ManagementError, match="application_effect_not_dispatched"):
+        await registry.reject_effect(lease, "stale-delete", status_code=409)
+    await registry.dispatch_effect(lease, "stale-delete")
+    for status in (200, 408, 429, 500):
+        with pytest.raises(ManagementError, match="invalid_application_effect_rejection"):
+            await registry.reject_effect(lease, "stale-delete", status_code=status)
+    await registry.reject_effect(lease, "stale-delete", status_code=409)
+    await registry.reject_effect(lease, "stale-delete", status_code=409)
+    rejected = await registry.prepare_effect(lease, "stale-delete", request)
+    assert rejected.phase == "rejected" and rejected.rejection_status == 409
+    assert rejected.observed_uid is None and rejected.observed_resource_version is None
+    assert await registry.dispatch_effect(lease, "stale-delete") is False
+    with pytest.raises(ManagementError, match="application_effect_observation_conflict"):
+        await registry.reject_effect(lease, "stale-delete", status_code=422)
+    with pytest.raises(ManagementError, match="application_effect_observation_conflict"):
+        await registry.observe_effect(lease, "stale-delete", uid="old-uid", resource_version=None)
+    fresh = await registry.prepare_effect(lease, "fresh-delete", request | {"resource_version": "2"})
+    assert fresh.sequence == 2 and fresh.phase == "prepared"
+    assert await registry.dispatch_effect(lease, "fresh-delete") is True
