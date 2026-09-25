@@ -27,6 +27,7 @@ class LoomServiceSettings(BaseSettings):
     auth_local_http: bool = False
     auth_login_challenge_ttl_sec: int = 900
     auth_return_login_token: bool = False
+    auth_session_audience_json: str | None = None
     auth_session_cookie_name: str = "loom_session"
     auth_session_ttl_sec: int = 604800
     batch_budget_estimate_input_tokens_per_call: int = 1000000

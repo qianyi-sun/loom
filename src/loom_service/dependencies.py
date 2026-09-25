@@ -110,6 +110,7 @@ async def authed_session(
                 ctx_optional = await verify_session_cookie(
                     session,
                     request.cookies.get(settings.session_cookie_name),
+                    audience=settings.session_audience,
                 )
         try:
             ctx = require_human_or_admin(ctx_optional)

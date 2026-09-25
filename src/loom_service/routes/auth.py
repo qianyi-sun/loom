@@ -478,6 +478,7 @@ async def password_login(
             session,
             user=user,
             session_ttl_seconds=request.app.state.settings.auth_session_ttl_sec,
+            audience=request.app.state.settings.session_audience,
         )
         await session.flush()
         body = await _serialize_me(session, created.ctx, csrf_token=created.raw_csrf)
@@ -861,6 +862,7 @@ async def login_start(
             session,
             email=payload.email,
             ttl_seconds=settings.auth_login_challenge_ttl_sec,
+            audience=settings.session_audience,
         )
         await session.commit()
     body: dict[str, Any] = {"status": "sent"}
@@ -879,6 +881,7 @@ async def login_complete(
             session,
             raw_token=payload.token,
             session_ttl_seconds=settings.auth_session_ttl_sec,
+            audience=settings.session_audience,
         )
         await session.flush()
         body = await _serialize_me(
@@ -950,6 +953,7 @@ async def switch_team(
     await session.flush()
     refreshed = await verify_session_cookie(
         session, request.cookies.get(request.app.state.settings.session_cookie_name),
+        audience=request.app.state.settings.session_audience,
     )
     if refreshed is None:
         raise HTTPException(status_code=401, detail="missing or invalid session")
@@ -966,12 +970,15 @@ async def refresh(
     settings = request.app.state.settings
     refreshed_tokens = await refresh_session(
         session, ctx=ctx, session_ttl_seconds=settings.auth_session_ttl_sec,
+        audience=settings.session_audience,
     )
     await session.commit()
     _set_auth_cookies(
         response, request, raw_session=refreshed_tokens.raw_session,
     )
-    refreshed = await verify_session_cookie(session, refreshed_tokens.raw_session)
+    refreshed = await verify_session_cookie(
+        session, refreshed_tokens.raw_session, audience=settings.session_audience,
+    )
     if refreshed is None:
         raise HTTPException(status_code=401, detail="missing or invalid session")
     return await _serialize_me(

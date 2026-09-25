@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,15 +41,24 @@ class CancelStack:
 
 
 @pytest.fixture
-async def cancel_stack(postgres_url: str) -> AsyncIterator[CancelStack]:
+async def cancel_stack(postgres_url: str, request: pytest.FixtureRequest) -> AsyncIterator[CancelStack]:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    scoped = getattr(request, "param", None) == "scoped"
+    audience = {
+        "schema_version": "loom.application-session-audience.v1",
+        "application_id": str(uuid4()), "origin": "https://alice.dev.example.com",
+        "access_generation": 1,
+    }
     # Custom public cookie/header names must still work across the internal hop.
     settings = LoomServiceSettings(
         _env_file=None, db_url=postgres_url,
         minio_endpoint="http://minio:9000", minio_access_key="x", minio_secret_key="y",
         control_plane_url="http://cp/", gateway_url="http://gw/",
         auth_session_cookie_name="test_session", auth_csrf_header_name="X-Test-CSRF",
+        public_base_url="https://alice.dev.example.com" if scoped else None,
+        auth_local_http=not scoped,
+        auth_session_audience_json=json.dumps(audience) if scoped else None,
     )
     service = create_app(settings)
     service.state.settings = settings
@@ -97,6 +107,7 @@ async def cancel_stack(postgres_url: str) -> AsyncIterator[CancelStack]:
         ])
         created = await create_session_for_user(
             session, user=user, current_team_id=team_id, session_ttl_seconds=3600,
+            audience=settings.session_audience,
         )
         await session.commit()
     try:
@@ -173,6 +184,63 @@ async def test_hosted_cookie_cancellation_keeps_identity_across_internal_http(ca
     async with stack.sessions() as session:
         trial = await session.get(Trial, stack.trial_id)
         assert trial.state == "cancelled"
+        assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
+
+
+@pytest.mark.parametrize("cancel_stack", ["scoped"], indirect=True)
+@pytest.mark.parametrize("resource", ["trials", "batches"])
+async def test_audience_cancellation_uses_configured_identity_not_supplied_header(cancel_stack, resource):
+    stack = cancel_stack
+    identifier = stack.trial_id if resource == "trials" else stack.batch_id
+    if resource == "trials":
+        async with stack.sessions() as session:
+            await session.execute(update(Trial).where(Trial.id == stack.trial_id).values(batch_id=None))
+            await session.commit()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.service),
+                                 base_url="https://alice.dev.example.com") as client:
+        response = await asyncio.wait_for(client.post(f"/api/v1/{resource}/{identifier}/cancel", headers={
+            "Cookie": f"__Host-test_session={stack.session_cookie}", "X-Test-CSRF": stack.csrf,
+            # A caller cannot replace the protected process audience on the hop.
+            "X-Loom-Session-Audience": "untrusted-client-supplied-audience",
+        }), 5)
+    assert response.status_code == 200, response.text
+    async with stack.sessions() as session:
+        assert (await session.get(Trial, stack.trial_id)).state == "cancelled"
+        assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
+
+
+@pytest.mark.parametrize("cancel_stack", ["scoped"], indirect=True)
+@pytest.mark.parametrize("denial,status", [
+    ("missing-audience", 401), ("wrong-audience", 401), ("invalid-audience", 401),
+    ("oversized-audience", 401), ("missing-csrf", 403), ("cross-team", 409),
+    ("revoked-session", 401),
+])
+async def test_control_plane_revalidates_audience_and_normal_authority(cancel_stack, denial, status):
+    stack = cancel_stack
+    audience = stack.service.state.settings.session_audience.model_dump(mode="json")
+    if denial == "wrong-audience":
+        audience["access_generation"] = 2
+    headers = {"X-Loom-CSRF": stack.csrf, "X-Loom-Session-Audience": json.dumps(audience)}
+    if denial == "missing-audience":
+        headers.pop("X-Loom-Session-Audience")
+    elif denial == "invalid-audience":
+        headers["X-Loom-Session-Audience"] = "null"
+    elif denial == "oversized-audience":
+        headers["X-Loom-Session-Audience"] = " " * 4097
+    elif denial == "missing-csrf":
+        headers.pop("X-Loom-CSRF")
+    elif denial == "revoked-session":
+        async with stack.sessions() as session:
+            await session.execute(update(UserSession).where(UserSession.user_id == stack.user_id)
+                                  .values(revoked_at=datetime.now(UTC)))
+            await session.commit()
+    trial_id = stack.other_trial_id if denial == "cross-team" else stack.trial_id
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=stack.control_plane),
+                                 base_url="http://cp", cookies={"loom_session": stack.session_cookie}) as client:
+        response = await client.post(f"/trials/{trial_id}/cancel", headers=headers)
+    assert response.status_code == status, response.text
+    async with stack.sessions() as session:
+        assert (await session.get(Trial, stack.trial_id)).state == "queued"
         assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
 
 

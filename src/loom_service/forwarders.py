@@ -56,6 +56,11 @@ async def forward(
             headers["Cookie"] = f"loom_session={cookie}"
         if csrf:
             headers["X-Loom-CSRF"] = csrf
+        if settings.session_audience is not None:
+            # Assertion of lookup context, not a credential. Never forward a
+            # caller-provided audience: this process already authenticated only
+            # its own protected binding. CP still verifies cookie/CSRF/team.
+            headers["X-Loom-Session-Audience"] = settings.session_audience.model_dump_json()
     try:
         resp = await client.request(
             method, path, headers=headers, json=json_body,
