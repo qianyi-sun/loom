@@ -1,0 +1,121 @@
+"""Actual CNI enforcement of shared-side personal API admission."""
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+
+from tests.integration.test_execution_actuator_k3s import (
+    _build_image,
+    _docker_platform,
+    _import_image,
+    _load_client,
+    _pod_probe,
+    _start_k3s,
+    _wait_for_allowed_peer,
+    _wait_for_pod,
+    _wait_for_policy_programming,
+)
+from tests.unit.test_nebius_application_authority import authority_for
+from tests.unit.test_nebius_application_render import inputs, named
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+
+pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
+                                reason="requires explicitly disposable Kubernetes")
+
+
+@pytest.mark.timeout(240)
+async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(platform_inputs):
+    from kubernetes import client, utils
+
+    from loom.nebius_application_network import render_application_shared_access
+    from loom.nebius_application_render import render_application
+
+    values = inputs(platform_inputs)
+    shared, foundation = values[2:]
+    authority = authority_for(shared)
+    policies = render_application_shared_access(authority, shared, foundation)
+    fixture_tag = "docker.io/library/loom-personal-network:" + uuid4().hex
+    container = None
+    try:
+        platform = await asyncio.to_thread(_docker_platform)
+        await asyncio.to_thread(_build_image, tag=fixture_tag,
+            dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile", platform=platform)
+        with tempfile.TemporaryDirectory(prefix="loom-personal-network-") as temporary:
+            container = await asyncio.to_thread(_start_k3s)
+            _, core, _ = await asyncio.to_thread(_load_client, container)
+            api = client.ApiClient()
+            image = await asyncio.to_thread(_import_image, container, tag=fixture_tag, root=Path(temporary), ordinal=1)
+            data_ns = shared.platform_namespace
+            await asyncio.to_thread(core.create_namespace, {"metadata": {"name": data_ns}})
+            policy_names = {doc["spec"]["podSelector"]["matchLabels"]["app"]: doc["metadata"]["name"] for doc in policies}
+            for doc in [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                         "metadata": {"name": "shared-deny", "namespace": data_ns},
+                         "spec": {"podSelector": {}, "policyTypes": ["Ingress"], "ingress": []}}, *policies]:
+                await asyncio.to_thread(utils.create_from_dict, api, doc)
+
+            def pod(name, namespace, app, command):
+                return {"apiVersion": "v1", "kind": "Pod", "metadata": {
+                    "name": name, "namespace": namespace, "labels": {"app": app}}, "spec": {
+                        "restartPolicy": "Never", "automountServiceAccountToken": False,
+                        "securityContext": {"runAsNonRoot": True, "runAsUser": 1000,
+                                            "seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [{"name": "fixture", "image": image, "imagePullPolicy": "IfNotPresent",
+                            "command": ["/fixture", *command], "securityContext": {
+                                "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
+                                "readOnlyRootFilesystem": True}}],
+                    }}
+
+            targets = (("postgres", "loom-postgres", 5432), ("control", "loom-control-plane", 8080),
+                       ("gateway", "loom-llm-gateway", 9100), ("unrelated", "other-service", 8090))
+            servers = {}
+            for name, app, port in targets:
+                await asyncio.to_thread(core.create_namespaced_pod, data_ns, pod(name, data_ns, app, ["server", str(port)]))
+                servers[name] = await asyncio.to_thread(_wait_for_pod, core, data_ns, name)
+
+            # Policies already exist before these independent developers arrive.
+            clients = {}
+            for slug, change in (("alice", None), ("bob", None), ("eve", None),
+                                 ("foreign", "installation"), ("other-data", "data"), ("unlabeled", "none")):
+                app_values = inputs(platform_inputs, slug)
+                namespace = named(render_application(*app_values, authority=authority), "Namespace", "loom-dev-" + slug)
+                labels = namespace["metadata"]["labels"]
+                if change == "installation":
+                    labels["loom.nebius/application-installation"] = str(uuid4())
+                elif change == "data":
+                    labels["loom.nebius/data-environment-id"] = str(uuid4())
+                elif change == "none":
+                    namespace["metadata"]["labels"] = {}
+                ns = namespace["metadata"]["name"]
+                await asyncio.to_thread(core.create_namespace, namespace)
+                await asyncio.to_thread(core.create_namespaced_pod, ns, pod("api", ns, "loom-service", ["idle"]))
+                await asyncio.to_thread(_wait_for_pod, core, ns, "api")
+                clients[slug] = (ns, "api")
+            await asyncio.to_thread(core.create_namespaced_pod, "loom-dev-alice", pod("web", "loom-dev-alice", "loom-web", ["idle"]))
+            await asyncio.to_thread(_wait_for_pod, core, "loom-dev-alice", "web")
+            clients["web"] = ("loom-dev-alice", "web")
+
+            await _wait_for_policy_programming(container, {
+                name: (servers[name].status.pod_ip, ("shared-deny", policy_names[app]) if app in policy_names else ("shared-deny",))
+                for name, app, _ in targets
+            })
+            for name, _, port in targets:
+                # A blocked connection only proves isolation if its server works.
+                await _wait_for_allowed_peer(core, data_ns, name, f"http://127.0.0.1:{port}")
+                url = f"http://{servers[name].status.pod_ip}:{port}"
+                for slug, (ns, client_name) in clients.items():
+                    if slug in {"alice", "bob", "eve"} and name != "unrelated":
+                        await _wait_for_allowed_peer(core, ns, client_name, url)
+                    else:
+                        denied = await asyncio.to_thread(_pod_probe, core, ns, client_name, url)
+                        assert "exit:0" not in denied, f"unexpected shared access: {slug} -> {name}: {denied}"
+    finally:
+        if container is not None:
+            await asyncio.to_thread(container.stop)
+        await asyncio.to_thread(subprocess.run, ["docker", "image", "rm", "--force", fixture_tag],
+                                capture_output=True, check=False)
