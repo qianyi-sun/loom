@@ -43,7 +43,7 @@ from loom.trial.artifacts import ArtifactCollector
 from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
 from loom.trial.stale_running import effective_agent_timeout_sec
-from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace import materialize_workspace, refuse_planted_private_paths
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
 
 if TYPE_CHECKING:
@@ -203,6 +203,7 @@ async def _run_step_impl(
         try:
             in_place = resolve_verifier_env_mode(ctx.task_config, ctx.trial_config) == "shared"
             if ctx.workspace_staging_policy is not None and in_place:
+                await refuse_planted_private_paths(ctx.driver, workdir)
                 await materialize_workspace(
                     driver=ctx.driver,
                     task_dir=ctx.task_dir,

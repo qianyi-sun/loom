@@ -39,7 +39,11 @@ from loom.service_execution_task import (
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
-from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+from loom.trial.workspace import (
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+    refuse_planted_private_paths,
+)
 from loom.trial.workspace_references import (
     export_workspace_references,
     import_workspace_with_references,
@@ -337,20 +341,6 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         loop.remove_signal_handler(signal.SIGTERM)
 
 
-_PLANTED_PRIVATE = ("tests", "verifier", "solution", "upstream-task.toml")
-
-
-async def _refuse_planted_private_paths(driver: ServiceSandboxDriver, workdir: PurePosixPath) -> None:
-    """Fail before tests are uploaded if the agent already occupied those names."""
-    for name in _PLANTED_PRIVATE:
-        path = shlex.quote(str(workdir / name))
-        result = await driver.exec(f"if [ -e {path} ] || [ -L {path} ]; then exit 42; fi")
-        if result.return_code == 42:
-            raise ServiceExecutionTaskError(f"planted private path: {name}")
-        if result.return_code not in {0, 42}:
-            raise ServiceExecutionTaskError("planted private path check failed")
-
-
 async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
@@ -380,7 +370,10 @@ async def _run_verifier(
         await driver.start()
         driver_started = True
         if in_place:
-            await _refuse_planted_private_paths(driver, task.environment.workdir)
+            try:
+                await refuse_planted_private_paths(driver, task.environment.workdir)
+            except RuntimeError as exc:
+                raise ServiceExecutionTaskError(str(exc)) from exc
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=input_root,
             policy=_POLICY, phase="verifier",
