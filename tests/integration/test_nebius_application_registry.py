@@ -123,6 +123,8 @@ def test_concurrent_legacy_and_application_create_have_one_name_winner(applicati
     {"release_id": UUID(int=0)}, {"deployment_generation": 0}, {"access_generation": 0},
     {"slug": "shared", "application_namespace": "loom-dev-shared"}, {"application_namespace": "loom-dev-other"},
     {"desired_state": "unknown"}, {"purged_at": datetime(2026, 1, 1, tzinfo=UTC)},
+    {"public_host": "alice..dev.example.com"}, {"public_host": "alice.-dev.example.com"},
+    {"public_host": "a" * 64 + ".example.com"},
 ])
 def test_application_database_rejects_invalid_identity_or_state(application_database, changes):
     with application_database.begin() as connection:
