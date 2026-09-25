@@ -23,6 +23,7 @@ from loom.service_execution_materialization import ServiceExecutionRuntimeProfil
 
 _REVISION = r"^[a-zA-Z0-9_]{1,64}$"
 _IMAGE = r"^[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9/._-]*@sha256:[0-9a-f]{64}$"
+ApplicationAction = Literal["create", "update", "suspend", "resume", "destroy_retained"]
 
 
 class _Binding(BaseModel):
@@ -44,6 +45,19 @@ class ApplicationReleaseV1(_Binding):
     schema_revision: str = Field(pattern=_REVISION)
     service_image_ref: str = Field(pattern=_IMAGE)
     web_image_ref: str = Field(pattern=_IMAGE)
+
+
+class ApplicationOperationV1(_Binding):
+    """Public progress, never private deployment plans or credential material."""
+
+    schema_version: Literal["loom.nebius-application-operation.v1"] = "loom.nebius-application-operation.v1"
+    operation_id: UUID
+    application_id: UUID
+    deployment_generation: int = Field(ge=1, strict=True)
+    access_generation: int = Field(ge=1, strict=True)
+    action: ApplicationAction
+    phase: Literal["pending", "running", "blocked", "completed", "superseded"]
+    error_code: str | None = None
 
 
 class SharedDevelopmentBindingV1(_Binding):

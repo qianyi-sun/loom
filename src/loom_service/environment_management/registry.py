@@ -35,6 +35,7 @@ from loom.nebius_environment_contract import (
     EnvironmentStatusV1,
 )
 from loom.nebius_environment_render import RenderedEnvironment
+from loom_service.environment_management.platform_accounting import platform_usage
 from loom_service.environment_management.steps import (
     ProvisioningStep,
     StepKind,
@@ -151,10 +152,7 @@ class EnvironmentRegistry:
                     if replay.request_sha256 != request_sha256:
                         raise ManagementError("idempotency_conflict")
                     return operation_view(replay)
-                used = (await session.execute(select(*[
-                    func.coalesce(func.sum(getattr(NebiusPlatformReservation, name)), 0).label(name)
-                    for name in needed
-                ]).where(NebiusPlatformReservation.cluster_id == row.cluster_id))).mappings().one()
+                used = await platform_usage(session, row.cluster_id)
                 available = {name: max(0, getattr(budget, name) - int(used[name])) for name in needed}
                 if any(needed[name] > available[name] for name in needed):
                     raise ManagementError("platform_capacity_exhausted", details={
