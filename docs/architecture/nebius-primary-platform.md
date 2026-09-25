@@ -123,6 +123,13 @@ admission and source qualification remain prerequisites for activating the new
 personal applications; rendered resources alone do not satisfy installed
 four-plus-one acceptance.
 
+Application rendering rejects a hostname already used by the shared foundation.
+It also rejects the legacy environment `namespace_authority`: that admission
+contract requires a full-environment identity, not an application identity.
+Versioned application namespace authority must be qualified before management can
+activate this path; application IDs must not be relabelled as environment IDs to
+bypass that boundary.
+
 ## Managed environment identity and rendering
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation

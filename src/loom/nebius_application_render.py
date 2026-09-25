@@ -17,7 +17,6 @@ from loom.nebius_application_contract import (
 )
 from loom.nebius_environment_contract import FoundationBinding
 from loom.nebius_environment_render import PlatformEnvelope, _envelope
-from loom.nebius_management_authority import INSTALLATION_LABEL, namespace_binding
 from loom.nebius_platform_render import (
     _deployment,
     _env,
@@ -48,6 +47,9 @@ def render_application(
     row = ApplicationRegistrationV1.model_validate(registration.model_dump())
     release = ApplicationReleaseV1.model_validate(release.model_dump())
     shared = SharedDevelopmentBindingV1.model_validate(shared.model_dump())
+    foundation = FoundationBinding.model_validate(foundation.model_dump())
+    if foundation.namespace_authority is not None:
+        raise ValueError("legacy environment namespace authority cannot admit personal applications")
     shared.validate_foundation(foundation)
     if (row.cluster_id != shared.cluster_id or row.data_environment_id != shared.data_environment_id
             or row.release_id != release.release_id
@@ -56,6 +58,8 @@ def render_application(
     if row.desired_state != "active" or release.schema_revision != shared.schema_revision:
         raise ValueError("only active, exact-schema-compatible applications may render")
     config = foundation.platform_config
+    if row.public_host == config["public_host"]:
+        raise ValueError("application hostname overlaps shared infrastructure")
     ns, data_ns = row.application_namespace, shared.platform_namespace
     if ns in {data_ns, config["execution_namespace"], config["execution_namespace"] + "-build", foundation.ingress_namespace}:
         raise ValueError("application namespace overlaps shared infrastructure")
@@ -64,10 +68,6 @@ def render_application(
     namespace = _namespace(ns)
     namespace["metadata"]["labels"]["loom.nebius/data-environment-id"] = str(shared.data_environment_id)
     files: dict[str, list[dict[str, Any]]] = {"00-namespace.yaml": [namespace]}
-    if foundation.namespace_authority is not None:
-        authority = foundation.namespace_authority
-        namespace["metadata"]["labels"][INSTALLATION_LABEL] = str(authority.installation_id)
-        files["00-namespace.yaml"].append(namespace_binding(authority, ns))
     account = _obj("ServiceAccount", "loom-platform", ns)
     account["automountServiceAccountToken"] = False
     ingress_peer = {
