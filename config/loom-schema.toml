@@ -550,6 +550,11 @@ python_type = "str"
 default     = "loom_session"
 description = "Browser-session cookie base name. Hosted sessions add the __Host- prefix, use Secure and Path=/, and never set Domain."
 
+[service_config.auth_session_audience_json]
+used_by     = ["loom-service"]
+python_type = "str"
+description = "Protected loom.application-session-audience.v1 JSON: application_id, canonical HTTPS origin and positive access_generation. Binds browser sessions and login challenges to one application sharing a database. Requires matching public_base_url; unset preserves legacy isolated-database authentication. Not a process-revocation or provisioning mechanism."
+
 [service_config.auth_local_http]
 used_by     = ["loom-service"]
 python_type = "bool"

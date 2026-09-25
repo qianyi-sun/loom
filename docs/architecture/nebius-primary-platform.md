@@ -46,6 +46,40 @@ pending separate qualification; checked-in regional support is not evidence
 that a region is operationally accepted. Current deployment and recovery
 procedures are indexed in [runbooks](../runbooks/README.md).
 
+### Application-scoped browser authentication
+
+`LOOM_SVC_AUTH_SESSION_AUDIENCE_JSON` optionally supplies a protected
+`loom.application-session-audience.v1` binding: non-nil `application_id`, HTTPS
+`origin`, and positive integer `access_generation`. The origin must match the
+explicit `LOOM_SVC_PUBLIC_BASE_URL`; local HTTP, management mode and the legacy
+managed-child configuration cannot use this binding.
+
+Both one-use login challenges and browser sessions use audience- and
+purpose-separated hashes in the existing database columns. A proof issued by
+Alice's application cannot be redeemed or used through Bob's application, an
+updated access generation, a changed origin, or an unconfigured legacy service.
+Wrong-audience redemption does not consume the legitimate challenge. Password
+login, invite acceptance, refresh and team switching preserve this boundary.
+Host-only cookies and browser-origin/CSRF enforcement remain in place; a request's
+Host, forwarded headers or audience metadata cannot select the Service's audience.
+
+Cancellation retains independent Service and Control Plane authorization. The
+Service forwards its **configured** audience with the existing cookie/CSRF proofs
+on the internal hop; it never forwards a client's claimed audience. The shared
+Control Plane checks the corresponding audience-bound session row and normal
+expiry, revocation, user, team and CSRF authority. Audience metadata is not a
+credential and confers no access on its own. This internal cancellation protocol
+does not make the Control Plane a public personal-application endpoint.
+
+Unconfigured installations keep their existing authentication contract. This
+opt-in changes neither bearer tokens nor shared user/team/invitation/recovery
+permissions and needs no database migration. Account recovery and invitations
+remain data-environment operations; only their resulting sessions are app-local.
+The hash binding is **not** process revocation: protected lifecycle must stop old
+processes and revoke their access when retiring a generation. A cached process
+configuration is not a live registration check. No current provisioner supplies
+this new binding, and it does not establish installed shared-development readiness.
+
 ## Managed environment identity and rendering
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation
