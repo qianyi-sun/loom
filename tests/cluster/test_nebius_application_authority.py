@@ -20,6 +20,18 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires explicitly disposable Kubernetes")
 
 
+def _can_create_application_secret(http):
+    response = http.post("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", json={
+        "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+        "spec": {"resourceAttributes": {"namespace": "loom-dev-alice", "group": "", "resource": "secrets", "verb": "create"}},
+    })
+    assert response.status_code == 201, response.status_code
+    status = response.json()["status"]
+    assert not status.get("evaluationError"), "application access review failed"
+    assert type(status.get("allowed")) is bool
+    return status["allowed"]
+
+
 @pytest.mark.timeout(180)
 def test_application_manager_can_manage_apps_but_not_shared_or_legacy_resources(platform_inputs):
     from kubernetes import client, utils
@@ -121,11 +133,20 @@ def test_application_manager_can_manage_apps_but_not_shared_or_legacy_resources(
                     invalid["subjects"].append({"kind": "ServiceAccount", "name": "loom-platform", "namespace": "loom-dev-alice"})
                 denied = http.post(path, json=invalid)
                 assert denied.status_code == 403, denied.text
+            # The bootstrap role alone must not authorize app Secret writes.
+            assert not _can_create_application_secret(http)
             created = http.post(path, json=role)
             assert created.status_code == 201, created.text
+            # RoleBinding persistence is not authorizer-cache propagation.
+            # Observe effective permission; never retry a real Secret write.
+            deadline = time.monotonic() + 20
+            while not _can_create_application_secret(http):
+                assert time.monotonic() < deadline, "application resource RBAC did not propagate"
+                time.sleep(0.1)
             local = "/api/v1/namespaces/loom-dev-alice"
             secret = {"metadata": {"name": "loom-application-db"}, "stringData": {"url": "test-only"}}
-            assert http.post(local + "/secrets", json=secret).status_code == 201
+            created = http.post(local + "/secrets", json=secret)
+            assert created.status_code == 201, created.json().get("message", "no Kubernetes status message")
             assert http.get(local + "/secrets/loom-application-db").status_code == 200
             assert http.get("/api/v1/secrets").status_code == 403
             assert http.get("/api/v1/namespaces/loom-dev-foreign/secrets/private").status_code == 403
