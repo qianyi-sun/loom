@@ -6,7 +6,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from loom.nebius_application_contract import ApplicationRegistrationV1
 from loom.nebius_application_render import render_application
@@ -158,3 +158,155 @@ async def test_name_conflict_rolls_back_operation_and_reservation(applications):
     async with factory() as session:
         for model in (NebiusApplicationOperation, NebiusApplicationReservation):
             assert await session.scalar(select(func.count()).select_from(model)) == 0
+
+
+async def _observed_complete(factory, operation_id):
+    """Test-only provider boundary; no production completion API exists yet."""
+    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
+
+    async with factory.begin() as session:
+        row = await session.get(NebiusApplicationOperation, operation_id)
+        row.phase, row.lease_token, row.lease_expires_at = "completed", None, None
+
+
+def _next_plan(plan, platform_inputs, *, new_release=True, **changes):
+    original = plan["prepared"].registration
+    release = plan["release"]
+    if new_release:
+        release = release.model_copy(update={"release_id": uuid4(), "source_digest": "sha256:" + "c" * 64})
+    row = original.model_copy(update={
+        "deployment_generation": original.deployment_generation + 1,
+        "access_generation": original.access_generation + 1,
+        "release_id": release.release_id, "desired_state": "active",
+    } | changes)
+    return dict(prepared=render_application(row, release, plan["shared"], inputs(platform_inputs)[3]),
+                release=release, shared=plan["shared"])
+
+
+@pytest.mark.parametrize("action", ["suspend", "destroy_retained"])
+async def test_stop_invalidates_inflight_lease_but_retains_names_capacity_and_frozen_source(applications, action):
+    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation, NebiusApplicationReservation
+    from loom.db.nebius_application_schema import NebiusDeploymentNameClaim
+
+    registry, factory, (alice, _), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="start", **prepare())
+    lease = await registry.claim(first.operation_id)
+    old = await registry.frozen_plan(lease)
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+                                         expected_generation=1, action=action)
+    assert stopped.deployment_generation == stopped.access_generation == 2
+    assert stopped.phase == "pending"  # no claim of stopped processes
+    for check in (registry.renew(lease), registry.frozen_plan(lease),
+                  registry.finish_attempt(lease, error_code="old_effect", retry=True)):
+        with pytest.raises(ManagementError, match="stale_operation_lease"):
+            await check
+    assert await registry.claim(first.operation_id) is None
+    with pytest.raises(ManagementError, match="stale_operation_generation"):
+        await registry.retry(first.operation_id, principal=alice)
+    replay = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+                                      expected_generation=1, action=action)
+    assert replay == stopped
+    async with factory() as session:
+        reservation = await session.get(NebiusApplicationReservation, first.application_id)
+        assert reservation.cpu_millis == old["platform_envelope"]["cpu_millis"]
+        assert await session.scalar(select(func.count()).select_from(NebiusDeploymentNameClaim)) == 3
+        assert (await session.get(NebiusApplicationOperation, first.operation_id)).plan_json == old
+        current = await session.get(NebiusApplicationOperation, stopped.operation_id)
+        assert current.plan_json["source_operation_id"] == str(first.operation_id)
+    stop_lease = await registry.claim(stopped.operation_id)
+    assert (await registry.frozen_plan(stop_lease))["shared"] == old["shared"]
+
+
+async def test_expected_generation_concurrency_has_exactly_one_transition(applications):
+    registry, _, (alice, _), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="create", **prepare())
+    results = await asyncio.gather(*[
+        registry.transition(first.application_id, principal=alice, idempotency_key=action,
+                            expected_generation=1, action=action) for action in ("suspend", "destroy_retained")
+    ], return_exceptions=True)
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    error = next(result for result in results if isinstance(result, Exception))
+    assert isinstance(error, ManagementError) and error.code == "application_generation_conflict"
+
+
+async def test_update_requires_completed_predecessor_and_freezes_new_version(applications, platform_inputs):
+    registry, factory, (alice, _), prepare, _, _ = applications
+    plan = prepare()
+    first = await registry.create(principal=alice, idempotency_key="create", **plan)
+    newer = _next_plan(plan, platform_inputs)
+    change = dict(principal=alice, idempotency_key="update", action="update", expected_generation=1,
+                  release_id=newer["release"].release_id)
+    with pytest.raises(ManagementError, match="application_transition_not_ready"):
+        await registry.transition(first.application_id, **change, **newer)
+    await _observed_complete(factory, first.operation_id)
+    updated = await registry.transition(first.application_id, **change, **newer)
+    assert updated.action == "update" and updated.access_generation == 2
+    # Replay requires neither the publication reader nor prepared plan.
+    assert await registry.transition(first.application_id, **change) == updated
+    lease = await registry.claim(updated.operation_id)
+    frozen = await registry.frozen_plan(lease)
+    assert frozen["release"]["source_digest"] == "sha256:" + "c" * 64
+    assert frozen["shared"] == plan["shared"].model_dump(mode="json")
+    assert frozen["source_operation_id"] == str(first.operation_id)
+    assert frozen["registration"]["application_id"] == str(first.application_id)
+
+
+@pytest.mark.parametrize("field", ["incarnation", "owner_user_id", "owner_team_id", "data_environment_id", "slug", "access_generation"])
+async def test_update_cannot_replace_immutable_binding_or_skip_access_generation(applications, platform_inputs, field):
+    registry, factory, (alice, _), prepare, _, _ = applications
+    plan = prepare()
+    first = await registry.create(principal=alice, idempotency_key="create", **plan)
+    await _observed_complete(factory, first.operation_id)
+    newer = _next_plan(plan, platform_inputs)
+    row = newer["prepared"].registration.model_copy(update={field: "another" if field == "slug" else 3 if field == "access_generation" else uuid4()})
+    newer["prepared"] = replace(newer["prepared"], registration=row)
+    with pytest.raises(ManagementError, match="invalid_application_plan"):
+        await registry.transition(first.application_id, principal=alice, idempotency_key="invalid-update",
+                                  action="update", expected_generation=1, release_id=newer["release"].release_id, **newer)
+    assert (await registry.list_applications(principal=alice))[0].deployment_generation == 1
+
+
+async def test_resume_waits_for_observed_suspend_and_destroy_is_terminal(applications, platform_inputs):
+    registry, factory, (alice, _), prepare, _, _ = applications
+    plan = prepare()
+    first = await registry.create(principal=alice, idempotency_key="create", **plan)
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="suspend", action="suspend", expected_generation=1)
+    resumed_plan = _next_plan(plan, platform_inputs, new_release=False, deployment_generation=3, access_generation=3)
+    with pytest.raises(ManagementError, match="application_transition_not_ready"):
+        await registry.transition(first.application_id, principal=alice, idempotency_key="resume", action="resume", expected_generation=2, **resumed_plan)
+    await _observed_complete(factory, stopped.operation_id)
+    resumed = await registry.transition(first.application_id, principal=alice, idempotency_key="resume", action="resume", expected_generation=2, **resumed_plan)
+    assert resumed.deployment_generation == 3
+    destroyed = await registry.transition(first.application_id, principal=alice, idempotency_key="destroy", action="destroy_retained", expected_generation=3)
+    await _observed_complete(factory, destroyed.operation_id)
+    with pytest.raises(ManagementError, match="application_transition_not_supported"):
+        await registry.transition(first.application_id, principal=alice, idempotency_key="revive", action="resume", expected_generation=4, **resumed_plan)
+
+
+async def test_leases_use_database_expiry_epochs_and_all_identity_fields(applications):
+    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
+
+    registry, factory, (alice, _), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="create", **prepare())
+    leases = await asyncio.gather(registry.claim(first.operation_id), registry.claim(first.operation_id))
+    assert sum(lease is not None for lease in leases) == 1
+    lease = next(lease for lease in leases if lease is not None)
+    await registry.renew(lease)
+    for field in ("application_id", "incarnation", "deployment_generation", "access_generation", "runner_epoch", "lease_token"):
+        corrupt = replace(lease, **{field: 999 if field.endswith("generation") or field == "runner_epoch" else uuid4()})
+        with pytest.raises(ManagementError, match="stale_operation_lease"):
+            await registry.frozen_plan(corrupt)
+    async with factory.begin() as session:
+        row = await session.get(NebiusApplicationOperation, first.operation_id)
+        row.lease_expires_at = await session.scalar(text("SELECT clock_timestamp() - interval '1 second'"))
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await registry.renew(lease)
+    second = await registry.claim(first.operation_id)
+    assert second.runner_epoch == lease.runner_epoch + 1 and second.lease_token != lease.lease_token
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await registry.finish_attempt(lease, error_code="stale", retry=False)
+    await registry.finish_attempt(second, error_code="provider_unavailable", retry=False)
+    assert await registry.claim(first.operation_id) is None
+    assert (await registry.retry(first.operation_id, principal=alice)).phase == "pending"
+    third = await registry.claim(first.operation_id)
+    assert third.runner_epoch == second.runner_epoch + 1
