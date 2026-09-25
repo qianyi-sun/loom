@@ -103,6 +103,24 @@ def test_management_bootstrap_and_owned_permissions_are_enforced_by_actual_api(t
         }, dry_run="All"))
         assert len(admitted["spec"]["tolerations"]) > len(template["tolerations"])
         assert _matches_backup_template(admitted["spec"], template)
+        # The evidence reader uses raw HTTPS, not SDK objects that may fill
+        # TypeMeta. Characterize the actual list-versus-GET wire contract.
+        # A nonexistent node prevents image pulls or workload execution.
+        wire_pod = core.create_namespaced_pod(binding.namespace, {
+            "apiVersion": "v1", "kind": "Pod", "metadata": {"name": "backup-wire-shape"},
+            "spec": {**template, "nodeName": "loom-wire-format-only"},
+        })
+        with httpx.Client(base_url=endpoint, verify=operator_trust, trust_env=False, timeout=20) as http:
+            collection = http.get("/api/v1/namespaces/" + binding.namespace + "/pods",
+                                  params={"fieldSelector": "metadata.name=backup-wire-shape"}).json()
+            individual = http.get("/api/v1/namespaces/" + binding.namespace + "/pods/backup-wire-shape").json()
+        assert (collection["apiVersion"], collection["kind"]) == ("v1", "PodList")
+        assert len(collection["items"]) == 1
+        listed = collection["items"][0]
+        assert "apiVersion" not in listed and "kind" not in listed
+        assert (individual["apiVersion"], individual["kind"]) == ("v1", "Pod")
+        assert listed["metadata"]["uid"] == individual["metadata"]["uid"] == wire_pod.metadata.uid
+        assert listed["spec"] == individual["spec"]
         with HTTPSManagementAuthorityAPI(authority=authority, binding=binding,
                                         api_server=endpoint, ssl_context=operator_trust) as api:
             arguments = dict(authority=authority, binding=binding, api=api, state_dir=tmp_path / "authority")
