@@ -8,15 +8,127 @@ as do local development and external user-selected inference APIs.
 ## Platform boundaries
 
 System services and elastic execution pools have separate capacity policies.
-Environment identities, database roles, storage scopes and credentials stay
-separate. Public web/API access uses authenticated HTTPS; database and execution
+Production, staging and development data boundaries stay separate. Public web/API
+access uses authenticated HTTPS; database and execution
 management stay private. The [native execution contract](nebius-service-execution.md)
 owns target placement, durable attempts, cancellation and fenced publication.
+
+### Personal application and shared development data boundary
+
+The [owner clarification in #1915](https://github.com/qianyi-sun/loom/issues/1915#issuecomment-5835681150)
+selects independently versioned personal frontend/API instances connected to one
+shared development database, object stores and worker pool. Personal lifecycle
+must not own or remove shared data or background services. Production and staging
+retain their data and credential boundaries. The v1 managed renderer described
+below still provisions isolated child stacks; it has **not** been converted to
+this shared-data model. Existing frozen v1 bindings retain their old meaning.
+
+Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
+block for this model. It serves the same authenticated workload routes as the
+default `application` mode and retains schema, secret-store and execution-profile
+validation, but starts none of the batch runner, taskset materializer, taskset GC,
+provider-secret GC or price-catalog synchronization loops. The shared application
+service remains responsible for those workers using their existing claims. An
+API-only process closes only its own database engine and HTTP/storage clients;
+stopping it does not cancel work owned by a different process.
+
+This setting is not a distributed singleton lock, an authorization boundary, or
+a read-only API: authorized requests can still mutate shared state. It does not
+bind sessions to a personal origin, select a per-task runtime, provision shared
+credentials, or make arbitrary application schemas compatible. Exact schema-head
+validation remains required; personal APIs must not independently run migrations.
+Legacy isolated-child configuration and management provisioning configuration are
+rejected in `api_only` mode. No existing deployment selects this mode implicitly,
+and this process capability alone is not installed shared-development acceptance.
 
 The primary region is `eu-north1`. Secondary-region routing remains disabled
 pending separate qualification; checked-in regional support is not evidence
 that a region is operationally accepted. Current deployment and recovery
 procedures are indexed in [runbooks](../runbooks/README.md).
+
+### Application-scoped browser authentication
+
+`LOOM_SVC_AUTH_SESSION_AUDIENCE_JSON` optionally supplies a protected
+`loom.application-session-audience.v1` binding: non-nil `application_id`, HTTPS
+`origin`, and positive integer `access_generation`. The origin must match the
+explicit `LOOM_SVC_PUBLIC_BASE_URL`; local HTTP, management mode and the legacy
+managed-child configuration cannot use this binding.
+
+Both one-use login challenges and browser sessions use audience- and
+purpose-separated hashes in the existing database columns. A proof issued by
+Alice's application cannot be redeemed or used through Bob's application, an
+updated access generation, a changed origin, or an unconfigured legacy service.
+Wrong-audience redemption does not consume the legitimate challenge. Password
+login, invite acceptance, refresh and team switching preserve this boundary.
+Host-only cookies and browser-origin/CSRF enforcement remain in place; a request's
+Host, forwarded headers or audience metadata cannot select the Service's audience.
+
+Cancellation retains independent Service and Control Plane authorization. The
+Service forwards its **configured** audience with the existing cookie/CSRF proofs
+on the internal hop; it never forwards a client's claimed audience. The shared
+Control Plane checks the corresponding audience-bound session row and normal
+expiry, revocation, user, team and CSRF authority. Audience metadata is not a
+credential and confers no access on its own. This internal cancellation protocol
+does not make the Control Plane a public personal-application endpoint.
+
+Unconfigured installations keep their existing authentication contract. This
+opt-in changes neither bearer tokens nor shared user/team/invitation/recovery
+permissions and needs no database migration. Account recovery and invitations
+remain data-environment operations; only their resulting sessions are app-local.
+The hash binding is **not** process revocation: protected lifecycle must stop old
+processes and revoke their access when retiring a generation. A cached process
+configuration is not a live registration check. No current provisioner supplies
+this new binding, and it does not establish installed shared-development readiness.
+
+### Application-only manifest contract
+
+`ApplicationRegistrationV1`, `ApplicationReleaseV1` and
+`SharedDevelopmentBindingV1` describe personal applications independently of the
+legacy full-environment registration. `render_application` produces exactly a
+frontend and API Deployment in `loom-dev-<slug>`, their internal Services and the
+personal HTTPS Ingress. It emits no database, PVC, migration, backup, Control Plane,
+Gateway, worker or build workload. Adding another application emits no bucket or
+policy creation request. Resource accounting includes both rolling-update surge
+Pods and zero persistent storage.
+
+The protected shared binding retains the existing development foundation's
+namespace, object-store names and runtime profile. Application source and image
+digests are independent of that executor profile; rendering does not rewrite its
+candidate SHA or task/runtime images to match the personal API. Application and
+shared schema revisions must match exactly. These input checks are not evidence
+of live schema, publication authenticity, running-process fencing or execution
+readiness: their caller must qualify the release and shared binding first.
+
+The API selects `api_only`, the application session audience and shared CP/Gateway
+endpoints. Namespace-local Secrets supply its individually revocable database
+login and CA (`loom-application-db`), object access (`loom-application-storage`),
+and the **shared** encryption keyring (`loom-application-auth`); the renderer does
+not create those Secrets. It supplies no admin/worker/batch-runner/JWT-signing or
+backup credentials and no workload Kubernetes permissions. The static frontend
+receives no secrets. Developer-controlled backend code still has trusted
+development-data access, not malicious-code isolation.
+
+Personal NetworkPolicies deny ingress/egress by default, admit API/web ingress
+only from the configured ingress controller, and permit API egress to the shared
+database/CP/Gateway, cluster DNS and public IPv4 HTTPS (excluding private,
+loopback and link-local destinations). This is not a hostname-level HTTPS
+allowlist. The renderer never changes the shared namespace's policies: a protected
+shared-side admission update is required for these connections to work. It also
+does not rename/recreate the existing shared foundation.
+
+No management route or provisioner invokes this renderer yet. Legacy frozen
+full-stack operations retain their original meaning. Credential provisioning,
+active registration/lifecycle fencing, schema coordination, shared network
+admission and source qualification remain prerequisites for activating the new
+personal applications; rendered resources alone do not satisfy installed
+four-plus-one acceptance.
+
+Application rendering rejects a hostname already used by the shared foundation.
+It also rejects the legacy environment `namespace_authority`: that admission
+contract requires a full-environment identity, not an application identity.
+Versioned application namespace authority must be qualified before management can
+activate this path; application IDs must not be relabelled as environment IDs to
+bypass that boundary.
 
 ## Managed environment identity and rendering
 

@@ -22,10 +22,24 @@ the generated type permits it.
 
 `required_per_service` may override requiredness for a consuming service. The
 storage keys use this only for Loom Service: `LOOM_SVC_SERVICE_MODE=application`
-(the default) still requires both keys at settings validation, while `management`
-needs no workload-storage credentials. Other services retain required storage
+(the default) and `api_only` both require keys at settings validation, while
+`management` needs no workload-storage credentials. `api_only` retains workload
+HTTP routes without starting the shared background workers; it does not itself
+provide shared-environment identity or isolation. Other services retain required storage
 keys. Mode-specific validation belongs in the settings wrapper, not a generated
 file. An unknown service mode is rejected at startup.
+
+`LOOM_SVC_AUTH_SESSION_AUDIENCE_JSON` is an optional, non-secret, protected
+application binding for services sharing a database. Its
+`loom.application-session-audience.v1` JSON contains `application_id` (UUID),
+`origin` (HTTPS origin matching explicit `public_base_url`) and
+`access_generation` (positive integer). It binds login challenges and sessions
+to one application without changing bearer-token or shared-account permissions.
+Local HTTP, management mode and legacy managed-child configuration reject it.
+Unset retains legacy behavior; configured services never fall back to legacy
+session hashes. Changing the generation requires a protected lifecycle operation
+that stops/revokes old processes; editing a value alone is not revocation.
+See [application-scoped authentication](nebius-primary-platform.md#application-scoped-browser-authentication).
 
 `render_config` supports scalar values plus the schema's list and table field
 forms. Descriptions are copied into generated configuration surfaces, so they

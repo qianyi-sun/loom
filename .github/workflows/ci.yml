@@ -889,7 +889,7 @@ jobs:
             npx --no-install vitest run --coverage \
               "${web_tests[@]}" \
               scripts/frontend-route-browser-smoke.test.mjs \
-              scripts/staging-admin-browser-smoke.test.mjs
+              scripts/admin-browser-smoke.test.mjs
           else
             cd web
             npm run test:coverage

@@ -2,6 +2,15 @@ import { type InviteLookup, type UserRegistrationEntry } from "./admin";
 import { AuthSessionLoadError, apiBase, apiFetch, authHeaders, qs } from "./core";
 import { type Team } from "./runs";
 
+export class TeamSwitchRejectedError extends Error {
+  constructor(status: number) {
+    super(status === 404
+      ? "That team no longer exists. Your current team is unchanged."
+      : "You cannot switch to that team. It may be disabled or you may no longer have access. Your current team is unchanged.");
+    this.name = "TeamSwitchRejectedError";
+  }
+}
+
 export interface AuthTeam {
   id: string;
   name: string;
@@ -151,6 +160,9 @@ export async function mutateAuthSession(path: string, body: unknown): Promise<Au
     throw new AuthSessionLoadError("network");
   }
 
+  if (path === "/api/v1/auth/team" && (response.status === 403 || response.status === 404)) {
+    throw new TeamSwitchRejectedError(response.status);
+  }
   return parseAuthSessionResponse(response);
 }
 

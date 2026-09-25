@@ -63,19 +63,10 @@ For public repository operation:
 - The singleton admin secret is an operator/bootstrap credential, not a normal
   browser identity. Public users use persisted user sessions and team
   memberships.
-- Staging browser acceptance has one narrow exception: a singleton admin bearer
-  may call `/api/v1/auth/staging-admin-browser-session` only when
-  `LOOM_ENV=staging`, targeting an existing enabled platform-admin owner of the
-  enabled `admin` team. The audited exchange changes no authority, issues a
-  distinct Secure HttpOnly SameSite=Lax cookie for at most 900 seconds, cannot
-  refresh, and is invalid outside staging. The cookie may only read product
-  state or call the exact logout endpoint; every other unsafe method fails
-  closed before route handling. The exchange does not update the target's normal
-  login timestamp and also returns and audits the immutable service build SHA.
-  It is not a production or normal user login mechanism. The Compose CI smoke
-  renders the service as `development` and proves this endpoint remains `404`;
-  only a candidate-bound brokered protected-staging rollout may exercise the
-  positive exchange.
+- Browser acceptance uses normal account login, CSRF, team access, and logout.
+  The staging-only operator-to-browser exchange is retired. Credentials from
+  its former cookie namespace are rejected even if an unexpired database row
+  remains; they must never acquire normal session write authority.
 - Invite onboarding uses one-time revealed `loom_invite_...` links. The
   database stores only invite hashes and safe prefixes; invite list, lookup,
   logs, and audit metadata must never include raw invite codes. Accepting an

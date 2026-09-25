@@ -211,9 +211,9 @@ them. Lazy-route fixtures must wire `RouteRecoveryBoundary` with
 `retryPolicy="reload-required"`; ordinary route failures retain the transient
 Retry policy.
 
-The staging admin browser flow remains a broker-owned, candidate-bound healthy
-acceptance check. Disposable local environments remain non-protected development
-with only the credential-free deny probe. Neither path may inject recovery
-faults, mint or read an admin session for local tests, relax its console guard,
-or substitute for the local browser matrix. Protected rollout acceptance
-validates the fixed candidate without fault injection.
+Admin browser acceptance uses normal account login through
+`web/scripts/admin-browser-smoke.mjs`. It remains a healthy-path check without
+fault injection. The local recovery matrix continues to own injected failures;
+normal-login browser acceptance does not replace it. Credentials must come from
+approved environment/file secret references, and the temporary browser session
+must be logged out and closed after the run.

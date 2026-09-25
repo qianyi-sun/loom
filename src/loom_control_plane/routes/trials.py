@@ -12,6 +12,7 @@ from sqlalchemy import insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.application_session import ApplicationSessionAudienceV1
 from loom.auth import AuthContext, is_admin, verify_bearer_token
 from loom.benchmark_profiles import reject_non_runnable_benchmark_profiles
 from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
@@ -47,7 +48,6 @@ from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_service.auth_guards import require_human_or_admin, require_scope
 from loom_service.session_auth import (
-    is_staging_admin_browser_session,
     verify_csrf,
     verify_session_cookie,
 )
@@ -615,9 +615,18 @@ async def cancel_trial(
         )
         if not authorization:
             cookie = request.cookies.get("loom_session")
-            if is_staging_admin_browser_session(cookie):
-                raise HTTPException(status_code=403, detail="validation-only browser session")
-            ctx = require_human_or_admin(await verify_session_cookie(session, cookie))
+            audience = None
+            raw_audience = request.headers.get("X-Loom-Session-Audience")
+            if raw_audience is not None:
+                if len(raw_audience) > 4096:
+                    raise HTTPException(status_code=401, detail="invalid session audience")
+                try:
+                    audience = ApplicationSessionAudienceV1.model_validate_json(raw_audience)
+                except ValueError:
+                    raise HTTPException(status_code=401, detail="invalid session audience") from None
+            # Shared CP accepts sessions from multiple applications, but the
+            # declared audience authenticates nothing without its bound proof.
+            ctx = require_human_or_admin(await verify_session_cookie(session, cookie, audience=audience))
             verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
             require_scope(ctx, "submit")
             if ctx.team_id is not None and not is_admin(ctx):

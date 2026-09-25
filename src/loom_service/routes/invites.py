@@ -375,6 +375,7 @@ async def accept_invite(
         ctx = await verify_session_cookie(
             session,
             request.cookies.get(settings.session_cookie_name),
+            audience=settings.session_audience,
         )
         session_user = None
         if ctx is not None and ctx.type == "user":
@@ -475,6 +476,7 @@ async def accept_invite(
             user=user,
             session_ttl_seconds=settings.auth_session_ttl_sec,
             current_team_id=invite.team_id,
+            audience=settings.session_audience,
         )
         await session.flush()
         body = await _serialize_me(

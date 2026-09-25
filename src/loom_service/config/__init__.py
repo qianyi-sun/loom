@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import computed_field, model_validator
 
+from loom.application_session import ApplicationSessionAudienceV1, canonical_session_origin
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.config._generated import LoomServiceSettings as _BaseSettings
 from loom_service.public_links import configured_public_base_url
@@ -23,14 +24,34 @@ class LoomServiceSettings(_BaseSettings):
     """LoomServiceSettings adds behavior on top of the codegen'd class."""
 
     @model_validator(mode="after")
+    def _validate_session_audience(self) -> Self:
+        audience = self.session_audience
+        if audience is not None:
+            if (self.public_base_url is None or self.auth_local_http
+                    or self.service_mode == "management"
+                    or self.managed_environment_config_file is not None):
+                raise ValueError("session audience requires an explicit hosted application origin")
+            if canonical_session_origin(str(self.public_base_url)) != audience.origin:
+                raise ValueError("session audience differs from configured public origin")
+        return self
+
+    @cached_property
+    def session_audience(self) -> ApplicationSessionAudienceV1 | None:
+        if self.auth_session_audience_json is None:
+            return None
+        if len(self.auth_session_audience_json) > 4096:
+            raise ValueError("session audience JSON exceeds maximum length")
+        return ApplicationSessionAudienceV1.model_validate_json(self.auth_session_audience_json)
+
+    @model_validator(mode="after")
     def _validate_service_mode(self) -> Self:
         if (self.management_http_max_body_bytes <= 0 or self.management_http_max_inflight <= 0
                 or not math.isfinite(self.management_http_body_timeout_sec)
                 or self.management_http_body_timeout_sec <= 0):
             raise ValueError("management HTTP limits must be positive and finite")
-        if self.service_mode not in {"application", "management"}:
-            raise ValueError("service_mode must be application or management")
-        if self.service_mode == "application":
+        if self.service_mode not in {"application", "api_only", "management"}:
+            raise ValueError("service_mode must be application, api_only or management")
+        if self.service_mode in {"application", "api_only"}:
             self.storage_credentials()
         if self.managed_environment_config_file is not None and self.service_mode != "application":
             raise ValueError("child environment configuration requires application mode")
@@ -44,7 +65,7 @@ class LoomServiceSettings(_BaseSettings):
     def storage_credentials(self) -> tuple[str, str]:
         """Reject workload storage use without explicitly supplied credentials."""
         if self.minio_access_key is None or self.minio_secret_key is None:
-            raise ValueError("application mode requires storage credentials")
+            raise ValueError("workload API modes require storage credentials")
         return self.minio_access_key.get_secret_value(), self.minio_secret_key.get_secret_value()
 
     @property
