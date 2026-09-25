@@ -219,7 +219,7 @@ class VerifierDefaults(BaseModel):
     name: str
     args: dict[str, Any] = {}
     timeout_sec: float = Field(default=300, gt=0)
-    env_mode: VerifierEnvMode = "shared"
+    env_mode: VerifierEnvMode = "separate"
     user: str | int | None = None
 
 

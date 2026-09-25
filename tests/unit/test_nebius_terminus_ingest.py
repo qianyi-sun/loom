@@ -98,7 +98,7 @@ def test_adapt_fills_resources_forces_gateway_and_verifier(tmp_path: Path) -> No
     assert env["network_policies_supported"] == ["gateway-only"]
     assert env["baseline_network_policy"] == {"kind": "gateway-only"}
     assert adapted["verifier"]["user"] == "root"
-    assert adapted["verifier"]["env_mode"] == "shared"
+    assert adapted["verifier"]["env_mode"] == "separate"
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert adapted["verifier"]["args"] == {"script_path": VERIFIER_SCRIPT_PATH}
     assert stats.resources_filled
@@ -247,7 +247,7 @@ def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:
     assert "resource_limits_required" in reasons
     assert "standard_workspace_identity_required" not in reasons
     assert "custom_verifier_identity_unsupported" not in reasons
-    assert "shared_script_verifier_required" in reasons
+    assert "script_verifier_required" not in reasons
     assert "private_verifier_directory_required" in reasons
 
 

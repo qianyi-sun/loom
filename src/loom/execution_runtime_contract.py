@@ -328,6 +328,7 @@ class ExecutionRuntimePlanV1(_Strict):
     verifier_execution: VerifierExecution
     verifier: ProcessPhaseV1 | None = None
     verifier_after_agent_timeout: bool = False
+    in_place_verifier: bool = False
     sidecars: tuple[SidecarContainerV1, ...] = Field(default=(), max_length=32)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
@@ -413,13 +414,18 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        private_roles = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+        expected_roles = (
+            {"task-sandbox"}
+            if self.in_place_verifier
+            else {"task-sandbox", "verifier-sandbox"}
+        )
         if self.verifier_after_agent_timeout and (
             self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
             or self.agent_image_ref is None
             or self.verifier_execution != "in_attempt"
-            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
-            != {"task-sandbox", "verifier-sandbox"}
+            or private_roles != expected_roles
         ):
             raise ValueError("timeout verification requires an isolated attempt controller and in-attempt verifier")
         if self.controller_resources is not None:
@@ -428,8 +434,11 @@ class ExecutionRuntimePlanV1(_Strict):
                 self.agent_image_ref is None
                 or self.execution_role != "attempt"
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes}
-                != {"task-sandbox", "verifier-sandbox"}
+                or {sidecar.role_name for sidecar in sandboxes} != (
+                    {"task-sandbox"}
+                    if self.in_place_verifier
+                    else {"task-sandbox", "verifier-sandbox"}
+                )
             ):
                 raise ValueError("controller resources require an isolated attempt controller")
             if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
@@ -444,8 +453,11 @@ class ExecutionRuntimePlanV1(_Strict):
                 self.agent_image_ref is None
                 or self.execution_role != "attempt"
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes}
-                != {"task-sandbox", "verifier-sandbox"}
+                or {sidecar.role_name for sidecar in sandboxes} != (
+                    {"task-sandbox"}
+                    if self.in_place_verifier
+                    else {"task-sandbox", "verifier-sandbox"}
+                )
                 or any(sidecar.resources != self.task_resources for sidecar in sandboxes)
             ):
                 raise ValueError("resource requests require an isolated attempt controller")
@@ -479,6 +491,8 @@ class ExecutionRuntimePlanV1(_Strict):
         # Keep existing published plans byte-compatible when new fields are unused.
         if not self.verifier_after_agent_timeout:
             payload.pop("verifier_after_agent_timeout")
+        if not self.in_place_verifier:
+            payload.pop("in_place_verifier")
         if self.controller_resources is None:
             payload.pop("controller_resources")
         if self.resource_requests is None:

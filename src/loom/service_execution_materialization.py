@@ -43,6 +43,7 @@ from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -398,8 +399,8 @@ def automatic_service_execution_rejections(
         reasons.append("api_model_required")
     if trial.extra_mcp_servers or trial.extra_skills or trial.multi_model is not None:
         reasons.append("extended_agent_runtime_unsupported")
-    if task.verifier.name != "script" or task.verifier.env_mode != "shared":
-        reasons.append("shared_script_verifier_required")
+    if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
+        reasons.append("script_verifier_required")
     verifier_path = task.verifier.args.get("script_path")
     if (
         not isinstance(verifier_path, str)
@@ -409,8 +410,8 @@ def automatic_service_execution_rejections(
         or _GLOB_MAGIC.search(verifier_path)
     ):
         reasons.append("exact_verifier_path_required")
-    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared"}:
-        reasons.append("shared_verifier_required")
+    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared", "separate"}:
+        reasons.append("verifier_mode_required")
     if terminus:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
@@ -765,7 +766,13 @@ def _compile_terminus_plan(
     from loom.task_fixtures import fixture_sidecars
 
     sidecars = list(fixture_sidecars(task))
-    for role in ("task-sandbox", "verifier-sandbox"):
+    # separate keeps the idle verifier sidecar. shared grades in task-sandbox.
+    sandbox_roles = (
+        ("task-sandbox",)
+        if resolve_verifier_env_mode(task, trial) == "shared"
+        else ("task-sandbox", "verifier-sandbox")
+    )
+    for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
         user = (task.verifier.user if role == "verifier-sandbox" and task.verifier.user is not None
@@ -860,6 +867,7 @@ def _compile_terminus_plan(
         main=phase("agent", "terminus-2", agent_timeout),
         verifier_execution="in_attempt",
         verifier_after_agent_timeout=True,
+        in_place_verifier=resolve_verifier_env_mode(task, trial) == "shared",
         verifier=phase("verifier", "verify-sandbox", verifier_timeout),
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
