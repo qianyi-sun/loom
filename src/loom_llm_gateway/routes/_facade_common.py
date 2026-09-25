@@ -17,12 +17,14 @@ dialect route stays focused on the upstream contract.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, Request
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from loom.auth import AuthContext
 from loom.db.schema import ProviderConnection, ProviderConnectionShare
@@ -60,6 +62,8 @@ _TYPE_TO_DEFAULT_RATE_CARD_PROVIDER = {
     "google": "google",
     "openai-compatible": "openai",
 }
+
+_LOG = logging.getLogger(__name__)
 
 _BEARER_VALUE_RE = re.compile(
     r"(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{4,})",
@@ -332,8 +336,18 @@ async def compute_facade_cost_estimate(
         from loom_llm_gateway.provider_pricing import configured_cost
 
         if rate_card_cache is not None:
-            async with rate_card_cache.session_factory() as session:
-                return await configured_cost(session, row, model_name, usage)
+            try:
+                async with rate_card_cache.session_factory() as session:
+                    return await configured_cost(session, row, model_name, usage)
+            except SQLAlchemyError as exc:
+                # The provider has already responded. Close the failed pricing
+                # transaction before the caller records usage in a fresh one.
+                # Never log SQL/parameters or invent a resolved zero price.
+                _LOG.error("catalog_lookup_failed: %s", type(exc).__name__)
+                return CostEstimate(
+                    0, "facade:price-unknown", "unpriced", "unavailable", None,
+                    pricing_source="rate-card", unpriced_reason="catalog_lookup_failed",
+                )
         return await configured_cost(None, row, model_name, usage)
 
     if row.pricing_source == "operator-supplied":

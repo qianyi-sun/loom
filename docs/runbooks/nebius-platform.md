@@ -499,6 +499,16 @@ can occur **after the upstream model returned successfully**; an empty
 `llm_calls` result then means missing persisted usage, not proof of zero upstream
 calls. Inspect the Gateway exception before retrying a metered request.
 
+Catalog-backed provider pricing requires `SELECT` on `price_catalogs` for
+`loom_gateway`. Bootstrap reapplies this read-only grant on every rollout;
+the Gateway cannot insert, update or delete catalog prices. A catalog database
+lookup failure after a provider response is logged as `catalog_lookup_failed`.
+The facade still returns the provider response and records its token usage,
+marking cost as `unpriced` / `unavailable` with that reason, not as a known zero
+price. This uses a separate pricing transaction so a failed lookup cannot poison
+the subsequent call-recording transaction. Investigate the missing grant or
+database error; an unavailable price is not acceptance of the pricing setup.
+
 Gateway dispatch admission also requires `SELECT`, `INSERT` and `UPDATE` on
 `gateway_dispatch_receipts`, without `DELETE`. Bootstrap reapplies these grants
 on every rollout. If the Gateway returns `503 dispatch_audit_unavailable`, check
