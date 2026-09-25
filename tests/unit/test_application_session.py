@@ -60,6 +60,10 @@ def test_audience_is_validated_and_canonicalized_without_changing_legacy_default
     {"origin": " https://alice.dev.example.com"},
     {"origin": "https://alice.dev.example.com\n"},
     {"origin": "https://alice.dev.example.com:0"},
+    {"origin": "https://alice.dev.example.com/a/.."},
+    {"origin": "https://@alice.dev.example.com"},
+    {"origin": "https:alice.dev.example.com"},
+    {"origin": "https://alice.dev.example.com\\"},
 ])
 def test_invalid_audience_is_rejected(updates):
     from loom.application_session import ApplicationSessionAudienceV1
@@ -92,6 +96,9 @@ def test_audience_hash_separates_purpose_and_legacy_token_preimages():
     audience = _settings().session_audience
     raw = "loom_session_test-proof"
     session_hash = hash_browser_secret(raw, audience=audience, purpose="session")
+    # Stable wire vector includes the non-UTF-8 domain prefix. An ASCII-only
+    # replacement would permit submitting the entire preimage to legacy auth.
+    assert session_hash.hex() == "4382499f2433eb5a0480964c17d7bac628a323c27e1ce9dc8492e135647dc111"
     challenge_hash = hash_browser_secret(raw, audience=audience, purpose="login_challenge")
     assert session_hash != challenge_hash
     assert hash_browser_secret(raw, audience=None, purpose="session") == hashlib.sha256(raw.encode()).digest()
