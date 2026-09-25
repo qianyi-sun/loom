@@ -5,7 +5,15 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    SmallInteger,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PgUUID  # noqa: N811
 from sqlalchemy.orm import Mapped, mapped_column
@@ -19,8 +27,11 @@ class NebiusApplicationEffect(Base):
         UniqueConstraint("operation_id", "sequence", name="nebius_application_effect_sequence_key"),
         CheckConstraint("sequence > 0 AND effect_key ~ '^[a-zA-Z0-9._:-]{1,128}$'",
                         name="nebius_application_effect_key_check"),
-        CheckConstraint("phase IN ('prepared','dispatched','observed') AND jsonb_typeof(intent_json) = 'object'",
+        CheckConstraint("phase IN ('prepared','dispatched','observed','rejected') AND jsonb_typeof(intent_json) = 'object'",
                         name="nebius_application_effect_shape_check"),
+        CheckConstraint("(phase = 'rejected') = (rejection_status IS NOT NULL) AND "
+                        "(rejection_status IS NULL OR rejection_status IN (409,422))",
+                        name="nebius_application_effect_rejection_check"),
         CheckConstraint("(phase = 'prepared') = (dispatch_epoch IS NULL) AND (dispatch_epoch IS NULL OR dispatch_epoch > 0)",
                         name="nebius_application_effect_dispatch_check"),
         CheckConstraint("(phase = 'observed') = (observed_uid IS NOT NULL) AND "
@@ -35,4 +46,5 @@ class NebiusApplicationEffect(Base):
     dispatch_epoch: Mapped[int | None] = mapped_column(BigInteger)
     observed_uid: Mapped[str | None] = mapped_column(Text)
     observed_resource_version: Mapped[str | None] = mapped_column(Text)
+    rejection_status: Mapped[int | None] = mapped_column(SmallInteger)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())

@@ -305,6 +305,10 @@ The current application lease can read its predecessor history, not another
 application's history. A provider can record an immutable observed UID/version
 after validating the real response or reconciliation readback; PATCH/DELETE
 observations must match the intended UID. Downgrade refuses any effect history.
+An authoritative Kubernetes HTTP409/422 rejection is a separate terminal
+`rejected` record with its status code, not an observed mutation or a reset.
+The old key never dispatches again; a new key may freeze corrected preconditions.
+Timeouts, throttling and server errors cannot supply this rejection proof.
 
 This is journal authority, not Kubernetes authorization or a completed lifecycle
 worker. The provider must still validate the exact request digest, ownership,
@@ -314,6 +318,24 @@ that a late request cannot create it; safe recovery requires provider-side
 fencing before a new attempt. `observed` means that specific effect was verified,
 not that an application is healthy, credentials are retired, or capacity can be
 released. No live installer consumes this capability yet.
+
+`ApplicationKubernetesProvider` connects that journal to one-attempt HTTPS writes.
+It stamps application/incarnation and operation/effect identity, derives the request
+digest from the actual body, sends UID/resourceVersion tests in JSON PATCH and
+DeleteOptions, and disables redirects. Namespaced mutations require the namespace
+UID recorded by an observed same-application bootstrap, with live ownership readback.
+CREATE/PATCH readback verifies the expected document; DELETE202 is not retirement
+proof, and malformed readback is rejected. An uncertain dispatch only reads on
+subsequent calls, including after lease takeover. A confirmed409/422 is retained
+as rejection so trusted orchestration can use a new key after fresh observation.
+
+This internal adapter receives qualified manifests/material from trusted lifecycle
+code, not from an owner raw-manifest endpoint. It neither creates credentials nor
+coordinates process shutdown, schema compatibility or capacity release. Returned
+observed effects are historical evidence, not a new health check. Kubernetes child
+CREATE has no namespace-UID precondition: readback detects namespace replacement,
+but does not claim to fence a privileged external administrator replacing it.
+The application manager itself has no namespace replacement/delete authority.
 
 ## Managed environment identity and rendering
 

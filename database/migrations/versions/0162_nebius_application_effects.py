@@ -22,12 +22,16 @@ def upgrade() -> None:
             dispatch_epoch bigint,
             observed_uid text,
             observed_resource_version text,
+            rejection_status smallint,
             created_at timestamptz NOT NULL DEFAULT now(),
             PRIMARY KEY(operation_id,effect_key),
             CONSTRAINT nebius_application_effect_sequence_key UNIQUE(operation_id,sequence),
             CONSTRAINT nebius_application_effect_key_check CHECK (sequence > 0 AND effect_key ~ '^[a-zA-Z0-9._:-]{1,128}$'),
             CONSTRAINT nebius_application_effect_shape_check CHECK (
-                phase IN ('prepared','dispatched','observed') AND jsonb_typeof(intent_json) = 'object'),
+                phase IN ('prepared','dispatched','observed','rejected') AND jsonb_typeof(intent_json) = 'object'),
+            CONSTRAINT nebius_application_effect_rejection_check CHECK (
+                (phase = 'rejected') = (rejection_status IS NOT NULL) AND
+                (rejection_status IS NULL OR rejection_status IN (409,422))),
             CONSTRAINT nebius_application_effect_dispatch_check CHECK (
                 (phase = 'prepared') = (dispatch_epoch IS NULL) AND (dispatch_epoch IS NULL OR dispatch_epoch > 0)),
             CONSTRAINT nebius_application_effect_observation_check CHECK (

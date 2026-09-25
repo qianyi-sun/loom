@@ -69,12 +69,13 @@ class ApplicationEffect:
     dispatch_epoch: int | None
     observed_uid: str | None
     observed_resource_version: str | None
+    rejection_status: int | None
 
 
 def _view(row: NebiusApplicationEffect) -> ApplicationEffect:
     return ApplicationEffect(row.operation_id, row.effect_key, row.sequence,
                              KubernetesEffectIntent.model_validate(row.intent_json), row.phase,
-                             row.dispatch_epoch, row.observed_uid, row.observed_resource_version)
+                             row.dispatch_epoch, row.observed_uid, row.observed_resource_version, row.rejection_status)
 
 
 def _secret_targets(operation: NebiusApplicationOperation) -> set[str]:
@@ -150,7 +151,7 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
             previous = await session.scalar(select(NebiusApplicationEffect).where(
                 NebiusApplicationEffect.operation_id == lease.operation_id,
             ).order_by(NebiusApplicationEffect.sequence.desc()).limit(1))
-            if previous is not None and previous.phase != "observed":
+            if previous is not None and previous.phase not in {"observed", "rejected"}:
                 raise ManagementError("application_effect_unresolved")
             row = NebiusApplicationEffect(operation_id=lease.operation_id, effect_key=key,
                 sequence=1 if previous is None else previous.sequence + 1, intent_json=value, phase="prepared")
@@ -199,11 +200,30 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
                 raise ManagementError("invalid_application_effect_observation", 422)
             if row.phase == "prepared":
                 raise ManagementError("application_effect_not_dispatched")
+            if row.phase == "rejected":
+                raise ManagementError("application_effect_observation_conflict")
             if row.phase == "observed":
                 if (row.observed_uid, row.observed_resource_version) != (uid, resource_version):
                     raise ManagementError("application_effect_observation_conflict")
                 return
             row.phase, row.observed_uid, row.observed_resource_version = "observed", uid, resource_version
+
+    async def reject_effect(self, lease: ApplicationLease, key: str, *, status_code: int) -> None:
+        """Trusted direct API response proves no write: retain, NEVER reset.
+
+        Only exact Kubernetes conflict/validation responses qualify. Timeout,
+        throttling and server errors remain uncertain. A new key may freeze new
+        preconditions; this key and its dispatch can never be reused for a write.
+        """
+        if type(status_code) is not int or status_code not in {409, 422}:
+            raise ManagementError("invalid_application_effect_rejection", 422)
+        async with self.session_factory.begin() as session:
+            row = await self._effect(session, lease, key)
+            if row.phase == "prepared":
+                raise ManagementError("application_effect_not_dispatched")
+            if row.phase == "observed" or (row.phase == "rejected" and row.rejection_status != status_code):
+                raise ManagementError("application_effect_observation_conflict")
+            row.phase, row.rejection_status = "rejected", status_code
 
     async def effect_history(self, lease: ApplicationLease) -> list[ApplicationEffect]:
         """Include superseded/uncertain predecessors for SAME-application cleanup."""

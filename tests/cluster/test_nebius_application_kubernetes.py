@@ -10,7 +10,10 @@ import time
 import httpx
 import pytest
 
-from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
+from loom_service.application_management.kubernetes import (
+    ApplicationKubernetesProvider,
+    KubernetesEffectRejectedError,
+)
 from loom_service.environment_management.provider import ProviderWaitingError
 from tests.integration.conftest import (
     isolated_migration_postgres_url as isolated_migration_postgres_url,
@@ -72,15 +75,24 @@ async def test_journal_drives_real_create_preconditioned_patch_and_delete(applic
             target = dict(api_version="apps/v1", kind="Deployment", namespace="loom-dev-alice", name="loom-service",
                           uid=patched.observed_uid, resource_version=patched.observed_resource_version)
             deadline = time.monotonic() + 20
+            attempt = 0
             while True:
                 try:
-                    deleted = await provider.delete(lease, "delete-api", **target)
+                    deleted = await provider.delete(lease, f"delete-api-{attempt}", **target)
                     break
+                except KubernetesEffectRejectedError as exc:
+                    assert exc.status_code == 409 and attempt < 3
+                    current = await asyncio.to_thread(deployments.read_namespaced_deployment, "loom-service", "loom-dev-alice")
+                    assert current.metadata.uid == patched.observed_uid
+                    target["resource_version"] = current.metadata.resource_version
+                    attempt += 1  # Only definitive rejection permits a new key.
                 except ProviderWaitingError:
                     assert time.monotonic() < deadline, f"exact retirement did not reconcile; write status codes: {write_statuses}"
                     await asyncio.sleep(0.1)
             assert deleted.phase == "observed" and deleted.observed_resource_version is None
-            assert len(await registry.effect_history(lease)) == 4
+            history = await registry.effect_history(lease)
+            assert len(history) == 4 + attempt
+            assert sum(effect.phase == "rejected" for effect in history) == attempt
             assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
     finally:
         await asyncio.to_thread(container.stop)
