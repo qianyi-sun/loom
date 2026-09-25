@@ -130,6 +130,17 @@ def _containers(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
              **_fields(item, ("restartPolicy",))} for item in items]
 
 
+def _storage_class(item: dict[str, Any]) -> dict[str, Any]:
+    """Observe public driver options, never arbitrary parameter/credential data."""
+    allowed = {"type": {"NETWORK_SSD", "NETWORK_SSD_IO_M3"}, "csi.storage.k8s.io/fstype": {"ext4", "xfs"}}
+    raw = item.get("parameters", {})
+    known = item.get("provisioner") == "compute.csi.nebius.com" and isinstance(raw, dict)
+    parameters = {key: value for key, value in raw.items()
+                  if isinstance(value, str) and value in allowed.get(key, set())} if known else {}
+    return {**_identity(item), **_fields(item, ("provisioner", "reclaimPolicy", "volumeBindingMode")),
+            "parameters": parameters, "parameters_complete": known and len(parameters) == len(raw)}
+
+
 def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", namespace):
         raise DeploymentError("invalid namespace")
@@ -192,8 +203,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
             "requested_storage": item["spec"].get("resources", {}).get("requests", {}).get("storage"),
             "phase": item.get("status", {}).get("phase"),
         } for item in volumes],
-        "storage_classes": [{**_identity(item), **_fields(item, ("provisioner", "reclaimPolicy", "volumeBindingMode"))}
-                            for item in storage_classes],
+        "storage_classes": [_storage_class(item) for item in storage_classes],
         "unverified": ["running_candidate_correspondence", "provider_iam", "wildcard_dns_tls", "management_installation", "platform_child_allowance",
                        "live_nebius_pool_limits_and_quota", "concurrent_owner_acceptance"],
     }
