@@ -58,7 +58,21 @@ def process_dependencies(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     async def worker(**_kwargs: object) -> None:
         await asyncio.Event().wait()
 
+    create_storage = service_app.create_minio_client
+
+    def storage(*args, **kwargs):
+        client = create_storage(*args, **kwargs)
+        close = client.close
+
+        def recorded_close():
+            close()
+            events.append("storage-closed")
+
+        monkeypatch.setattr(client, "close", recorded_close)
+        return client
+
     monkeypatch.setattr(service_app, "create_async_engine", engine)
+    monkeypatch.setattr(service_app, "create_minio_client", storage)
     monkeypatch.setattr(service_app, "_assert_schema_startup", schema)
     monkeypatch.setattr(service_app, "_assert_secret_store_startup", secrets)
     for name in ("batch_run_loop", "taskset_materializer_run_loop", "taskset_gc_run_loop",
@@ -87,7 +101,7 @@ async def test_api_process_owns_workers_only_in_application_mode(mode, process_d
         assert hasattr(app.state, "session_factory")
         clients = (app.state.http_client, app.state.gateway_client)
         assert all(not client.is_closed for client in clients)
-    assert process_dependencies[-1] == "engine-closed"
+    assert process_dependencies[-2:] == ["storage-closed", "engine-closed"]
     assert all(task.done() and task.cancelled() for task in workers)
     assert all(client.is_closed for client in clients)
     assert not hasattr(app.state, "session_factory")
@@ -115,6 +129,7 @@ async def test_four_and_fifth_api_instances_do_not_duplicate_shared_workers(proc
         assert all(not task.done() for task in workers)
     assert all(task.cancelled() for task in workers)
     assert process_dependencies.count("engine-closed") == 6
+    assert process_dependencies.count("storage-closed") == 6
 
 
 @pytest.mark.parametrize("missing", ["minio_access_key", "minio_secret_key"])

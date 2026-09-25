@@ -44,7 +44,7 @@ class LoomServiceSettings(_BaseSettings):
     def storage_credentials(self) -> tuple[str, str]:
         """Reject workload storage use without explicitly supplied credentials."""
         if self.minio_access_key is None or self.minio_secret_key is None:
-            raise ValueError("application mode requires storage credentials")
+            raise ValueError("workload API modes require storage credentials")
         return self.minio_access_key.get_secret_value(), self.minio_secret_key.get_secret_value()
 
     @property
