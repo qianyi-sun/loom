@@ -431,6 +431,20 @@ def test_private_sandboxes_have_disjoint_filesystems_and_full_resource_request(
             "subPath": "loom-sandbox-runtime",
             "readOnly": True,
         }
+        for filename in ("hosts", "resolv.conf"):
+            network_file = next(
+                (m for m in mounts if m["mountPath"] == f"/etc/{filename}"), None,
+            )
+            assert network_file == {
+                "name": f"{sidecar['name']}-socket",
+                "mountPath": f"/etc/{filename}",
+                "subPath": f"network/{filename}",
+            }
+        assert {
+            "name": f"{sidecar['name']}-socket",
+            "mountPath": f"/loom/sandboxes/{sidecar['name']}",
+        } in pod["initContainers"][0]["volumeMounts"]
+        assert not any(m["mountPath"].startswith("/etc/") for m in execution["volumeMounts"])
         assert sidecar["securityContext"]["readOnlyRootFilesystem"] is False
         assert sidecar["securityContext"]["runAsNonRoot"] is True
         assert sidecar["securityContext"]["capabilities"]["drop"] == ["ALL"]
