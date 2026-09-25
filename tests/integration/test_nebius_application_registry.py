@@ -203,6 +203,8 @@ def test_backfill_and_empty_downgrade_preserve_frozen_legacy_records(application
 
 
 def test_downgrade_refuses_to_erase_application_registration(application_database):
+    # Pin the migration under test rather than assert against the evolving head.
+    migrate(application_database, "downgrade", "0160")
     with application_database.begin() as connection:
         application(connection)
     with pytest.raises(DBAPIError, match="cannot remove application registration history"):

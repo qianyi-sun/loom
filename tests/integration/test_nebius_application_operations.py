@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import replace
 from uuid import uuid4
 
@@ -313,3 +314,72 @@ async def test_leases_use_database_expiry_epochs_and_all_identity_fields(applica
     assert (await registry.retry(first.operation_id, principal=alice)).phase == "pending"
     third = await registry.claim(first.operation_id)
     assert third.runner_epoch == second.runner_epoch + 1
+
+
+async def test_foreign_transition_and_retry_cannot_mutate_an_application(applications):
+    registry, _, (alice, bob), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="create", **prepare())
+    for foreign in (bob, replace(alice, team_id=uuid4())):
+        with pytest.raises(ManagementError, match="application_forbidden"):
+            await registry.transition(first.application_id, principal=foreign, idempotency_key="foreign-stop",
+                                      action="destroy_retained", expected_generation=1)
+        with pytest.raises(ManagementError, match="application_forbidden"):
+            await registry.retry(first.operation_id, principal=foreign)
+    assert (await registry.list_applications(principal=alice))[0].deployment_generation == 1
+
+
+async def test_duplicate_transition_replays_and_key_reuse_conflicts(applications):
+    registry, _, (alice, _), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="create", **prepare())
+    changes = await asyncio.gather(*[
+        registry.transition(first.application_id, principal=alice, idempotency_key="same-stop", action="suspend", expected_generation=1)
+        for _ in range(3)
+    ])
+    assert all(change == changes[0] for change in changes)
+    with pytest.raises(ManagementError, match="idempotency_conflict"):
+        await registry.transition(first.application_id, principal=alice, idempotency_key="same-stop", action="destroy_retained", expected_generation=2)
+
+
+async def test_update_capacity_failure_preserves_current_generation_and_larger_hold_is_retained(applications, platform_inputs):
+    from loom.db.nebius_application_operation_schema import NebiusApplicationReservation
+    from loom.db.nebius_environment_schema import NebiusPlatformBudget
+    from loom.nebius_environment_render import _envelope
+
+    registry, factory, (alice, _), prepare, _, _ = applications
+    plan = prepare()
+    first = await registry.create(principal=alice, idempotency_key="create", **plan)
+    await _observed_complete(factory, first.operation_id)
+    bigger = _next_plan(plan, platform_inputs)
+    files = copy.deepcopy(bigger["prepared"].files)
+    for docs in files.values():
+        for doc in docs:
+            if doc["kind"] == "Deployment":
+                doc["spec"]["template"]["spec"]["containers"][0]["resources"]["requests"]["cpu"] = "500m"
+    bigger["prepared"] = replace(bigger["prepared"], files=files, platform_envelope=_envelope(files))
+    cluster = plan["prepared"].registration.cluster_id
+    async with factory.begin() as session:
+        (await session.get(NebiusPlatformBudget, cluster)).cpu_millis = plan["prepared"].platform_envelope.cpu_millis
+    args = dict(principal=alice, idempotency_key="grow", action="update", expected_generation=1, release_id=bigger["release"].release_id)
+    with pytest.raises(ManagementError, match="platform_capacity_exhausted"):
+        await registry.transition(first.application_id, **args, **bigger)
+    assert (await registry.list_applications(principal=alice))[0].deployment_generation == 1
+    assert (await registry.get_operation(first.operation_id, principal=alice)).phase == "completed"
+    async with factory.begin() as session:
+        (await session.get(NebiusPlatformBudget, cluster)).cpu_millis = bigger["prepared"].platform_envelope.cpu_millis
+    updated = await registry.transition(first.application_id, **args, **bigger)
+    await _observed_complete(factory, updated.operation_id)
+    smaller = _next_plan(bigger, platform_inputs)
+    await registry.transition(first.application_id, principal=alice, idempotency_key="shrink", action="update", expected_generation=2,
+                              release_id=smaller["release"].release_id, **smaller)
+    async with factory() as session:
+        hold = await session.get(NebiusApplicationReservation, first.application_id)
+        assert hold.cpu_millis == bigger["prepared"].platform_envelope.cpu_millis
+
+
+@pytest.mark.parametrize("seconds", [0, -1, 301, True, 1.5])
+async def test_invalid_lease_duration_is_rejected_before_claim(applications, seconds):
+    registry, _, (alice, _), prepare, _, _ = applications
+    first = await registry.create(principal=alice, idempotency_key="create", **prepare())
+    with pytest.raises(ValueError, match="between 1 and 300"):
+        await registry.claim(first.operation_id, lease_seconds=seconds)
+    assert (await registry.get_operation(first.operation_id, principal=alice)).phase == "pending"
