@@ -167,8 +167,15 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
                     if len(payload) + len(chunk) > 16384:
                         raise ValueError()
                     payload.extend(chunk)
-            # Successful uploader emits exactly one JSON record, not free text.
-            report = json.loads(payload)
+            # upload_backup emits one JSON record; the installed bootstrap CLI
+            # then prints its fixed success trailer. Never scan arbitrary logs
+            # for a convenient JSON fragment or accept a second report.
+            lines = payload.splitlines()
+            if lines[-1:] == [b"Nebius platform backup complete"]:
+                lines.pop()
+            if len(lines) != 1:
+                raise ValueError()
+            report = json.loads(lines[0])
             if not isinstance(report, dict) or set(report) != {"backup_key", "sha256", "bytes"}:
                 raise ValueError()
             stage = "backup_readback"

@@ -137,13 +137,13 @@ def test_backup_report_accepts_real_successful_uploader_entrypoint(evidence, tmp
     uploaded = []
 
     class Storage:
-        def upload_file(self, filename, bucket, key, *, ExtraArgs):
+        def upload_file(self, filename, bucket, key, **kwargs):
             assert filename == str(dump) and bucket == "dedicated-backups"
-            assert ExtraArgs == {"Metadata": {"sha256": digest}}
+            assert kwargs == {"ExtraArgs": {"Metadata": {"sha256": digest}}}
             uploaded.append(key)
 
-        def head_object(self, *, Bucket, Key):
-            assert Bucket == "dedicated-backups" and Key == uploaded[0]
+        def head_object(self, **kwargs):
+            assert kwargs == {"Bucket": "dedicated-backups", "Key": uploaded[0]}
             return {"ContentLength": 17, "Metadata": {"Sha256": digest}}
 
     config = tmp_path / "config.json"
