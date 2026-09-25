@@ -1,7 +1,7 @@
 """Personal lifecycle authority never inherits full-environment privileges."""
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -83,12 +83,13 @@ def test_application_authority_is_minimal_and_admission_precedes_bootstrap(platf
         "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
         "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
         "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
+        "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
         "ClusterRole", "ClusterRole", "ClusterRoleBinding",
     ]
     roles = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "ClusterRole"}
     resources = roles[authority.name + "-resources"]["rules"]
     assert {resource for rule in resources for resource in rule["resources"]} == {
-        "deployments", "services", "secrets", "serviceaccounts", "ingresses", "networkpolicies", "pods", "replicasets",
+        "deployments", "services", "secrets", "serviceaccounts", "ingresses", "networkpolicies", "pods", "replicasets", "resourcequotas",
     }
     bootstrap = roles[authority.name + "-bootstrap"]["rules"]
     assert bootstrap == [
@@ -99,6 +100,12 @@ def test_application_authority_is_minimal_and_admission_precedes_bootstrap(platf
     ]
     assert not any("*" in rule[key] for rule in resources + bootstrap for key in ("resources", "verbs", "apiGroups"))
     assert all(doc["spec"]["failurePolicy"] == "Fail" for doc in docs if doc["kind"] == "ValidatingAdmissionPolicy")
+    quotas = [rule for rule in resources if "resourcequotas" in rule["resources"]]
+    assert quotas == [
+        {"apiGroups": [""], "resources": ["resourcequotas"], "verbs": ["create"]},
+        {"apiGroups": [""], "resources": ["resourcequotas"], "verbs": ["get", "patch", "delete"],
+         "resourceNames": ["loom-application-retired"]},
+    ]
 
 
 def test_application_authority_renderer_revalidates_unchecked_input(platform_inputs):
@@ -107,3 +114,45 @@ def test_application_authority_renderer_revalidates_unchecked_input(platform_inp
     authority = authority_for(inputs(platform_inputs)[2]).model_copy(update={"namespace": "kube-system"})
     with pytest.raises(ValueError):
         render_application_authority(authority)
+
+
+def test_pod_fence_closes_all_pod_admission_with_bound_intent(platform_inputs):
+    from loom.nebius_application_authority import application_pod_fence
+
+    row, _, shared, _ = inputs(platform_inputs)
+    operation_id = uuid4()
+    fence = application_pod_fence(authority_for(shared), row, operation_id=operation_id)
+    assert fence["kind"] == "ResourceQuota" and fence["apiVersion"] == "v1"
+    assert fence["spec"] == {"hard": {"pods": "0"}}
+    assert fence["metadata"]["name"] == "loom-application-retired"
+    assert fence["metadata"]["namespace"] == "loom-dev-alice"
+    assert fence["metadata"]["labels"] == {
+        "loom.nebius/application-installation": INSTALLATION,
+        "loom.nebius/data-environment-id": str(shared.data_environment_id),
+        "loom.nebius/application-id": str(row.application_id), "loom.nebius/incarnation": str(row.incarnation),
+    }
+    assert fence["metadata"]["annotations"] == {
+        "loom.nebius/deployment-generation": "1", "loom.nebius/operation-id": str(operation_id),
+    }
+
+
+@pytest.mark.parametrize("change", ["cluster", "data", "shared-namespace", "nil-operation", "unchecked-generation", "unchecked-authority"])
+def test_pod_fence_rejects_invalid_protected_identity(platform_inputs, change):
+    from loom.nebius_application_authority import application_pod_fence
+
+    row, _, shared, _ = inputs(platform_inputs)
+    authority, operation_id = authority_for(shared), uuid4()
+    if change == "cluster":
+        authority = authority.model_copy(update={"cluster_id": "foreign"})
+    elif change == "data":
+        authority = authority.model_copy(update={"data_environment_id": uuid4()})
+    elif change == "shared-namespace":
+        authority = authority.model_copy(update={"shared_namespace": row.application_namespace})
+    elif change == "nil-operation":
+        operation_id = UUID(int=0)
+    elif change == "unchecked-generation":
+        row = row.model_copy(update={"deployment_generation": 0})
+    else:
+        authority = authority.model_copy(update={"namespace": "kube-system"})
+    with pytest.raises(ValueError):
+        application_pod_fence(authority, row, operation_id=operation_id)
