@@ -772,6 +772,9 @@ and authenticated public HTTPS. Backup execution evidence accepts omitted Pod
 type fields only from an exact `v1/PodList`; explicit conflicting types fail.
 The recorded Job/Pod ownership, executable template, zero restarts and unchanged
 readback remain required before accepting the uploader's checksum report.
+The bounded uploader log must contain exactly one JSON report, optionally followed
+by the bootstrap CLI's exact `Nebius platform backup complete` line. Arbitrary
+text, additional reports or other trailers are rejected; logs are never exported.
 It does **not** prove restoring that backup,
 credential renewal, two-owner lifecycle, or shared task/build execution. Those
 remain separate installed acceptance steps; a green workflow alone does not
