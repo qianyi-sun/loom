@@ -201,3 +201,12 @@ def test_fixture_job_orders_native_roles_without_pod_wide_hostname_aliases() -> 
     assert "hostAliases" not in pod and "hostname" not in pod
     assert not pod["initContainers"][1].get("volumeMounts")
     assert pod["automountServiceAccountToken"] is False
+
+
+def test_manual_template_cannot_supply_fixture_even_with_materialization_uuid() -> None:
+    from loom.models.task import TaskServiceExecutionV1
+
+    template = _plan().canonical_payload()
+    del template["task_revision_sha256"]
+    with pytest.raises(ValueError, match="automatic native execution"):
+        TaskServiceExecutionV1(logical_pool_id="nebius-cpu", runtime_template=template)
