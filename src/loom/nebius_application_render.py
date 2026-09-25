@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from loom.nebius_application_authority import (
+    APPLICATION_INSTALLATION_LABEL,
+    ApplicationNamespaceAuthorityV1,
+    application_namespace_binding,
+)
 from loom.nebius_application_contract import (
     ApplicationRegistrationV1,
     ApplicationReleaseV1,
@@ -41,6 +46,7 @@ class RenderedApplication:
 def render_application(
     registration: ApplicationRegistrationV1, release: ApplicationReleaseV1,
     shared: SharedDevelopmentBindingV1, foundation: FoundationBinding,
+    *, authority: ApplicationNamespaceAuthorityV1 | None = None,
 ) -> RenderedApplication:
     """Render only application-owned objects; retain the shared execution profile."""
     # Also reject unchecked model_copy/model_construct inputs at this boundary.
@@ -48,8 +54,13 @@ def render_application(
     release = ApplicationReleaseV1.model_validate(release.model_dump())
     shared = SharedDevelopmentBindingV1.model_validate(shared.model_dump())
     foundation = FoundationBinding.model_validate(foundation.model_dump())
-    if foundation.namespace_authority is not None:
+    if foundation.namespace_authority is not None and authority is None:
         raise ValueError("legacy environment namespace authority cannot admit personal applications")
+    if authority is not None:
+        authority = ApplicationNamespaceAuthorityV1.model_validate(authority.model_dump())
+        if (authority.cluster_id != shared.cluster_id or authority.data_environment_id != shared.data_environment_id
+                or authority.shared_namespace != shared.platform_namespace):
+            raise ValueError("application authority differs from shared binding")
     shared.validate_foundation(foundation)
     if (row.cluster_id != shared.cluster_id or row.data_environment_id != shared.data_environment_id
             or row.release_id != release.release_id
@@ -68,6 +79,9 @@ def render_application(
     namespace = _namespace(ns)
     namespace["metadata"]["labels"]["loom.nebius/data-environment-id"] = str(shared.data_environment_id)
     files: dict[str, list[dict[str, Any]]] = {"00-namespace.yaml": [namespace]}
+    if authority is not None:
+        namespace["metadata"]["labels"][APPLICATION_INSTALLATION_LABEL] = str(authority.installation_id)
+        files["00-namespace.yaml"].append(application_namespace_binding(authority, ns))
     account = _obj("ServiceAccount", "loom-platform", ns)
     account["automountServiceAccountToken"] = False
     ingress_peer = {
