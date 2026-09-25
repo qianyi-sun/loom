@@ -11,7 +11,9 @@ from sqlalchemy import func, select
 from loom.nebius_application_contract import ApplicationRegistrationV1
 from loom.nebius_application_render import render_application
 from loom_service.environment_management.registry import ManagementError
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_render import inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -36,8 +38,11 @@ def applications(environment_registry, platform_inputs):
 
 
 async def test_concurrent_create_replay_freezes_one_plan_and_one_reservation(applications):
+    from loom.db.nebius_application_operation_schema import (
+        NebiusApplicationOperation,
+        NebiusApplicationReservation,
+    )
     from loom.db.nebius_application_schema import NebiusApplication
-    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation, NebiusApplicationReservation
 
     registry, factory, (alice, _), prepare, _, _ = applications
     results = await asyncio.gather(*[
@@ -141,7 +146,10 @@ async def test_application_and_legacy_share_one_capacity_allowance(applications,
 
 
 async def test_name_conflict_rolls_back_operation_and_reservation(applications):
-    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation, NebiusApplicationReservation
+    from loom.db.nebius_application_operation_schema import (
+        NebiusApplicationOperation,
+        NebiusApplicationReservation,
+    )
 
     registry, factory, (alice, _), prepare, legacy, prepare_legacy = applications
     await legacy.create(principal=alice, idempotency_key="legacy-name", prepared=prepare_legacy())
