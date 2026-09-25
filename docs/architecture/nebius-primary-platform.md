@@ -181,6 +181,26 @@ qualify immutable application inputs and enforce lifecycle generations. Renderin
 RBAC alone supplies none of those controls and does not claim malicious-manager
 isolation or authorize any live permission change.
 
+### Shared-side application network admission
+
+`render_application_shared_access` supplies three protected-installer policies in
+the shared development namespace. They admit personal API Pods to PostgreSQL
+(TCP5432), Control Plane (TCP8080) and Gateway (TCP9100), not to the shared frontend
+or API. Each peer requires the installation and data-environment namespace labels,
+restricted Pod Security and application/incarnation identity labels **together
+with** the `app=loom-service` Pod label. Personal web Pods, other installations,
+other data bindings and unlabelled namespaces receive no additional access.
+The same policy set admits newly registered developers without per-owner edits.
+
+The renderer validates its authority, shared-data and development-only foundation
+bindings. It does not change existing shared service policies, grant shared writes
+to the personal manager, or install anything. Activation belongs to the protected
+shared installation once credentials and lifecycle admission are ready. Namespace
+labels must remain under protected management; these rules are network admission,
+not per-user authorization or isolation from hostile development backend code.
+Disposable Kubernetes tests exercise actual CNI allow/deny behavior against live
+fixture servers; they do not establish installed application readiness.
+
 ### Application registration and shared name claims
 
 Migration `0160` adds `nebius_applications`, a distinct management registration
