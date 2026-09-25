@@ -279,6 +279,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         if local_execution_enabled():
             install_behavior_pipeline_public_adapter(app=app, settings=settings)
 
+        # Personal HTTP processes share the data plane, but do not own its
+        # workers. Keep schema/auth/client initialization and request behavior
+        # above this boundary; every background loop belongs below it.
+        # The outer lifespan still closes this process's clients and engine.
+        if settings.service_mode == "api_only":
+            yield
+            return
+
         # Plan 19: batch runner background task. Picks up
         # submitted/running batches on each poll, fans out trial
         # submissions to Control Plane via the shared http_client.
