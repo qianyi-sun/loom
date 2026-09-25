@@ -1,5 +1,9 @@
 const DEFAULT_ORIGIN = "http://127.0.0.1:4173";
 const DEFAULT_ROUTE_PREFIX = "/dev";
+// #2183: the browser-test bundle is stamped with this fixed, obviously
+// synthetic revision so update-detection tests have a known "loaded" build
+// to compare the fixture's served revision against.
+const LOADED_BUILD_REVISION = "0e2e".repeat(10);
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost"]);
 
 function validatedOrigin(value) {
@@ -42,6 +46,7 @@ export function readBrowserHarnessConfig(environment = process.env) {
     apiBaseURL: `${origin}${routePrefix}/api`,
     configURL: `${origin}${routePrefix}/loom-frontend-config.json`,
     runtimeEnvironment: routePrefix === "/prod" ? "production" : "development",
+    loadedBuildRevision: LOADED_BUILD_REVISION,
   });
 }
 

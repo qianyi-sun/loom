@@ -7,9 +7,11 @@
  *
  * The loaded frontend identity (`buildInfo.ts`) is a frozen, build-time
  * constant: it never changes for this already-open tab. The "served" check
- * (`useServedFrontendBuild`) is a live, focus-triggered poll that can drift
- * from it after a rollout — surfaced as a non-disruptive update notice with
- * an explicit refresh action, never an automatic reload or lost input.
+ * (`useServedFrontendBuild`) is a live check — every 10 visible minutes, on
+ * focus/visibility (throttled), and on opening these details — that can
+ * drift from it after a rollout. That is surfaced as a non-disruptive update
+ * notice with an explicit refresh action, never an automatic reload or lost
+ * input.
  */
 import { useState } from "react";
 
@@ -49,7 +51,10 @@ export default function VersionInfo({
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setOpen(true);
+          served.checkNow();
+        }}
         aria-label="Deployed version details"
         className="flex w-full flex-col gap-0.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-left hover:bg-slate-100"
       >
