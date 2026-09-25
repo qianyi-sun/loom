@@ -38,6 +38,7 @@ from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
+from loom.verifier_runtime import resolve_verifier_env_mode
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
@@ -200,7 +201,16 @@ async def _run_step_impl(
         )
         verifier_started = time.monotonic()
         try:
-            if ctx.workspace_staging_policy is not None:
+            in_place = resolve_verifier_env_mode(ctx.task_config, ctx.trial_config) == "shared"
+            if ctx.workspace_staging_policy is not None and in_place:
+                await materialize_workspace(
+                    driver=ctx.driver,
+                    task_dir=ctx.task_dir,
+                    dst=workdir,
+                    policy=ctx.workspace_staging_policy,
+                    phase="verifier",
+                )
+            elif ctx.workspace_staging_policy is not None:
                 factory = ctx.verifier_driver_factory
                 if factory is None:
                     raise RuntimeError(
