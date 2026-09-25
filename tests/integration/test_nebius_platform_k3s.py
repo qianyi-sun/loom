@@ -21,11 +21,21 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("mode", ["standalone", "management"])
+@pytest.mark.parametrize("mode", ["standalone", "management", "application"])
 def test_complete_platform_resources_and_pods_pass_server_admission(
     request: pytest.FixtureRequest, tmp_path: Path, mode: str,
 ) -> None:
-    if mode == "management":
+    if mode == "application":
+        from loom.nebius_application_render import render_application
+        from tests.unit.test_nebius_application_render import inputs
+
+        platform = request.getfixturevalue("platform_inputs")
+        files = {
+            slug + "/" + filename: documents
+            for slug in ("alice", "bob", "carol", "dave", "eve")
+            for filename, documents in render_application(*inputs(platform, slug)).files.items()
+        }
+    elif mode == "management":
         from loom_service.environment_management.deployment import (
             ManagementDeployment,
             render_management,
