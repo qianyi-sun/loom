@@ -26,6 +26,7 @@ class KubernetesAPI:
         self.lose_response = False
         self.hide_objects = False
         self.pending_delete = False
+        self.reject_next = None
 
     def handle(self, request):
         path = request.url.path
@@ -34,6 +35,10 @@ class KubernetesAPI:
             return httpx.Response(200 if value else 404, json=value or {})
         body = json.loads(request.content)
         self.mutations.append((request.method, path, body))
+        if self.reject_next is not None:
+            status = self.reject_next
+            self.reject_next = None
+            return httpx.Response(status, json={"kind": "Status", "code": status})
         if request.method == "POST":
             path += "/" + body["metadata"]["name"]
             if path in self.objects:
@@ -129,14 +134,21 @@ async def test_uncertain_create_and_absence_never_authorize_resend(provider, app
     assert result.phase == "observed" and len(api.mutations) == 1
 
 
-async def test_namespaced_create_requires_recorded_unchanged_namespace(provider):
+@pytest.mark.parametrize("change", ["uid", "data", "pod_security"])
+async def test_namespaced_create_requires_recorded_unchanged_namespace(provider, change):
     client, api, _, plan, lease = provider
     document = named(plan["prepared"], "Deployment", "loom-service")
     with pytest.raises(ProviderBlockedError, match="namespace_identity"):
         await client.create(lease, "api", document)
     assert api.mutations == []
     await namespace_ready(provider)
-    api.objects["/api/v1/namespaces/loom-dev-alice"]["metadata"]["uid"] = "replacement"
+    metadata = api.objects["/api/v1/namespaces/loom-dev-alice"]["metadata"]
+    if change == "uid":
+        metadata["uid"] = "replacement"
+    elif change == "data":
+        metadata["labels"]["loom.nebius/data-environment-id"] = "foreign"
+    else:
+        metadata["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
     with pytest.raises(ProviderBlockedError, match="namespace_identity"):
         await client.create(lease, "api", document)
     assert len(api.mutations) == 1
@@ -205,6 +217,23 @@ async def test_malformed_delete_readback_cannot_prove_old_resource_absence(provi
         await client.delete(lease, "delete-api", **target)
     assert (await registry.effect_history(lease))[-1].phase == "dispatched"
     assert len(api.mutations) == 3
+
+
+@pytest.mark.parametrize("status", [409, 422])
+async def test_definite_rejection_never_resends_old_key_but_allows_fresh_effect(provider, status):
+    from loom_service.application_management.kubernetes import KubernetesEffectRejectedError
+
+    client, api, registry, plan, lease = await namespace_ready(provider)
+    document = named(plan["prepared"], "Deployment", "loom-service")
+    api.reject_next = status
+    for _ in range(2):
+        with pytest.raises(KubernetesEffectRejectedError) as error:
+            await client.create(lease, "rejected-api", document)
+        assert error.value.status_code == status
+    assert len(api.mutations) == 2  # One namespace and ONE rejected attempt.
+    assert (await registry.effect_history(lease))[-1].phase == "rejected"
+    created = await client.create(lease, "corrected-api", document)
+    assert created.phase == "observed" and len(api.mutations) == 3
 
 
 async def test_stale_lease_cannot_issue_a_kubernetes_write(provider, applications):
