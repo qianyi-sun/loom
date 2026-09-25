@@ -182,6 +182,8 @@ async def test_retry_preserves_dispatched_effect_and_missing_keys_fail_closed(ap
 async def test_exact_bootstrap_and_runtime_material_targets_are_recorded_without_contents(applications, kind, name):
     registry, _, _, plan, _, lease = await started(applications)
     ns = plan["prepared"].registration.application_namespace
+    if kind == "Secret":
+        name += f"-{plan['prepared'].registration.incarnation.hex}-g1"
     effect = await registry.prepare_effect(lease, "setup", intent(plan, kind=kind, api_version="v1",
         name=name or ns, namespace=None if kind == "Namespace" else ns))
     assert effect.intent.name == (name or ns)
@@ -189,6 +191,21 @@ async def test_exact_bootstrap_and_runtime_material_targets_are_recorded_without
         "api_version", "kind", "namespace", "name", "action", "request_sha256", "uid", "resource_version",
     }
     assert await registry.dispatch_effect(lease, "setup") is True
+
+
+async def test_credential_effects_follow_frozen_source_not_new_stop_intent_generation(applications):
+    registry, _, alice, plan, first, lease = await started(applications)
+    prefix = f"loom-application-db-{plan['prepared'].registration.incarnation.hex}"
+    for name in ("loom-application-db", prefix + "-g2", prefix + "-g0"):
+        with pytest.raises(ManagementError, match="invalid_application_effect"):
+            await registry.prepare_effect(lease, "wrong", intent(plan, api_version="v1", kind="Secret", name=name))
+    await registry.prepare_effect(lease, "db", intent(plan, api_version="v1", kind="Secret", name=prefix + "-g1"))
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    stop_lease = await registry.claim(stopped.operation_id)
+    old_material = await registry.prepare_effect(stop_lease, "retire-db", intent(plan, api_version="v1", kind="Secret",
+        name=prefix + "-g1", action="delete", uid="old-secret-uid", resource_version="2"))
+    assert old_material.intent.name == prefix + "-g1" and stop_lease.access_generation == 2
 
 
 async def test_concurrent_distinct_intents_cannot_both_prepare_before_reconciliation(applications):
