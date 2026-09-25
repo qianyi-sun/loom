@@ -16,6 +16,7 @@ from sqlalchemy import select
 from loom.db.schema import ProviderConnection, ProviderModelCache, RateCard
 from loom_service.auth_guards import is_admin
 from loom_service.dependencies import SessionAndCtx
+from loom_service.provider_connection_lookup import OPENAI_SHAPED_PROVIDER_TYPES
 from loom_service.provider_connections_service import preflight_failure_kind
 from loom_service.provider_model_classifier import classify_model_id
 
@@ -28,6 +29,19 @@ def _provider_namespace(row: ProviderConnection) -> str:
     if row.provider_type == "openai-compatible":
         return "openai"
     return row.provider_type
+
+
+def _responses_route(row: ProviderConnection) -> str:
+    """How Gateway serves a Responses request (Codex) on this connection.
+
+    Mirrors loom_llm_gateway.routes.responses._resolve_responses_support:
+    `unprobed` means Gateway probes the upstream on the first call.
+    """
+    if row.provider_type not in OPENAI_SHAPED_PROVIDER_TYPES:
+        return "unsupported"
+    if row.responses_api_supported is None:
+        return "unprobed"
+    return "native" if row.responses_api_supported else "translated"
 
 
 def _byo_model_item(
@@ -54,6 +68,7 @@ def _byo_model_item(
         "provider_connection_id": str(conn.id),
         "provider_connection_name": conn.display_name,
         "provider_connection_type": conn.provider_type,
+        "responses_route": _responses_route(conn),
         "source": source_str,
         "family": cache.family,
         "context_length": cache.context_length,

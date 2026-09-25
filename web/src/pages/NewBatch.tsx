@@ -354,7 +354,7 @@ export default function NewBatch(): JSX.Element {
                 >
                   <span className="font-semibold">{lbl}</span>
                   <span className="text-slate-500">
-                    {agentLabel(sel?.name, r.picker.agentVersion)} · {modelTxt} · n={r.nPerTask}
+                    {agentLabel(sel?.display_name ?? sel?.name, r.picker.agentVersion)} · {modelTxt} · n={r.nPerTask}
                   </span>
                 </span>
               );

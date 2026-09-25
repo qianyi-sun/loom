@@ -13,9 +13,13 @@ Each entry also declares what models it accepts:
   `"openai"`, …) or `("*",)` for "any provider the LLM Gateway can
   route". CLI adapters lock to one provider; generic agents
   (direct-completion, aider, openhands) accept anything.
-- `supported_model_sources`: subset of `{"api", "local-server", "hf"}`
-  matching the `ModelSpec.source` discriminator. Empty tuple means the
-  agent doesn't take a model at all (oracle).
+- `supported_model_sources`: subset of the `ModelSpec.source`
+  discriminator. Hosted submissions admit only `"api"`; `local-server`
+  and `hf` are retired (#2054). Empty tuple means the agent doesn't take
+  a model at all (oracle).
+- `product_support`: `"supported"` for the five product entries new
+  submissions may select; `"deferred"` (with `deferred_reason`) for the
+  rest, which remain listed so historical records stay readable.
 
 Validation at submit time uses these to reject incompatible
 (agent_name, agent_model) combos with a 400, rather than letting them
@@ -24,7 +28,7 @@ fail mid-trial on the worker. See validate_agent_model_compat below.
 Adding a new builtin: append to `_BUILTIN`. Adding a new adapter: the
 adapter ships in `loom-launcher` and is registered via
 `register_adapter`; the catalog picks it up automatically (with a
-generic "any provider, api+local-server+hf" support set — adapters
+generic "any provider, api" support set — adapters
 that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 """
 
@@ -39,6 +43,7 @@ from loom.models.types import ModelSpec
 AgentKind = Literal["builtin", "adapter"]
 ReadinessStatus = Literal["ready", "unavailable"]
 CatalogVisibility = Literal["displayed", "internal"]
+ProductSupport = Literal["supported", "deferred"]
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,12 @@ class AgentEntry:
     # Execution surfaces this runtime exposes to a task. Tasks declare
     # requirements separately in TaskConfig.required_agent_capabilities.
     provides_capabilities: frozenset[str] = frozenset()
+    # #2054: whether new hosted submissions may select this entry. Deferred
+    # entries stay in the catalog so historical records remain readable.
+    product_support: ProductSupport = "supported"
+    deferred_reason: str | None = None
+    # User-facing name when it differs from the canonical `name` (#2054).
+    display_name: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -142,6 +153,9 @@ class AgentEntry:
             "catalog_visibility": self.catalog_visibility,
             "requires_capabilities": sorted(self.requires_capabilities),
             "provides_capabilities": sorted(self.provides_capabilities),
+            "product_support": self.product_support,
+            "deferred_reason": self.deferred_reason,
+            "display_name": self.display_name or self.name,
         }
 
     def readiness_error(self) -> str | None:
@@ -152,6 +166,25 @@ class AgentEntry:
         )
         return f"{msg}. See GET /api/v1/agents for runtime setup details."
 
+
+# #2054: the only entries new hosted submissions may select. Every other
+# catalog entry is deferred pending a product decision.
+_SUPPORTED_PRODUCT_ENTRIES = frozenset(
+    {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex"},
+)
+# Adapters folded into another entry as an alias. `openhands` and
+# `openhands-sdk` run the same SDK runner; typed artifact capture and the
+# OpenHands export key on `openhands-sdk`, so that name is canonical.
+_ADAPTER_ALIASES: dict[str, tuple[str, ...]] = {
+    "openhands-sdk": ("openhands",),
+}
+# The product shows OpenHands under its familiar name.
+_ADAPTER_DISPLAY_NAMES: dict[str, str] = {
+    "openhands-sdk": "openhands",
+}
+# Only the provider API path is admitted for new hosted submissions; the
+# `local-server` and `hf` sources are retired (#2054).
+_HOSTED_MODEL_SOURCES: tuple[str, ...] = ("api",)
 
 # Built-in agents — the worker's `_default_agent_factory` knows these
 # names natively (no loom-launcher round trip).
@@ -183,11 +216,11 @@ _BUILTIN: tuple[AgentEntry, ...] = (
         kind="builtin",
         description=(
             "Direct model completion with response-text artifact projection. "
-            "Routes through the LLM Gateway and supports API, HuggingFace, "
-            "and local-server models; it does not execute workspace tools."
+            "Routes through the LLM Gateway to an OpenAI-compatible "
+            "Provider Connection; it does not execute workspace tools."
         ),
         supported_providers=("*",),
-        supported_model_sources=("api", "local-server", "hf"),
+        supported_model_sources=_HOSTED_MODEL_SOURCES,
         runtime_contract=_ready_builtin_contract(
             execution="builtin-direct-completion",
             capture="gateway-llm-calls",
@@ -231,27 +264,22 @@ _BUILTIN: tuple[AgentEntry, ...] = (
 # Per-adapter overrides for the auto-discovered supported sets. Adapters
 # that wrap a CLI bound to one provider get listed here so the SPA
 # dropdown only offers compatible models. Adapters NOT in this map fall
-# back to the permissive ("*", api+local-server+hf) defaults below.
+# back to the permissive ("*", api) defaults below. Only the `api` source
+# remains for hosted submissions (#2054); wire-protocol compatibility is
+# checked against the Provider Connection type, not the provider name.
 _ADAPTER_OVERRIDES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "claude-code": (("anthropic",), ("api",)),
-    "codex": (("openai",), ("api",)),
-    "gemini-cli": (("google",), ("api",)),
-    "kimi-cli": (("moonshot",), ("api",)),
-    "qwen-cli": (("alibaba",), ("api", "local-server", "hf")),
-    # Generic agents — keep open to any provider + any source.
-    "aider": (("*",), ("api", "local-server", "hf")),
-    "openhands": (("*",), ("api", "local-server", "hf")),
-    "openhands-sdk": (("*",), ("api", "local-server", "hf")),
-    "opencode": (("*",), ("api", "local-server", "hf")),
-    "swe-agent": (("*",), ("api", "local-server", "hf")),
-    "mini-swe-agent": (("*",), ("api", "local-server", "hf")),
+    "claude-code": (("anthropic",), _HOSTED_MODEL_SOURCES),
+    "codex": (("*",), _HOSTED_MODEL_SOURCES),
+    "gemini-cli": (("google",), _HOSTED_MODEL_SOURCES),
+    "kimi-cli": (("moonshot",), _HOSTED_MODEL_SOURCES),
+    "qwen-cli": (("alibaba",), _HOSTED_MODEL_SOURCES),
     # terminus-2 is a builtin Harbor-embedded runtime (#744); not a launcher adapter.
     # hello is an internal no-model launcher canary, so it has no model support.
     "hello": ((), ()),
 }
 _DEFAULT_ADAPTER_SUPPORT: tuple[tuple[str, ...], tuple[str, ...]] = (
     ("*",),
-    ("api", "local-server", "hf"),
+    _HOSTED_MODEL_SOURCES,
 )
 
 
@@ -413,6 +441,7 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
     """
     entries: list[AgentEntry] = list(_BUILTIN)
     builtin_names = {e.name for e in _BUILTIN}
+    alias_names = {alias for aliases in _ADAPTER_ALIASES.values() for alias in aliases}
     try:
         # Importing `loom_launcher` runs its adapters package, which
         # self-registers every shipped adapter into the registry.
@@ -421,7 +450,7 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
     except ImportError:
         return entries
     for adapter in all_adapters():
-        if adapter.name in builtin_names:
+        if adapter.name in builtin_names or adapter.name in alias_names:
             continue
         visibility = cast(
             CatalogVisibility,
@@ -456,6 +485,8 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
         entries.append(
             AgentEntry(
                 name=adapter.name,
+                aliases=_ADAPTER_ALIASES.get(adapter.name, ()),
+                display_name=_ADAPTER_DISPLAY_NAMES.get(adapter.name),
                 needs_model=needs_model,
                 kind="adapter",
                 description=description,
@@ -467,9 +498,20 @@ def list_agents(*, include_internal: bool = False) -> list[AgentEntry]:
                 readiness_message=readiness_message,
                 catalog_visibility=visibility,
                 provides_capabilities=frozenset({"workspace_exec"}),
+                **_product_support(adapter.name, visibility),
             ),
         )
     return entries
+
+
+def _product_support(name: str, visibility: CatalogVisibility) -> dict[str, Any]:
+    if name in _SUPPORTED_PRODUCT_ENTRIES:
+        return {"product_support": "supported", "deferred_reason": None}
+    if visibility == "internal":
+        reason = "internal test fixture; not a product entry"
+    else:
+        reason = "pending a future product decision (#2054)"
+    return {"product_support": "deferred", "deferred_reason": reason}
 
 
 def known_names() -> frozenset[str]:
@@ -523,6 +565,11 @@ def validate_agent_model_compat(
     agent = get_agent(agent_name)
     if agent is None:
         return f"unknown agent_name {agent_name!r}"
+    if agent.product_support != "supported":
+        return (
+            f"agent {agent_name!r} is not available for new submissions: "
+            f"{agent.deferred_reason}"
+        )
 
     if agent.needs_model and model is None:
         return f"agent {agent_name!r} requires a model — got null"
@@ -530,6 +577,12 @@ def validate_agent_model_compat(
         return f"agent {agent_name!r} does not take a model — got {model.provider}/{model.name}"
     if model is None:
         return None
+
+    if model.source not in _HOSTED_MODEL_SOURCES:
+        return (
+            f"model source {model.source!r} is retired for hosted submissions; "
+            "use an OpenAI-compatible Provider Connection"
+        )
 
     if "*" not in agent.supported_providers:
         if model.provider not in agent.supported_providers:
@@ -546,15 +599,7 @@ def validate_agent_model_compat(
             f"{model.source!r}"
         )
 
-    # source-specific structural checks: callers shouldn't send a
-    # local_server when source isn't local-server, and shouldn't omit
-    # it when it is. Same idea for hf_execution.
-    if model.source == "local-server" and not model.local_server:
-        return (
-            "model.source='local-server' requires model.local_server "
-            "to name an operator-configured server"
-        )
-    if model.source != "local-server" and model.local_server is not None:
+    if model.local_server is not None:
         return f"model.local_server set but source is {model.source!r} (not 'local-server')"
 
     readiness_err = agent.readiness_error()
@@ -568,6 +613,7 @@ __all__ = [
     "AgentEntry",
     "AgentKind",
     "CatalogVisibility",
+    "ProductSupport",
     "RuntimeContract",
     "get_agent",
     "known_names",

@@ -38,6 +38,9 @@ from sqlalchemy.dialects.postgresql import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+from loom.db.nebius_application_effect_schema import (
+    NebiusApplicationEffect as NebiusApplicationEffect,
+)
 from loom.db.nebius_application_operation_schema import (
     NebiusApplicationOperation as NebiusApplicationOperation,
 )

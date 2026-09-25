@@ -1309,6 +1309,7 @@ async def submit_trial(
             s,
             payload.provider_connection_id,
             team_id=ctx.team_id,
+            agent_submission=True,
         )
 
     resp = await forward(

@@ -101,8 +101,8 @@ readiness: their caller must qualify the release and shared binding first.
 
 The API selects `api_only`, the application session audience and shared CP/Gateway
 endpoints. Namespace-local Secrets supply its individually revocable database
-login and CA (`loom-application-db`), object access (`loom-application-storage`),
-and the **shared** encryption keyring (`loom-application-auth`); the renderer does
+login and CA (`loom-application-db-…`), object access (`loom-application-storage-…`),
+and the **shared** encryption keyring (`loom-application-auth-…`); the renderer does
 not create those Secrets. It supplies no admin/worker/batch-runner/JWT-signing or
 backup credentials and no workload Kubernetes permissions. The static frontend
 receives no secrets. Developer-controlled backend code still has trusted
@@ -128,6 +128,16 @@ It also rejects use of the legacy environment `namespace_authority` on its own:
 that admission contract requires a full-environment identity, not an application
 identity. Application IDs must not be relabelled as environment IDs to bypass
 that boundary.
+
+Personal DB, storage and authentication Secret references include the application
+incarnation and access generation. All API environment references and the DB CA
+volume move together. An old Deployment template therefore cannot implicitly
+consume newer credentials through a reused Secret name. The protected provider
+must still deliver immutable material for that generation, revoke retired DB/object
+access and terminate old connections/processes. Naming alone does not revoke a
+credential already held by a process. Existing frozen fixed-name plans retain their
+historical meaning for cleanup, but must not be activated as proof of generation-
+isolated material by the new lifecycle provider.
 
 ### Application namespace authority
 
@@ -159,12 +169,47 @@ projected workload token. The personal renderer disables token automount and emi
 no token projection or workload RBAC, and management must use qualified rendered
 inputs. This authority is not a sandbox for arbitrary manager-supplied templates.
 
+For application shutdown, `application_pod_fence` renders the fixed
+`loom-application-retired` ResourceQuota with `hard.pods: 0`. Its admission rule
+requires namespace-matching application/incarnation/data/install identities, no
+quota scopes or scope selector, and a positive deployment generation plus operation
+UUID. Updates cannot lower the generation or change the operation at the same
+generation. The manager may create only that form and may get/patch/delete only
+that quota name; it gains no general quota, shared-namespace or worker authority.
+
+The quota blocks new Pods, including delayed controller creations; it does not
+stop existing processes. A provider must observe enforcement, stop routing and
+controllers, verify Pod shutdown, and revoke credentials/connections before it
+claims retirement or releases resources. Reopening admission requires its recorded
+UID/resourceVersion delete preconditions after prior-generation retirement. No
+installer or lifecycle worker activates this primitive yet.
+
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
 and only then grant bootstrap authority. The manager must still authenticate owners,
 qualify immutable application inputs and enforce lifecycle generations. Rendering
 RBAC alone supplies none of those controls and does not claim malicious-manager
 isolation or authorize any live permission change.
+
+### Shared-side application network admission
+
+`render_application_shared_access` supplies three protected-installer policies in
+the shared development namespace. They admit personal API Pods to PostgreSQL
+(TCP5432), Control Plane (TCP8080) and Gateway (TCP9100), not to the shared frontend
+or API. Each peer requires the installation and data-environment namespace labels,
+restricted Pod Security and application/incarnation identity labels **together
+with** the `app=loom-service` Pod label. Personal web Pods, other installations,
+other data bindings and unlabelled namespaces receive no additional access.
+The same policy set admits newly registered developers without per-owner edits.
+
+The renderer validates its authority, shared-data and development-only foundation
+bindings. It does not change existing shared service policies, grant shared writes
+to the personal manager, or install anything. Activation belongs to the protected
+shared installation once credentials and lifecycle admission are ready. Namespace
+labels must remain under protected management; these rules are network admission,
+not per-user authorization or isolation from hostile development backend code.
+Disposable Kubernetes tests exercise actual CNI allow/deny behavior against live
+fixture servers; they do not establish installed application readiness.
 
 ### Application registration and shared name claims
 
@@ -233,6 +278,67 @@ no completion or reservation-release operation. Requested suspend/destroy retain
 capacity, names and shared data until future provider integration proves routing,
 Pod admission and process shutdown plus credential/connection retirement. Accepted
 shared tasks and shared users are never cancelled or revoked by these transactions.
+
+### Application external-effect evidence
+
+Migration `0162` adds a separate write-ahead journal for application Kubernetes
+mutations. The trusted lifecycle provider records a resource locator, action,
+request digest and exact UID/resourceVersion preconditions before dispatch. It
+never stores Secret bodies in this table. Secret request digests are appropriate
+only for high-entropy managed material, not guessable credentials. Targets are
+limited to frozen application manifest names, Secret names referenced by those
+Deployments' environment/CA-volume bindings, the fixed retirement quota, and
+exact-identity Pod deletion in the application
+namespace. Namespace and RoleBinding identities remain create-only.
+The current lease may also delete exact Secret names referenced by earlier frozen
+plans of the same application, with mandatory UID/resourceVersion preconditions.
+This covers updates, resumes and stops that interrupt an update before old material
+is retired. Historical references never authorize creation or patching, and neither
+another application's history nor a foreign namespace expands the target set.
+
+Effect keys have immutable replay semantics. Within each operation, only one
+unresolved effect can be prepared at a time. Dispatch is an atomic, one-winner
+transition from `prepared` to `dispatched`; only that caller receives permission
+to attempt the write. Another caller, even with the same valid lease, must not
+resend it. Expiry, retry, and supersession never erase uncertain dispatches.
+The current application lease can read its predecessor history, not another
+application's history. A provider can record an immutable observed UID/version
+after validating the real response or reconciliation readback; PATCH/DELETE
+observations must match the intended UID. Downgrade refuses any effect history.
+An authoritative Kubernetes HTTP409/422 rejection is a separate terminal
+`rejected` record with its status code, not an observed mutation or a reset.
+The old key never dispatches again; a new key may freeze corrected preconditions.
+Timeouts, throttling and server errors cannot supply this rejection proof.
+
+This is journal authority, not Kubernetes authorization or a completed lifecycle
+worker. The provider must still validate the exact request digest, ownership,
+response and patch/delete preconditions. A crash between dispatch commit and the
+request is deliberately ambiguous. A missing object on readback does not prove
+that a late request cannot create it; safe recovery requires provider-side
+fencing before a new attempt. `observed` means that specific effect was verified,
+not that an application is healthy, credentials are retired, or capacity can be
+released. No live installer consumes this capability yet.
+
+`ApplicationKubernetesProvider` connects that journal to one-attempt HTTPS writes.
+It stamps application/incarnation and operation/effect identity, derives the request
+digest from the actual body, sends UID/resourceVersion tests in JSON PATCH and
+DeleteOptions, and disables redirects. Namespaced mutations require the namespace
+UID recorded by an observed same-application bootstrap, with live ownership readback.
+CREATE/PATCH readback verifies the expected document; DELETE202 is not retirement
+proof, and malformed readback is rejected. An uncertain dispatch only reads on
+subsequent calls, including after lease takeover. A confirmed409/422 is retained
+as rejection so trusted orchestration can use a new key after fresh observation.
+
+This internal adapter receives qualified manifests/material from trusted lifecycle
+code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE
+target ownership and history before supplying UID/resourceVersion, including Pod
+owner chains; the adapter does not establish that lineage from a supplied UID.
+It neither creates credentials nor
+coordinates process shutdown, schema compatibility or capacity release. Returned
+observed effects are historical evidence, not a new health check. Kubernetes child
+CREATE has no namespace-UID precondition: readback detects namespace replacement,
+but does not claim to fence a privileged external administrator replacing it.
+The application manager itself has no namespace replacement/delete authority.
 
 ## Managed environment identity and rendering
 

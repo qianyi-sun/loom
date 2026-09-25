@@ -120,6 +120,7 @@ export {
   type AgentVersionEntry,
   type Backend,
   type ModelEntry,
+  OPENAI_SHAPED_CONNECTION_TYPES,
   type ProviderConnectionCreateBody,
   type ProviderConnectionDetail,
   type ProviderConnectionEntry,

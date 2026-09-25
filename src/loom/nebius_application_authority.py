@@ -12,11 +12,36 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from loom.nebius_application_contract import ApplicationRegistrationV1
 from loom.nebius_environment_contract import _LABEL, _PROVIDER_ID
 
 APPLICATION_INSTALLATION_LABEL = "loom.nebius/application-installation"
 _ACCOUNT = "loom-application-provisioner"
 _UUID = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_FENCE = "loom-application-retired"
+
+
+def application_pod_fence(binding: ApplicationNamespaceAuthorityV1, registration: ApplicationRegistrationV1,
+                          *, operation_id: UUID) -> dict[str, Any]:
+    """Close new Pod admission, not existing processes, credentials or requests.
+
+    A lifecycle provider must journal UID/resourceVersion and prove retirement
+    before removing this fence with exact delete preconditions on resume/update.
+    """
+    binding = ApplicationNamespaceAuthorityV1.model_validate(binding.model_dump())
+    row = ApplicationRegistrationV1.model_validate(registration.model_dump())
+    if (row.cluster_id != binding.cluster_id or row.data_environment_id != binding.data_environment_id
+            or row.application_namespace == binding.shared_namespace or operation_id.int == 0
+            or row.deployment_generation > 2**63 - 1):
+        raise ValueError("application Pod fence differs from protected identity")
+    return {"apiVersion": "v1", "kind": "ResourceQuota", "metadata": {
+        "name": _FENCE, "namespace": row.application_namespace,
+        "labels": {APPLICATION_INSTALLATION_LABEL: str(binding.installation_id),
+                   "loom.nebius/data-environment-id": str(row.data_environment_id),
+                   "loom.nebius/application-id": str(row.application_id), "loom.nebius/incarnation": str(row.incarnation)},
+        "annotations": {"loom.nebius/deployment-generation": str(row.deployment_generation),
+                        "loom.nebius/operation-id": str(operation_id)},
+    }, "spec": {"hard": {"pods": "0"}}}
 
 
 class ApplicationNamespaceAuthorityV1(BaseModel):
@@ -117,6 +142,34 @@ def render_application_authority(binding: ApplicationNamespaceAuthorityV1) -> li
     docs += _policy(binding, "secrets", group="", resource="secrets", operations=["CREATE", "UPDATE"],
                     expression=_owned_namespace(binding, "namespaceObject") +
                     " && (!has(object.type) || object.type == 'Opaque')")
+    annotations = "object.metadata.annotations"
+    generation = annotations + "['loom.nebius/deployment-generation']"
+    operation = annotations + "['loom.nebius/operation-id']"
+    old_annotations = "oldObject.metadata.annotations"
+    old_generation = old_annotations + "['loom.nebius/deployment-generation']"
+    old_operation = old_annotations + "['loom.nebius/operation-id']"
+    fence_rule = " && ".join([
+        _owned_namespace(binding, "namespaceObject"), f"object.metadata.name == '{_FENCE}'",
+        "has(object.metadata.labels)", *[
+            f"{json.dumps(key)} in object.metadata.labels && "
+            f"object.metadata.labels[{json.dumps(key)}] == namespaceObject.metadata.labels[{json.dumps(key)}]"
+            for key in (APPLICATION_INSTALLATION_LABEL, "loom.nebius/data-environment-id",
+                        "loom.nebius/application-id", "loom.nebius/incarnation")
+        ],
+        # Kubernetes's strict type checker omits this Quantity-valued map from
+        # ResourceQuotaSpec. Inspect its dynamic wire shape, still fail-closed
+        # and exact; real API tests cover both the policy and quota enforcement.
+        "has(dyn(object.spec).hard) && size(dyn(object.spec).hard) == 1 && "
+        "'pods' in dyn(object.spec).hard && dyn(object.spec).hard['pods'] == '0'",
+        "(!has(object.spec.scopes) || size(object.spec.scopes) == 0) && !has(object.spec.scopeSelector)",
+        f"has({annotations}) && 'loom.nebius/deployment-generation' in {annotations} && 'loom.nebius/operation-id' in {annotations}",
+        f"{generation}.matches('^[1-9][0-9]{{0,18}}$') && int({generation}) > 0",
+        f"{operation}.matches({json.dumps(_UUID)}) && {operation} != '00000000-0000-0000-0000-000000000000'",
+        f"(oldObject == null || (int({generation}) >= int({old_generation}) && "
+        f"(int({generation}) > int({old_generation}) || {operation} == {old_operation})))",
+    ])
+    docs += _policy(binding, "pod-fence", group="", resource="resourcequotas", operations=["CREATE", "UPDATE"],
+                    expression=fence_rule)
     lifecycle = ["get", "create", "patch", "delete"]
     rules = [
         {"apiGroups": [""], "resources": ["secrets", "services", "serviceaccounts"], "verbs": lifecycle},
@@ -124,6 +177,9 @@ def render_application_authority(binding: ApplicationNamespaceAuthorityV1) -> li
         {"apiGroups": ["networking.k8s.io"], "resources": ["ingresses", "networkpolicies"], "verbs": lifecycle},
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "delete"]},
         {"apiGroups": ["apps"], "resources": ["replicasets"], "verbs": ["get", "list"]},
+        {"apiGroups": [""], "resources": ["resourcequotas"], "verbs": ["create"]},
+        {"apiGroups": [""], "resources": ["resourcequotas"], "verbs": ["get", "patch", "delete"],
+         "resourceNames": [_FENCE]},
     ]
     docs += [{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
               "metadata": {"name": binding.name + "-resources"}, "rules": rules},

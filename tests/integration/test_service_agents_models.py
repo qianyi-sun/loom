@@ -241,14 +241,20 @@ async def test_agents_includes_builtins_and_adapters(
     assert by_name["oracle"]["supported_providers"] == []
     assert by_name["oracle"]["supported_model_sources"] == []
     assert by_name["direct-completion"]["supported_providers"] == ["*"]
-    assert set(by_name["direct-completion"]["supported_model_sources"]) == {
-        "api",
-        "local-server",
-        "hf",
-    }
+    assert by_name["direct-completion"]["supported_model_sources"] == ["api"]
     # CLI adapters lock down to their provider.
     assert by_name["claude-code"]["supported_providers"] == ["anthropic"]
     assert by_name["claude-code"]["supported_model_sources"] == ["api"]
+
+    # #2054: five supported product entries; the rest stay listed as deferred.
+    assert {
+        name for name, a in by_name.items() if a["product_support"] == "supported"
+    } == {"oracle", "direct-completion", "terminus-2", "openhands-sdk", "codex"}
+    assert by_name["claude-code"]["product_support"] == "deferred"
+    assert by_name["claude-code"]["deferred_reason"]
+    assert by_name["openhands-sdk"]["aliases"] == ["openhands"]
+    assert by_name["openhands-sdk"]["display_name"] == "openhands"
+    assert "openhands" not in by_name
 
 
 async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
@@ -279,6 +285,8 @@ async def test_models_deduplicates_across_rate_cards_and_adds_byo_metadata(
     assert item["provider"] == "openai"
     assert item["provider_connection_id"]
     assert item["provider_connection_type"] == "openai-compatible"
+    # Never probed: Gateway checks native Responses support on first call.
+    assert item["responses_route"] == "unprobed"
     assert item["source"] == "discovered"
     assert item["agent_capable"] is True
     assert item["recommended"] is True

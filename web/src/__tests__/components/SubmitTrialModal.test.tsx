@@ -32,6 +32,27 @@ const AGENTS_RESPONSE = {
       supported_providers: ["anthropic"],
       supported_model_sources: ["api"],
     },
+    {
+      name: "openhands-sdk",
+      aliases: ["openhands"],
+      display_name: "openhands",
+      needs_model: true,
+      kind: "adapter",
+      description: "OpenHands SDK runner.",
+      supported_providers: ["*"],
+      supported_model_sources: ["api"],
+      product_support: "supported",
+    },
+    {
+      name: "swe-agent",
+      needs_model: true,
+      kind: "adapter",
+      description: "SWE-agent via loom-launcher.",
+      supported_providers: ["*"],
+      supported_model_sources: ["api"],
+      product_support: "deferred",
+      deferred_reason: "pending a future product decision (#2054)",
+    },
   ],
 };
 
@@ -42,7 +63,7 @@ const MODELS_RESPONSE = {
       name: "claude-opus-4-7",
       provider_connection_id: "33333333-3333-4333-8333-333333333333",
       provider_connection_name: "Anthropic prod",
-      provider_connection_type: "anthropic",
+      provider_connection_type: "openai-compatible",
       source: "discovered",
       agent_capable: true,
       recommended: true,
@@ -58,6 +79,13 @@ const PROVIDER_CONNECTIONS_RESPONSE = {
     {
       id: "33333333-3333-4333-8333-333333333333",
       name: "Anthropic prod",
+      type: "openai-compatible",
+      status: "valid",
+      rate_card_provider: "anthropic",
+    },
+    {
+      id: "44444444-4444-4444-8444-444444444444",
+      name: "Native Anthropic",
       type: "anthropic",
       status: "valid",
       rate_card_provider: "anthropic",
@@ -193,6 +221,27 @@ describe("SubmitTrialModal", () => {
       provider_connection_id: "33333333-3333-4333-8333-333333333333",
       provider_model_id: "claude-opus-4-7",
     });
+  });
+
+  it("hides deferred agents and native provider connections (#2054)", async () => {
+    mockEndpoints();
+    const user = userEvent.setup();
+    renderWithProviders(
+      <SubmitTrialModal taskId="humaneval-0" open onClose={() => undefined} />,
+    );
+    await screen.findByText(/Runs solution\/solve.sh/i);
+    const dropdowns = await screen.findAllByRole("combobox");
+    const agentOptions = Array.from((dropdowns[0] as HTMLSelectElement).options).map((o) => o.value);
+    expect(agentOptions).not.toContain("swe-agent");
+    const openhands = Array.from((dropdowns[0] as HTMLSelectElement).options).find(
+      (o) => o.value === "openhands-sdk",
+    );
+    expect(openhands?.textContent).toBe("openhands");
+    await user.selectOptions(dropdowns[0], "claude-code");
+    const connection = (await screen.findByLabelText(/^Provider connection$/i)) as HTMLSelectElement;
+    const connectionOptions = Array.from(connection.options).map((o) => o.value);
+    expect(connectionOptions).toContain("33333333-3333-4333-8333-333333333333");
+    expect(connectionOptions).not.toContain("44444444-4444-4444-8444-444444444444");
   });
 
   it("shows an error when the selected agent needs a model and none is picked", async () => {

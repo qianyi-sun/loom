@@ -36,6 +36,8 @@ def test_empty_operation_downgrade_preserves_existing_application_records(applic
 
 @pytest.mark.parametrize("history", ["operation", "reservation"])
 def test_operation_downgrade_refuses_to_erase_history(application_database, history):
+    # Pin the historical migration under test; later empty journals can downgrade first.
+    migrate(application_database, "downgrade", "0161")
     from loom.db.nebius_application_operation_schema import (
         NebiusApplicationOperation,
         NebiusApplicationReservation,

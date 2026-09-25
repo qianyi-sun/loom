@@ -523,7 +523,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
                   const reason = ready ? a.description : agentReadinessMessage(a);
                   return (
                     <option key={a.name} value={a.name} disabled={!ready} title={reason}>
-                      {a.name}
+                      {a.display_name ?? a.name}
                       {ready ? "" : " (setup needed)"}
                     </option>
                   );
@@ -594,7 +594,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
         </div>
       ) : (
         <p className="text-xs text-slate-500">
-          The <code className="rounded bg-slate-100 px-1 py-0.5 font-mono">{value.agentName}</code> agent
+          The <code className="rounded bg-slate-100 px-1 py-0.5 font-mono">{selectedAgent?.display_name ?? value.agentName}</code> agent
           doesn't call an LLM, so no model is needed.
         </p>
       )}
