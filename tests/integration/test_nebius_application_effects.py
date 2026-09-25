@@ -149,6 +149,9 @@ async def test_stop_retains_uncertain_predecessor_and_capacity_without_foreign_h
     other = await registry.create(principal=bob, idempotency_key="bob", **prepare("bob", bob))
     bob_lease = await registry.claim(other.operation_id)
     assert await registry.effect_history(bob_lease) == []
+    sibling = await registry.create(principal=alice, idempotency_key="alice-feature", **prepare("alice-feature", alice))
+    sibling_lease = await registry.claim(sibling.operation_id)
+    assert await registry.effect_history(sibling_lease) == []
     with pytest.raises(ManagementError, match="stale_operation_lease"):
         await registry.effect_history(replace(bob_lease, application_id=first.application_id))
     async with factory() as session:
