@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -23,6 +24,29 @@ from loom_pipeline_orchestrator.repository import (
 
 if TYPE_CHECKING:
     from tests.integration.pipeline_orchestrator_fixtures import OrchestratorSeed
+
+
+@pytest.fixture
+async def provider_budget_worker(orchestrator_seed: OrchestratorSeed) -> AsyncIterator[UUID]:
+    seed = orchestrator_seed
+    worker_id = uuid4()
+    try:
+        async with seed.sessions() as session, session.begin():
+            await session.execute(
+                text("""
+                    INSERT INTO workers (
+                        id, hostname, version, capabilities, registered_at, last_seen_at, status
+                    ) VALUES (:id, :hostname, 'test', '[]'::jsonb, now(), now(), 'active')
+                """),
+                {"id": worker_id, "hostname": f"provider-budget-{worker_id}"},
+            )
+        yield worker_id
+    finally:
+        async with seed.sessions() as session, session.begin():
+            # Attempts restrict worker deletion. Remove only this fixture's run
+            # first; orchestrator_seed's later cleanup is intentionally idempotent.
+            await session.execute(text("DELETE FROM pipeline_runs WHERE id=:id"), {"id": seed.run_id})
+            await session.execute(text("DELETE FROM workers WHERE id=:id"), {"id": worker_id})
 
 
 @pytest.mark.asyncio
@@ -87,6 +111,7 @@ async def test_attempt_and_gpu_reservation_commit_atomically(
 @pytest.mark.asyncio
 async def test_attempt_local_provider_slice_serializes_concurrent_dispatches(
     orchestrator_seed: OrchestratorSeed,
+    provider_budget_worker: UUID,
 ) -> None:
     seed = orchestrator_seed
     lease = (await seed.repository.claim_runs(controller_id="controller-a"))[0]
@@ -110,16 +135,8 @@ async def test_attempt_local_provider_slice_serializes_concurrent_dispatches(
             per_call_timeout_seconds=30,
         ),
     )
-    worker_id = uuid4()
+    worker_id = provider_budget_worker
     async with seed.sessions() as session, session.begin():
-        await session.execute(
-            text("""
-                INSERT INTO workers (
-                    id, hostname, version, capabilities, registered_at, last_seen_at, status
-                ) VALUES (:id, :hostname, 'test', '[]'::jsonb, now(), now(), 'active')
-            """),
-            {"id": worker_id, "hostname": f"provider-budget-{worker_id}"},
-        )
         await session.execute(
             text("""
                 UPDATE execution_attempts
