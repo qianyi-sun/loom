@@ -167,6 +167,10 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             lambda p: p["spec"]["initContainers"][0]["securityContext"]["capabilities"].update(add=["NET_BIND_SERVICE"]),
             lambda p: p["metadata"]["annotations"].update({"loom.openai.com/target-id": "other-target"}),
             lambda p: p["spec"]["volumes"][0].update(emptyDir=None, hostPath={"path": "/"}),
+            lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(name="verifier-sandbox-socket"),
+            lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(subPath="sandbox.sock"),
+            lambda p: p["spec"]["initContainers"][1]["volumeMounts"][2].update(mountPath="/etc/shadow"),
+            lambda p: p["spec"]["initContainers"][1]["volumeMounts"].pop(),
         ]
         for mutate in mutations:
             bad = deepcopy(pod)

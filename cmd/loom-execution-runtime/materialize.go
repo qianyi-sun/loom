@@ -17,6 +17,7 @@ func materialize(arguments []string) error {
 	planDestination := flags.String("plan-dest", "/loom/runtime/execution-plan.json", "plan destination")
 	sandboxSource := flags.String("sandbox-source", "/loom-sandbox-runtime", "bundled sandbox binary")
 	sandboxDestination := flags.String("sandbox-dest", "/loom/runtime/loom-sandbox-runtime", "sandbox binary destination")
+	sandboxRoot := flags.String("sandbox-root", "/loom/sandboxes", "private sandbox volume root")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -86,7 +87,47 @@ func materialize(arguments []string) error {
 		}
 		break
 	}
+	if err := materializeNetworkFiles(p.Sidecars, *sandboxRoot, "/etc"); err != nil {
+		return err
+	}
 	completed = true
+	return nil
+}
+
+// Container runtimes may mount the same Pod hosts/resolver files into multiple
+// containers. Copy them into each sandbox's own emptyDir before starting any
+// untrusted process; the renderer binds only that role's files into /etc.
+func materializeNetworkFiles(sidecars []sidecar, sandboxRoot, sourceRoot string) error {
+	for _, sidecar := range sidecars {
+		if !sidecar.PrivateSandbox {
+			continue
+		}
+		if !filepath.IsAbs(sandboxRoot) || filepath.Clean(sandboxRoot) != sandboxRoot {
+			return fmt.Errorf("sandbox root must be a clean absolute path")
+		}
+		if err := secureDirectory(sandboxRoot); err != nil {
+			return err
+		}
+		root := filepath.Join(sandboxRoot, sidecar.RoleName)
+		if err := secureDirectory(root); err != nil {
+			return err
+		}
+		network := filepath.Join(root, "network")
+		// Never follow or reuse an existing directory or file. Initialization
+		// runs once, before the private volume is visible to task processes.
+		if err := os.Mkdir(network, 0o755); err != nil {
+			return err
+		}
+		for _, name := range []string{"hosts", "resolv.conf"} {
+			body, err := os.ReadFile(filepath.Join(sourceRoot, name))
+			if err != nil {
+				return err
+			}
+			if err := writeExclusive(filepath.Join(network, name), body, 0o644); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

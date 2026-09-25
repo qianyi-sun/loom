@@ -145,6 +145,14 @@ def _sidecar(
                 "subPath": "loom-sandbox-runtime",
                 "readOnly": True,
             },
+            *[
+                {
+                    "name": f"{value.role_name}-socket",
+                    "mountPath": f"/etc/{filename}",
+                    "subPath": f"network/{filename}",
+                }
+                for filename in ("hosts", "resolv.conf")
+            ],
         ]
     return result
 
@@ -366,6 +374,12 @@ def render_execution_job(
         if sidecar.private_sandbox:
             name = f"{sidecar.role_name}-socket"
             pod["volumes"].append({"name": name, "emptyDir": {"sizeLimit": "1Mi"}})
+            # Seed independent copies before an untrusted process starts. The
+            # kubelet's implicit network files can otherwise be shared by Pod
+            # containers, even when their image filesystems are separate.
+            pod["initContainers"][0]["volumeMounts"].append(
+                {"name": name, "mountPath": f"/loom/sandboxes/{sidecar.role_name}"}
+            )
             pod["containers"][0]["volumeMounts"].append(
                 {"name": name, "mountPath": f"/loom/sandboxes/{sidecar.role_name}"}
             )
