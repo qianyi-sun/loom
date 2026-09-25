@@ -124,11 +124,40 @@ personal applications; rendered resources alone do not satisfy installed
 four-plus-one acceptance.
 
 Application rendering rejects a hostname already used by the shared foundation.
-It also rejects the legacy environment `namespace_authority`: that admission
-contract requires a full-environment identity, not an application identity.
-Versioned application namespace authority must be qualified before management can
-activate this path; application IDs must not be relabelled as environment IDs to
-bypass that boundary.
+It also rejects use of the legacy environment `namespace_authority` on its own:
+that admission contract requires a full-environment identity, not an application
+identity. Application IDs must not be relabelled as environment IDs to bypass
+that boundary.
+
+### Application namespace authority
+
+`ApplicationNamespaceAuthorityV1` is a separate, opt-in protected binding for one
+installation, management namespace, cluster and shared development data ID/namespace.
+The application renderer requires those shared identifiers to match and emits the
+application installation label plus one fixed management RoleBinding. A foundation
+may retain legacy authority, but only the explicit application binding grants
+personal-application management access; it never copies legacy authority labels.
+
+`render_application_authority` emits fail-closed admission policies before RBAC.
+The distinct `loom-application-provisioner` ServiceAccount can create only
+restricted, application-labelled personal namespaces for its installation and data
+binding. It cannot update/delete namespace identities or adopt legacy/foreign
+namespaces. RoleBinding admission permits only its exact resources ClusterRole and
+its management ServiceAccount; the frontend/API ServiceAccount receives no grant.
+
+Within owned application namespaces, that role can create/read/patch/delete
+Deployments, Services, Secrets, ServiceAccounts, Ingresses and NetworkPolicies,
+observe ReplicaSets, and observe/delete Pods. It cannot create Pods directly,
+mint ServiceAccount tokens, exec into Pods, read global or foreign Secrets, create
+roles, or provision PVCs, StatefulSets, Jobs or worker infrastructure. Normal
+Kubernetes restricted Pod Security remains the workload admission boundary.
+
+This is not an installed management upgrade: the protected installer must create
+the distinct management ServiceAccount, verify the policies and their enforcement,
+and only then grant bootstrap authority. The manager must still authenticate owners,
+qualify immutable application inputs and enforce lifecycle generations. Rendering
+RBAC alone supplies none of those controls and does not claim malicious-manager
+isolation or authorize any live permission change.
 
 ## Managed environment identity and rendering
 
