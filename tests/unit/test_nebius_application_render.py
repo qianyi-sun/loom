@@ -107,7 +107,7 @@ def test_app_images_and_schema_are_separate_from_shared_executor_profile(platfor
         assert env["LOOM_SVC_" + purpose.upper() + "_BUCKET"] == foundation.platform_config["buckets"][purpose]
     references = {item["name"]: item["valueFrom"]["secretKeyRef"] for item in api["env"] if "valueFrom" in item}
     assert set(references) == {"LOOM_SVC_DB_URL", "LOOM_SVC_MINIO_ACCESS_KEY", "LOOM_SVC_MINIO_SECRET_KEY", "LOOM_SECRET_STORE_MASTER_KEYS"}
-    assert references["LOOM_SECRET_STORE_MASTER_KEYS"]["name"] == "loom-application-auth"
+    assert references["LOOM_SECRET_STORE_MASTER_KEYS"]["name"] == f"loom-application-auth-{registration.incarnation.hex}-g1"
     settings = LoomServiceSettings(
         _env_file=None, **{key.removeprefix("LOOM_SVC_").lower(): value for key, value in env.items() if key.startswith("LOOM_SVC_")},
         db_url="postgresql+psycopg://personal:placeholder@localhost/loom",
@@ -116,6 +116,41 @@ def test_app_images_and_schema_are_separate_from_shared_executor_profile(platfor
     assert settings.session_audience.application_id == registration.application_id
     assert settings.session_audience.access_generation == registration.access_generation
     assert settings.session_audience.origin == "https://alice.dev.example.com"
+
+
+def test_old_deployment_cannot_follow_new_access_generation_credentials(platform_inputs):
+    from loom.nebius_application_render import render_application
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    original = render_application(row, release, shared, foundation)
+    original_files = copy.deepcopy(original.files)
+    updated = render_application(row.model_copy(update={"deployment_generation": 2, "access_generation": 2}),
+                                 release, shared, foundation)
+    another = render_application(row.model_copy(update={"incarnation": uuid4()}), release, shared, foundation)
+    observed = []
+    for rendered, generation in ((original, 1), (updated, 2), (another, 1)):
+        pod = named(rendered, "Deployment", "loom-service")["spec"]["template"]["spec"]
+        refs = {env["name"]: env["valueFrom"]["secretKeyRef"]["name"] for env in pod["containers"][0]["env"] if "valueFrom" in env}
+        suffix = f"-{rendered.registration.incarnation.hex}-g{generation}"
+        assert refs == {
+            "LOOM_SVC_DB_URL": "loom-application-db" + suffix,
+            "LOOM_SVC_MINIO_ACCESS_KEY": "loom-application-storage" + suffix,
+            "LOOM_SVC_MINIO_SECRET_KEY": "loom-application-storage" + suffix,
+            "LOOM_SECRET_STORE_MASTER_KEYS": "loom-application-auth" + suffix,
+        }
+        ca = next(volume for volume in pod["volumes"] if volume["name"] == "db-ca")
+        assert ca["secret"]["secretName"] == refs["LOOM_SVC_DB_URL"]
+        observed.append(set(refs.values()))
+    assert not observed[0] & observed[1] and not observed[0] & observed[2]
+    assert original.files == original_files
+
+
+def test_material_generation_must_fit_the_operation_database_identity(platform_inputs):
+    from loom.nebius_application_render import render_application
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    with pytest.raises(ValueError, match="generation"):
+        render_application(row.model_copy(update={"access_generation": 2**63}), release, shared, foundation)
 
 
 @pytest.mark.parametrize("change", ["schema", "cluster", "data-id", "shared-namespace", "host", "suspended", "release", "staging", "production"])

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 
+from tests.cluster.test_nebius_shared_ingress import _add_failure_diagnostics
 from tests.integration.test_execution_actuator_k3s import (
     _build_image,
     _docker_platform,
@@ -122,6 +123,12 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                         denied = await asyncio.to_thread(_pod_probe, core, ns, client_name, url)
                         assert ("exit:1 reason:network " in denied or "exit:1 reason:timeout " in denied), (
                             f"expected network denial: {slug} -> {name}: {denied}")
+    except (Exception, pytest.fail.Exception) as exc:
+        if container is not None:
+            # Preserve sandbox/CNI/image-startup evidence before disposable
+            # teardown. This adds no retries and never reads Secret contents.
+            await asyncio.to_thread(_add_failure_diagnostics, container, shared.platform_namespace, exc)
+        raise
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)

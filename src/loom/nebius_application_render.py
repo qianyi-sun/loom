@@ -20,6 +20,7 @@ from loom.nebius_application_contract import (
     ApplicationReleaseV1,
     SharedDevelopmentBindingV1,
 )
+from loom.nebius_application_credentials import application_credential_names
 from loom.nebius_environment_contract import FoundationBinding
 from loom.nebius_environment_render import PlatformEnvelope, _envelope
 from loom.nebius_platform_render import (
@@ -115,14 +116,15 @@ def render_application(
         "LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON": shared.runtime_profile_json,
         "LOOM_SVC_TEAM_REGISTRATION_OPEN": "false",
     })
+    credentials = application_credential_names(row)
     env += [
-        _secret_env("LOOM_SVC_DB_URL", "loom-application-db", "url"),
-        _secret_env("LOOM_SVC_MINIO_ACCESS_KEY", "loom-application-storage", "access-key"),
-        _secret_env("LOOM_SVC_MINIO_SECRET_KEY", "loom-application-storage", "secret-key"),
-        _secret_env("LOOM_SECRET_STORE_MASTER_KEYS", "loom-application-auth", "secret-store-master-keys"),
+        _secret_env("LOOM_SVC_DB_URL", credentials["db"], "url"),
+        _secret_env("LOOM_SVC_MINIO_ACCESS_KEY", credentials["storage"], "access-key"),
+        _secret_env("LOOM_SVC_MINIO_SECRET_KEY", credentials["storage"], "secret-key"),
+        _secret_env("LOOM_SECRET_STORE_MASTER_KEYS", credentials["auth"], "secret-store-master-keys"),
     ]
     api = _deployment("loom-service", ns, release.service_image_ref, 8090, "/api/v1/health", env, revision)
-    _mount_secret(api["spec"]["template"]["spec"], "db-ca", "loom-application-db", "/var/run/loom-db", ca_only=True)
+    _mount_secret(api["spec"]["template"]["spec"], "db-ca", credentials["db"], "/var/run/loom-db", ca_only=True)
     web = _deployment("loom-web", ns, release.web_image_ref, 8080, "/", _env({
         "LOOM_FRONTEND_ENVIRONMENT": "development", "LOOM_FRONTEND_ENVIRONMENT_LABEL": "Loom " + row.slug,
         "LOOM_FRONTEND_ROUTE_PATH": "", "LOOM_FRONTEND_API_BASE": "",
