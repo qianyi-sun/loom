@@ -67,6 +67,7 @@ def _container_diagnostics(statuses: list[Any]) -> tuple[ContainerDiagnostic, ..
         )
         for status in statuses
         if getattr(status, "name", None) in {"execution", "task-sandbox", "verifier-sandbox"}
+        or str(getattr(status, "name", "")).startswith("fixture-")
     )
 
 
@@ -276,7 +277,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
                 )
 
             # Kubernetes native sidecars restart independently of the Job.
-            # A fresh sandbox cannot continue the same attempt's process state.
+            # A fresh sandbox or fixture cannot continue the same attempt's process state.
             # Normal sidecar teardown after execution exits is not a failure.
             lost = next(
                 (item for item in diagnostics if _sandbox_lost(item, execution_terminated)),

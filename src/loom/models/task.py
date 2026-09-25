@@ -303,8 +303,10 @@ class TaskServiceExecutionV1(BaseModel):
         )
         if plan.execution_role != "attempt":
             raise ValueError("task service execution requires an attempt runtime plan")
-        if plan.task_egress is not None or any(sidecar.identity is not None for sidecar in plan.sidecars):
-            raise ValueError("task identity and web egress require automatic native execution")
+        if plan.task_egress is not None or any(
+            sidecar.identity is not None or sidecar.task_fixture for sidecar in plan.sidecars
+        ):
+            raise ValueError("task identity, fixtures and web egress require automatic native execution")
         payload = plan.canonical_payload()
         del payload["task_revision_sha256"]
         return payload
@@ -350,6 +352,7 @@ class TaskConfig(BaseModel):
         if (self.environment.user != "agent" or self.verifier.user is not None
                 or "HOME" in self.environment.environment or self.environment.mutable_paths
                 or self.environment.service_lifecycle is not None
+                or any(sidecar.fixture for sidecar in self.environment.sidecars)
                 or self.environment.preserve_acls
                 or self.environment.baseline_network_policy.kind == "web-allowlist"):
             raise ValueError("declared sandbox capabilities require automatic native execution")

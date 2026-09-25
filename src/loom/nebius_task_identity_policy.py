@@ -91,6 +91,19 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         "(c.securityContext.runAsNonRoot && (!has(c.securityContext.runAsUser) || c.securityContext.runAsUser > 0) && "
         "(!has(c.securityContext.capabilities.add) || size(c.securityContext.capabilities.add) == 0)))"
     )
+    fixture = (
+        "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
+        "has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 65532 && "
+        "has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 65532 && "
+        "has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot && "
+        "has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && "
+        "(!has(c.volumeMounts) || size(c.volumeMounts) == 0) && "
+        "(!has(c.envFrom) || size(c.envFrom) == 0) && "
+        "(!has(c.env) || size(c.env) == 0) && !has(c.lifecycle) && "
+        "has(c.startupProbe) && has(c.readinessProbe) && "
+        "has(c.resources.requests) && has(c.resources.limits) && "
+        "['cpu','memory','ephemeral-storage'].all(k, k in c.resources.requests && k in c.resources.limits)"
+    )
     validations = [
         ("!has(object.spec.hostNetwork) || !object.spec.hostNetwork", "Host networking is forbidden."),
         ("!has(object.spec.hostPID) || !object.spec.hostPID", "Host PID is forbidden."),
@@ -112,6 +125,12 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         (f"variables.allContainers.all(c, {common})", "Container security and resource boundaries must remain restricted."),
         (f"variables.ordinary.all(c, {nonroot})", "Only private native sandboxes may run as root or add capabilities."),
         (f"variables.private.all(c, {private})", "Private sandbox command, identity, capabilities or mounts are invalid."),
+        (f"variables.fixtures.all(c, {fixture})", "Fixture identity, mounts, lifecycle or resources are invalid."),
+        ("variables.regular.all(c, !c.name.startsWith('fixture-'))", "Fixtures must be native init sidecars."),
+        ("size(variables.fixtures) == 0 || (size(variables.fixtures) == 1 && "
+         "size(variables.private) == 2 && "
+         "(!has(object.spec.hostAliases) || size(object.spec.hostAliases) == 0))",
+         "One fixture requires private sandboxes and private hostname resolution."),
         ("variables.regular.all(c, !(c.name in ['task-sandbox','verifier-sandbox']))", "Private sandboxes must be native init sidecars."),
         ("size(variables.private) == 0 || (object.spec.serviceAccountName == 'loom-execution-attempt' && "
          "has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && "
@@ -135,6 +154,7 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
                 {"name": "regular", "expression": "object.spec.containers + variables.ephemeral"},
                 {"name": "allContainers", "expression": "variables.regular + variables.init"},
                 {"name": "private", "expression": "variables.init.filter(c, c.name in ['task-sandbox','verifier-sandbox'])"},
+                {"name": "fixtures", "expression": "variables.init.filter(c, c.name.startsWith('fixture-'))"},
                 {"name": "ordinary", "expression": "variables.allContainers.filter(c, !(c.name in ['task-sandbox','verifier-sandbox']))"},
             ],
             "validations": [{"expression": expression, "message": message} for expression, message in validations],

@@ -23,6 +23,26 @@ registry output identity. Supported architecture and workload requirements must
 match the selected execution class; unsupported inputs must be rejected rather
 than weakened to fit a build.
 
+## Prepared service fixture components
+
+A build records the primary image as `task` and each built sidecar as
+`sidecar:<name>`. Resolution uses the exact component map and leaves prebuilt
+components unchanged; it does not modify the frozen input configuration. A
+prepared isolated fixture must itself be a built component, with a dedicated
+build directory disjoint from the primary context. Its source directory and
+Dockerfile never enter the agent input upload.
+
+At execution reservation, the control plane locks the Trial-associated grant
+and matches the fixture's image, role, hostname, command, resources and probes
+against the frozen task. Missing, additional or substituted components fail
+before attempt counts, leases or cost reservations change. A user-supplied UUID,
+manual runtime template or digest is not image authority. Only these validated
+fixture roles and prepared private task images are exempt from platform image
+publication admission; the controller and runtime still require it.
+
+See [isolated fixtures](nebius-service-execution.md) for the supported subset and
+[execution security](nebius-execution-security.md) for mount and identity controls.
+
 ## Attempts, publication and cleanup
 
 The materialization lease owns retries. Kubernetes Jobs do not independently

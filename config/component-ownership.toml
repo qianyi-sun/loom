@@ -308,6 +308,7 @@ source_paths = [
   "src/loom/task_image_build_plan.py",
   "src/loom/task_image_bundle_manifest.py",
   "src/loom/task_image_materialization.py",
+  "src/loom/task_fixtures.py",
   "src/loom/terminal_bench_normalize.py",
   "src/loom/terminal_result_semantics.py",
   "src/loom/trajectory/__init__.py",
@@ -868,6 +869,7 @@ exclude_paths = [
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
   "tests/integration/test_task_network_files_docker.py",
+  "tests/integration/test_task_fixture_docker.py",
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
   "tests/integrations/behavior/**/*.py",
@@ -927,6 +929,7 @@ include_paths = [
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
   "tests/integration/test_task_network_files_docker.py",
+  "tests/integration/test_task_fixture_docker.py",
   "tests/integration/test_task_service_lifecycle_docker.py",
   "tests/integration/test_nebius_harbor_verifier_docker.py",
 ]

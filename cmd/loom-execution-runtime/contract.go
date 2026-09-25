@@ -682,7 +682,7 @@ func (r resources) validate() error {
 var (
 	fixtureName            = regexp.MustCompile(`^[a-z][a-z0-9-]{0,54}$`)
 	fixtureHostname        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
-	fixtureNumericHostname = regexp.MustCompile(`^[0-9.]+$`)
+	fixtureNumericHostname = regexp.MustCompile(`^(?:[0-9]+|0x[0-9a-f]+)(?:\.(?:[0-9]+|0x[0-9a-f]+))*$`)
 	fixtureReserved        = map[string]bool{
 		"localhost": true, "localhost.localdomain": true, "ip6-localhost": true, "ip6-loopback": true,
 		"execution": true, "runtime-materializer": true, "agent": true, "verifier": true,

@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,54}\Z")
 _HOSTNAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\Z")
+_NUMERIC_HOSTNAME = re.compile(r"(?:[0-9]+|0x[0-9a-f]+)(?:\.(?:[0-9]+|0x[0-9a-f]+))*\Z")
 _RESERVED = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback",
              "execution", "runtime-materializer", "agent", "verifier", "task-sandbox", "verifier-sandbox"}
 
@@ -19,7 +20,7 @@ _RESERVED = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopbac
 def validate_fixture_hostname(value: str | None) -> None:
     if (value is None or len(value) > 253 or not _HOSTNAME.fullmatch(value)
             or value in _RESERVED or value.endswith(".localhost")
-            or value.replace(".", "").isdigit()):
+            or _NUMERIC_HOSTNAME.fullmatch(value)):
         raise ValueError("fixture requires a non-reserved DNS hostname")
 
 

@@ -161,7 +161,7 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
             lambda p, c: c.update(envFrom=[{"secretRef": {"name": "controller-token"}}]),
             lambda p, c: c.update(env=[{"name": "HOST", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]),
             lambda p, c: c.update(lifecycle={"postStart": {"exec": {"command": ["true"]}}}),
-            lambda p, c: c.pop("restartPolicy"),
+            lambda p, c: [c.pop(key) for key in ("restartPolicy", "startupProbe", "readinessProbe")],
             lambda p, c: p["spec"].update(hostAliases=[{"ip": "127.0.0.1", "hostnames": ["fixture.example"]}]),
         ]
         for mutate in fixture_mutations:
