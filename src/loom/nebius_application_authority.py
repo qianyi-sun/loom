@@ -111,6 +111,12 @@ def render_application_authority(binding: ApplicationNamespaceAuthorityV1) -> li
     )
     docs += _policy(binding, "bindings", group="rbac.authorization.k8s.io", resource="rolebindings",
                     operations=["CREATE", "UPDATE"], expression=binding_rule)
+    # TokenRequest RBAC alone cannot prevent legacy token issuance: the token
+    # controller also fills kubernetes.io/service-account-token Secrets. The
+    # three application credential bundles are ordinary Opaque Secrets only.
+    docs += _policy(binding, "secrets", group="", resource="secrets", operations=["CREATE", "UPDATE"],
+                    expression=_owned_namespace(binding, "namespaceObject") +
+                    " && (!has(object.type) || object.type == 'Opaque')")
     lifecycle = ["get", "create", "patch", "delete"]
     rules = [
         {"apiGroups": [""], "resources": ["secrets", "services", "serviceaccounts"], "verbs": lifecycle},

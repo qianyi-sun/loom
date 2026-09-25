@@ -148,9 +148,16 @@ its management ServiceAccount; the frontend/API ServiceAccount receives no grant
 Within owned application namespaces, that role can create/read/patch/delete
 Deployments, Services, Secrets, ServiceAccounts, Ingresses and NetworkPolicies,
 observe ReplicaSets, and observe/delete Pods. It cannot create Pods directly,
-mint ServiceAccount tokens, exec into Pods, read global or foreign Secrets, create
+call the ServiceAccount token API, exec into Pods, read global or foreign Secrets, create
 roles, or provision PVCs, StatefulSets, Jobs or worker infrastructure. Normal
 Kubernetes restricted Pod Security remains the workload admission boundary.
+Secret admission permits only ordinary `Opaque` application credential bundles;
+denying the token API alone would not prevent the legacy ServiceAccount-token
+Secret controller from issuing tokens.
+These restrictions do not forbid a custom Deployment template from requesting a
+projected workload token. The personal renderer disables token automount and emits
+no token projection or workload RBAC, and management must use qualified rendered
+inputs. This authority is not a sandbox for arbitrary manager-supplied templates.
 
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
