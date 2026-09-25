@@ -171,8 +171,9 @@ def test_backup_pod_qualifies_only_standard_admission_tolerations(evidence, seco
             api.backup_report(job_uid=values["job"]["metadata"]["uid"])
 
 
-@pytest.mark.parametrize("fault", ["owner", "image", "failed", "replaced_pod", "restarted"])
-def test_wrong_or_changed_backup_execution_never_supplies_object_proof(evidence, fault):
+@pytest.mark.parametrize("fault,stage", [("owner", "backup_pod_identity"), ("image", "backup_pod_template"),
+    ("failed", "backup_job"), ("replaced_pod", "backup_readback"), ("restarted", "backup_pod_status")])
+def test_wrong_or_changed_backup_execution_never_supplies_object_proof(evidence, fault, stage):
     from scripts.ops.nebius_management_install import ManagementInstallError
 
     api, values, _ = evidence
@@ -185,7 +186,8 @@ def test_wrong_or_changed_backup_execution_never_supplies_object_proof(evidence,
         values["job"]["status"] = {"conditions": [{"type": "Failed", "status": "True"}]}
     elif fault == "restarted":
         values["pod"]["status"]["containerStatuses"][0]["restartCount"] = 1
-    with pytest.raises(ManagementInstallError):
+    with pytest.raises(ManagementInstallError) as error:
         api.backup_report(job_uid=values["job"]["metadata"]["uid"])
+    assert error.value.stage == stage
     if fault != "replaced_pod":
         assert not any(req.url.path.endswith("/log") for req in values["calls"])

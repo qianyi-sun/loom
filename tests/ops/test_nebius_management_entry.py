@@ -133,10 +133,29 @@ def test_unknown_action_never_opens_private_inputs(entry_inputs, monkeypatch):
     assert module().main(path, "shell") == 1
 
 
+@pytest.mark.parametrize("stage,expected", [("backup_pod_template", "backup_pod_template"),
+    ("recovery", "recovery"), ("private-secret", "operation")])
+def test_install_error_stage_survives_fixed_transport_without_exception_text(entry_inputs, monkeypatch, capsys,
+                                                                           stage, expected):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    _, _, path, _ = entry_inputs
+    def fail(**kwargs):
+        raise ManagementInstallError("private-secret", stage=stage)
+    monkeypatch.setattr(module(), "install_management", fail)
+    assert module().main(path, "install") == 0
+    result = capsys.readouterr().out
+    assert json.loads(result)["stage"] == expected
+    assert "private-secret" not in result
+
+
 @pytest.mark.parametrize("action", ["preflight", "install"])
 @pytest.mark.parametrize("stage,prerequisite,expected", [
     ("cluster_identity", None, "cluster_identity"),
     ("prerequisites", "storage_class", "storage_class"),
+    ("backup_readback", None, "backup_readback"),
+    ("backup_object", None, "backup_object"),
+    ("install_service", None, "install_service"),
     (None, "storage_class", "operation"),
     ("private-secret", "private-secret", "operation"),
 ])
