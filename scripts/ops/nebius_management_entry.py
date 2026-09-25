@@ -158,9 +158,11 @@ def main(operation_path: str, action: str) -> int:
         report = {**result, **{key: operation[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
         print(json.dumps(safe_report(json.dumps(report).encode(), operation), sort_keys=True))
         return 0
-    except Exception:
+    except Exception as error:
         if qualified is not None:
-            stage = getattr(api, "diagnostic_stage", None) if api is not None else "connection"
+            stage = getattr(error, "stage", None)
+            if stage is None:
+                stage = getattr(api, "diagnostic_stage", None) if api is not None else "connection"
             if stage == "prerequisites" and api is not None:
                 stage = getattr(api.checks, "diagnostic_stage", None)
             if not isinstance(stage, str) or stage not in DIAGNOSTIC_STAGES:

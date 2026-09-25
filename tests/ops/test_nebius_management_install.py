@@ -149,8 +149,9 @@ def test_lost_recorded_installation_state_never_reopens_writes(installation, tmp
     paths = {"whole_state": "installation", "bootstrap": "installation/bootstrap",
              "config": "installation/config", "anchor": "independent"}
     shutil.rmtree(tmp_path / paths[missing])
-    with pytest.raises(ManagementInstallError, match="recovery"):
+    with pytest.raises(ManagementInstallError, match="recovery") as error:
         run(installation, tmp_path)
+    assert error.value.stage == "recovery"
     assert len(api.store.creates) == before
     assert len(api.bootstrap.creates) == 1
 
@@ -164,6 +165,7 @@ def test_failed_qualification_stops_before_runtime_or_supplied_credentials(insta
     with pytest.raises(ManagementInstallError) as error:
         run(installation, tmp_path)
     assert "private-" not in str(error.value)
+    assert error.value.stage == (None if blocked == "preflight" else "runtime_authority")
     if blocked == "preflight":
         assert api.bootstrap.creates == [] and api.store is None
     else:
@@ -226,6 +228,7 @@ def test_external_backup_or_public_auth_failure_cannot_report_installation_compl
     with pytest.raises(ManagementInstallError) as error:
         run(installation, tmp_path)
     assert "private-" not in str(error.value)
+    assert error.value.stage == ("backup_execution" if blocked == "backup" else "public_authentication")
     if blocked == "backup":
         assert not any(doc["kind"] in {"Deployment", "Ingress"} for doc in api.store.resources.values())
 

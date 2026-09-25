@@ -55,6 +55,10 @@ _PHASES = {
 class ManagementInstallError(RuntimeError):
     """Sanitized failure; preserve all resources and private recovery evidence."""
 
+    def __init__(self, message: str, *, stage: str | None = None):
+        super().__init__(message)
+        self.stage = stage
+
 
 @dataclass(frozen=True, repr=False)
 class ManagementInstallRequest:
@@ -145,6 +149,7 @@ def _validate_history(record: dict[str, Any], identity: dict[str, Any], state: P
 def install_management(*, request: ManagementInstallRequest, api: ManagementInstallationAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Advance to the next readiness barrier; resumption never repeats unknown writes."""
+    stage: str | None = "recovery"
     try:
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         if state.resolve() == anchor.resolve() or state.resolve() in anchor.resolve().parents or anchor.resolve() in state.resolve().parents:
@@ -169,17 +174,21 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                 if state.exists() or state.is_symlink():
                     raise ManagementInstallError("untracked management recovery state; refusing adoption")
                 # No remote writes and no start marker before full qualification.
+                stage = None  # The live adapter retains its finer prerequisite stage.
                 api.preflight(request, rendered)
+                stage = "recovery"
                 started = {**identity, "operation_id": str(uuid4())}
                 record = {**started, "phases": {}}
                 private_state._atomic_json(marker, started)
             with private_state._locked_state(state):
                 if not journal.exists():
                     private_state._atomic_json(journal, record)
+                stage = None
                 api.preflight(request, rendered)
                 binding: ManagementBinding | None = None
                 backup: dict[str, Any] | None = None
                 for phase, filename in _PHASES.items():
+                    stage = "install_" + phase
                     if phase not in record["phases"]:
                         record["phases"][phase] = {"status": "started", "receipt": None, "journals": None}
                         private_state._atomic_json(journal, record)
@@ -218,8 +227,10 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                         private_state._atomic_json(journal, record)
                     assert binding is not None
                     if phase == "authority":
+                        stage = "runtime_authority"
                         api.qualify_authority(binding, phase_state)
                     if phase in {"database", "migration", "backup", "service"}:
+                        stage = "ready_" + phase
                         assert filename is not None
                         with api.resources(binding, phase) as stage_api:
                             ready = management_phase_ready(rendered=rendered, phase=filename, binding=binding,
@@ -228,6 +239,7 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                             return {"status": "pending", "phase": phase, "installation_id": binding.installation_id,
                                     "namespace_uid": binding.namespace_uid, "revision": rendered.revision}
                         if phase == "backup":
+                            stage = "backup_execution"
                             job_uid = next(iter(receipt["resource_uids"].values()))
                             backup = api.verify_backup(binding, rendered, job_uid)
                             if (set(backup) != {"job_uid", "sha256", "bytes", "key"} or backup["job_uid"] != job_uid
@@ -236,10 +248,13 @@ def install_management(*, request: ManagementInstallRequest, api: ManagementInst
                                     or not isinstance(backup["key"], str) or not 0 < len(backup["key"]) <= 1024):
                                 raise ManagementInstallError("management backup readback identity differs")
                 assert binding is not None and backup is not None
+                stage = "public_authentication"
                 api.verify_public(binding, rendered, state / "bootstrap" / "material")
                 return {"status": "management_installed", "installation_id": binding.installation_id,
                         "namespace_uid": binding.namespace_uid, "revision": rendered.revision, "backup": backup}
-    except ManagementInstallError:
+    except ManagementInstallError as error:
+        if error.stage is None:
+            error.stage = stage
         raise
     except Exception:
-        raise ManagementInstallError("management installation incomplete; preserve recovery evidence") from None
+        raise ManagementInstallError("management installation incomplete; preserve recovery evidence", stage=stage) from None

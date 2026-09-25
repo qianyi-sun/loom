@@ -122,6 +122,7 @@ def test_backup_metadata_or_successful_job_alone_cannot_prove_dump(backup, failu
         verify_backup_object(client=objects, bucket="management-backup", namespace="loom-nebius-management",
                              job_uid=str(uuid4()), report=report, max_bytes=10000)
     assert report["backup_key"] not in str(error.value)
+    assert error.value.stage == "backup_object"
     if failure in {"foreign_key", "oversized"}:
         assert not objects.calls
     assert "private-admin" not in json.dumps(objects.calls)

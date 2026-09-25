@@ -112,4 +112,4 @@ backup bucket. Only HEAD/GET are used here; no upload, deletion or list fallback
             raise ValueError()
         return {"job_uid": job_uid, "key": report["backup_key"], "sha256": report["sha256"], "bytes": report["bytes"]}
     except Exception:
-        raise ManagementInstallError("management off-node backup readback failed") from None
+        raise ManagementInstallError("management off-node backup readback failed", stage="backup_object") from None
