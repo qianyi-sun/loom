@@ -185,7 +185,10 @@ def _next_plan(plan, platform_inputs, *, new_release=True, **changes):
 
 @pytest.mark.parametrize("action", ["suspend", "destroy_retained"])
 async def test_stop_invalidates_inflight_lease_but_retains_names_capacity_and_frozen_source(applications, action):
-    from loom.db.nebius_application_operation_schema import NebiusApplicationOperation, NebiusApplicationReservation
+    from loom.db.nebius_application_operation_schema import (
+        NebiusApplicationOperation,
+        NebiusApplicationReservation,
+    )
     from loom.db.nebius_application_schema import NebiusDeploymentNameClaim
 
     registry, factory, (alice, _), prepare, _, _ = applications
