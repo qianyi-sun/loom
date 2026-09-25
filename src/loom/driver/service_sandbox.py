@@ -410,34 +410,44 @@ class ServiceSandboxDriver:
     async def replace_workspace_archive(
         self, src: Path, dst: PurePosixPath, *, preserve_acls: bool = False,
     ) -> None:
+        await self.replace_mutable_archives(((src, dst),), preserve_acls=preserve_acls)
+
+    async def replace_mutable_archives(
+        self, archives: tuple[tuple[Path, PurePosixPath], ...], *, preserve_acls: bool = False,
+    ) -> None:
         """Replace a validated mutable root without executing from a cleared tree.
 
-        Extract while the original shell/toolchain is present, then let the
+        Extract every root while the original shell/toolchain is present, then let the
         static runtime promote staged entries. The controller's mutable-path
         manifest, archive, reference and ownership checks precede this hook.
         """
-        stage = dst / (".loom-restore-" + uuid4().hex)
-        destination, staged = shlex.quote(str(dst)), shlex.quote(str(stage))
+        stages: list[tuple[PurePosixPath, PurePosixPath]] = []
         promotion_started = False
         try:
-            result = await self.exec(f"mkdir -p {destination} && mkdir -m 0700 {staged}")
-            if result.return_code or result.stderr or result.truncated:
-                raise DriverError("unable to stage mutable directory restore")
-            await self.import_workspace_archive(src, stage, preserve_acls=preserve_acls)
+            for src, dst in archives:
+                stage = dst / (".loom-restore-" + uuid4().hex)
+                stages.append((dst, stage))
+                destination, staged = shlex.quote(str(dst)), shlex.quote(str(stage))
+                result = await self.exec(f"mkdir -p {destination} && mkdir -m 0700 {staged}")
+                if result.return_code or result.stderr or result.truncated:
+                    raise DriverError("unable to stage mutable directory restore")
+                await self.import_workspace_archive(src, stage, preserve_acls=preserve_acls)
             promotion_started = True
-            await self._request(
-                "POST", "/restore-directory", json={"root": str(dst), "stage": stage.name}, timeout=120,
-            )
+            for dst, stage in stages:
+                await self._request(
+                    "POST", "/restore-directory", json={"root": str(dst), "stage": stage.name}, timeout=120,
+                )
         finally:
             if not promotion_started:
                 # The baseline remains intact. After promotion starts, an
                 # ambiguous RPC may still be moving entries: never race it with
                 # shell cleanup. The native operation removes its stage on
                 # success; authoritative sandbox teardown cleans any failure.
-                try:
-                    await self.exec(f"rm -rf -- {staged}")
-                except DriverError:
-                    pass
+                for _, stage in reversed(stages):
+                    try:
+                        await self.exec(f"rm -rf -- {shlex.quote(str(stage))}")
+                    except DriverError:
+                        pass
 
     async def run_healthcheck(self, hc: HealthcheckSpec | None = None) -> None:
         if hc is None:

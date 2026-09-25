@@ -2,7 +2,8 @@
 
 Only task-declared directory roots are restored. A root may be absent, must not
 traverse symlinks, and may contain only ordinary files/directories and links
-contained within that root or exact declared external executable leaves.
+contained within that root, terminal files in other declared roots, or exact
+declared external executable leaves. All root archives are validated together.
 External references must match the fresh verifier before restore. Processes
 must be quiesced by the caller.
 """
@@ -25,6 +26,7 @@ from loom.mutable_paths import (
     validate_mutable_reference_files,
     validate_reference_file_symlinks,
 )
+from loom.trial.mutable_links import mutable_file_targets
 from loom.trial.workspace import WorkspaceStagingPolicy
 from loom.trial.workspace_snapshot import (
     WorkspaceSnapshotError,
@@ -39,11 +41,8 @@ if TYPE_CHECKING:
 _POLICY = WorkspaceStagingPolicy((".loom/**",), (".loom/**",), ())
 
 
-def _archive_evidence(
-    archive: Path, root: PurePosixPath | None = None,
-    reference_files: tuple[PurePosixPath, ...] = (),
-    *, allow_relative_references: bool = False,
-) -> dict[str, int | str]:
+def _archive_limits(archive: Path) -> dict[str, int | str]:
+    """Enforce transfer budgets before collecting another root's archive."""
     if archive.is_symlink() or not archive.is_file():
         raise WorkspaceSnapshotError("mutable path archive is not a regular file")
     size = archive.stat().st_size
@@ -57,14 +56,28 @@ def _archive_evidence(
                 expanded += member.size
                 if count > MAX_MUTABLE_ENTRIES or expanded > MAX_MUTABLE_BYTES:
                     raise WorkspaceSnapshotError("mutable path archive exceeds content limits")
+    except (tarfile.TarError, OSError) as exc:
+        raise WorkspaceSnapshotError("mutable path archive is unreadable") from exc
+    return {"size_bytes": size, "expanded_bytes": expanded, "entries": count}
+
+
+def _archive_evidence(
+    archive: Path, root: PurePosixPath | None = None,
+    reference_files: tuple[PurePosixPath, ...] = (),
+    *, allow_relative_references: bool = False,
+    transferred_file_targets: dict[PurePosixPath, int] | None = None,
+) -> dict[str, int | str]:
+    limits = _archive_limits(archive)
+    try:
         _validate_workspace_archive(archive, _POLICY, root=root,
                                     external_reference_files=frozenset(reference_files),
-                                    allow_relative_references=allow_relative_references)
+                                    allow_relative_references=allow_relative_references,
+                                    transferred_file_targets=transferred_file_targets)
         with archive.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
     except (tarfile.TarError, OSError) as exc:
         raise WorkspaceSnapshotError("mutable path archive is unreadable") from exc
-    return {"size_bytes": size, "expanded_bytes": expanded, "entries": count, "sha256": digest}
+    return {**limits, "sha256": digest}
 
 
 @runtime_checkable
@@ -191,14 +204,22 @@ async def export_mutable_paths(
     present = {root: await _check_root(driver, root) for root in paths}
     if paths:
         await _check_cross_root_hardlinks(driver, (workdir, *(root for root in paths if present[root])))
+    budgets = []
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
         if present[root]:
             await _export_workspace_archive(driver, root, archive, preserve_acls=preserve_acls)
         else:
             await asyncio.to_thread(_empty_archive, archive)
+        budgets.append(await asyncio.to_thread(_archive_limits, archive))
+        _check_totals(budgets)
+    archives = {root: directory / f"{index}.tar" for index, root in enumerate(paths)}
+    targets, _ = await asyncio.to_thread(mutable_file_targets, archives, reference_files, reference_symlinks)
+    for root, archive in archives.items():
         evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files,
-                                           allow_relative_references=True)
+                                           allow_relative_references=True,
+                                           transferred_file_targets={p: n for p, n in targets.items()
+                                                                     if not p.is_relative_to(root)})
         records.append({"path": str(root), "archive": archive.name, **evidence,
                         **({"state": "absent"} if not present[root] else {})})
         _check_totals(records)
@@ -234,11 +255,17 @@ async def import_mutable_paths(
         raise WorkspaceSnapshotError("mutable paths manifest is missing or invalid") from exc
     records: list[dict[str, int | str]] = []
     references = await _reference_evidence(driver, reference_files, reference_symlinks=reference_symlinks)
+    archives = {root: directory / f"{index}.tar" for index, root in enumerate(paths)}
+    targets, cross_root_links = await asyncio.to_thread(
+        mutable_file_targets, archives, reference_files, reference_symlinks,
+    )
     # Validate every archive before changing any verifier directory.
     for index, root in enumerate(paths):
         archive = directory / f"{index}.tar"
         evidence = await asyncio.to_thread(_archive_evidence, archive, root, reference_files,
-                                           allow_relative_references=True)
+                                           allow_relative_references=True,
+                                           transferred_file_targets={p: n for p, n in targets.items()
+                                                                     if not p.is_relative_to(root)})
         await asyncio.to_thread(check_acl_declaration, archive, preserve_acls=preserve_acls)
         absent = declared["paths"][index].get("state") == "absent"
         if absent and evidence["entries"] != 0:
@@ -250,6 +277,9 @@ async def import_mutable_paths(
                 **({"reference_files": references} if reference_files else {})}
     if declared != expected:
         raise WorkspaceSnapshotError("mutable paths manifest differs from declared paths, reference files or archive content")
+    group_replacement = getattr(driver, "replace_mutable_archives", None)
+    if cross_root_links and group_replacement is None:
+        raise WorkspaceSnapshotError("driver lacks staged mutable file-link group restoration")
     identity = await driver.exec("id -u; id -g")
     try:
         uid, gid = (int(value) for value in identity.stdout.split())
@@ -270,6 +300,13 @@ async def import_mutable_paths(
             with tarfile.open(directory / f"{index}.tar") as stream:
                 if any(member.uid != uid or member.gid != gid for member in stream):
                     raise WorkspaceSnapshotError(f"mutable path ownership cannot be preserved by verifier: {root}")
+    if group_replacement is not None:
+        # The baseline toolchain may itself depend on a root declared absent.
+        # Stage and promote the final present state before deleting those roots.
+        await group_replacement(tuple((directory / f"{index}.tar", root)
+                                      for index, root in enumerate(paths)
+                                      if records[index].get("state") != "absent"),
+                                preserve_acls=preserve_acls)
     for index, root in enumerate(paths):
         if records[index].get("state") == "absent":
             if not present[root]:
@@ -280,6 +317,8 @@ async def import_mutable_paths(
             result = await driver.exec(f"rmdir -- {quoted} 2>/dev/null || rm -rf -- {quoted}")
             if result.return_code or result.stderr or result.truncated:
                 raise WorkspaceSnapshotError(f"cannot remove absent verifier mutable directory: {root}")
+            continue
+        if group_replacement is not None:
             continue
         replacement = getattr(driver, "replace_workspace_archive", None)
         if replacement is not None:

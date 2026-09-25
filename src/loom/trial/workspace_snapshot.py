@@ -252,6 +252,7 @@ def _validate_workspace_archive(
     root: PurePosixPath | None = None,
     external_reference_files: frozenset[PurePosixPath] = frozenset(),
     allow_relative_references: bool = False,
+    transferred_file_targets: dict[PurePosixPath, int] | None = None,
 ) -> None:
     """Fail closed unless every archive entry is safe to overlay.
 
@@ -320,10 +321,13 @@ def _validate_workspace_archive(
                     f"workspace archive entry {path} is nested below symlink {parent}",
                 )
 
+    file_targets = transferred_file_targets or {}
+    references = external_reference_files | file_targets.keys()
     for path in symlink_targets:
         _resolve_symlink_chain(path, symlink_targets, policy, root=root,
-                               external_reference_files=external_reference_files,
-                               allow_relative_references=allow_relative_references)
+                               external_reference_files=references,
+                               allow_relative_references=allow_relative_references,
+                               reference_link_depths=file_targets)
 
     for path, target in hardlink_targets.items():
         seen = {path}
@@ -449,6 +453,7 @@ def _resolve_symlink_chain(
     root: PurePosixPath | None,
     external_reference_files: frozenset[PurePosixPath] = frozenset(),
     allow_relative_references: bool = False,
+    reference_link_depths: dict[PurePosixPath, int] | None = None,
 ) -> PurePosixPath:
     """Follow components in filesystem order, including links preceding ``..``.
 
@@ -456,9 +461,12 @@ def _resolve_symlink_chain(
     visited again after a parent component. Check each intermediate path so
     entering private state or leaving the root cannot be hidden by ``..``.
     """
+    depths = reference_link_depths or {}
     reference = _external_reference_target(links[start], start, root, external_reference_files,
                                           allow_relative=allow_relative_references)
     if reference is not None:
+        if 1 + depths.get(reference, 0) > 40:
+            raise WorkspaceSnapshotError("mutable file link chain exceeds 40 links")
         return reference
     absolute, parts = _symlink_components(links[start], root)
     stack = [] if absolute else list(start.parent.parts)
@@ -489,6 +497,8 @@ def _resolve_symlink_chain(
             if reference is not None:
                 if pending:
                     raise WorkspaceSnapshotError("external snapshot reference must be a terminal file")
+                if expansions + depths.get(reference, 0) > 40:
+                    raise WorkspaceSnapshotError("mutable file link chain exceeds 40 links")
                 return reference
             absolute, parts = _symlink_components(links[current], root)
             if absolute:

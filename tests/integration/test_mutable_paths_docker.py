@@ -19,6 +19,97 @@ async def reference_drivers(sandboxes):  # noqa: F811
     yield tuple(sandboxes[:2])
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+async def test_cross_root_shell_chain_stages_every_root_before_promotion(sandboxes, tmp_path, reverse):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier, other = sandboxes
+    for driver in (agent, verifier):
+        assert (await driver.exec('mkdir -p /app')).return_code == 0
+    setup = '''/usr/local/bin/python3 - <<'PY'
+import os, pathlib, shutil
+pathlib.Path('/alternatives').mkdir()
+pathlib.Path('/alternatives/sh').symlink_to('/usr/bin/dash')
+keep = {'sh','dash','mkdir','rm','tar','find','stat','id'}
+for path in pathlib.Path('/usr/bin').iterdir():
+    if path.name not in keep:
+        if path.is_dir() and not path.is_symlink(): shutil.rmtree(path)
+        else: path.unlink()
+pathlib.Path('/usr/bin/sh').unlink()
+pathlib.Path('/usr/bin/sh').symlink_to('/alternatives/sh')
+PY'''
+    result = await agent.exec(setup)
+    assert result.return_code == 0, result.stderr
+    roots = (PurePosixPath('/usr/bin'), PurePosixPath('/alternatives'))
+    if reverse:
+        roots = tuple(reversed(roots))
+    await export_mutable_paths(agent, roots, tmp_path, workdir=PurePosixPath('/app'))
+    await import_mutable_paths(verifier, roots, tmp_path, workdir=PurePosixPath('/app'))
+    result = await verifier.exec('/bin/sh -c "printf restored"')
+    assert result.return_code == 0 and result.stdout == b'restored', result.stderr
+    assert (await other.exec('test ! -e /alternatives; /bin/sh -c true')).return_code == 0
+
+
+async def test_present_shell_restores_before_removing_absent_old_shell(sandboxes, tmp_path):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier, _ = sandboxes
+    for driver in (agent, verifier):
+        result = await driver.exec('mkdir -p /app /old-shell; cp /usr/bin/dash /old-shell/sh')
+        assert result.return_code == 0, result.stderr
+    result = await verifier.exec('ln -sfn /old-shell/sh /usr/bin/sh')
+    assert result.return_code == 0, result.stderr
+    # Keep only the real tools needed by export/staging; avoid copying the image.
+    result = await agent.exec('''/usr/local/bin/python3 - <<'PY'
+import pathlib, shutil
+keep = {'sh','dash','mkdir','rm','rmdir','tar','find','stat','id'}
+for path in pathlib.Path('/usr/bin').iterdir():
+    if path.name not in keep:
+        if path.is_dir() and not path.is_symlink(): shutil.rmtree(path)
+        else: path.unlink()
+shutil.rmtree('/old-shell')
+PY''')
+    assert result.return_code == 0, result.stderr
+    roots = (PurePosixPath('/usr/bin'), PurePosixPath('/old-shell'))
+    await export_mutable_paths(agent, roots, tmp_path, workdir=PurePosixPath('/app'))
+    await import_mutable_paths(verifier, roots, tmp_path, workdir=PurePosixPath('/app'))
+    result = await verifier.exec('test ! -e /old-shell; /bin/sh -c "printf restored"')
+    assert result.return_code == 0 and result.stdout == b'restored', result.stderr
+
+
+@pytest.mark.parametrize("relative,reverse", [(False, False), (True, True)])
+async def test_declared_roots_preserve_alternatives_file_chain(sandboxes, tmp_path, relative, reverse):  # noqa: F811
+    from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
+
+    agent, verifier, other = sandboxes
+    first = "../../alternatives/tool" if relative else "/alternatives/tool"
+    second = "../tools/bin/real" if relative else "/tools/bin/real"
+    for driver in (agent, verifier):
+        result = await driver.exec("mkdir -p /app /tools/bin /alternatives; echo old > /tools/bin/deleted")
+        assert result.return_code == 0, result.stderr
+    result = await agent.exec(
+        "set -eu; rm /tools/bin/deleted; "
+        "printf '#!/bin/sh\\nprintf transferred' > /tools/bin/real; chmod 0755 /tools/bin/real; "
+        f"ln -s {first} /tools/bin/tool; ln -s {second} /alternatives/tool",
+    )
+    assert result.return_code == 0, result.stderr
+    assert (await verifier.exec("mkdir -p /tests; echo private > /tests/marker")).return_code == 0
+    paths = (PurePosixPath('/tools/bin'), PurePosixPath('/alternatives'))
+    if reverse:
+        paths = tuple(reversed(paths))
+    await export_mutable_paths(agent, paths, tmp_path, workdir=PurePosixPath('/app'))
+    await import_mutable_paths(verifier, paths, tmp_path, workdir=PurePosixPath('/app'))
+    checked = await verifier.exec(
+        f'set -eu; test "$(readlink /tools/bin/tool)" = {first}; '
+        f'test "$(readlink /alternatives/tool)" = {second}; '
+        'test ! -e /tools/bin/deleted; test "$(cat /tests/marker)" = private; /tools/bin/tool',
+    )
+    assert checked.return_code == 0 and checked.stdout == b'transferred', checked.stderr
+    assert (await agent.exec('test ! -e /tests/marker')).return_code == 0
+    untouched = await other.exec('test ! -e /tools; test ! -e /alternatives; test ! -e /tests/marker')
+    assert untouched.return_code == 0, untouched.stderr
+
+
 async def _reference_fixture(drivers, external="/usr/local/bin/interpreter"):
     for driver in drivers:
         result = await driver.exec(
