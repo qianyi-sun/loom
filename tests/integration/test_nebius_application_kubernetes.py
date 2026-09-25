@@ -12,7 +12,9 @@ from loom_service.environment_management.provider import ProviderBlockedError, P
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_effects import started
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_render import named
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -75,7 +77,7 @@ class KubernetesAPI:
 async def provider(applications):
     from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
 
-    registry, factory, alice, plan, operation, lease = await started(applications)
+    registry, _, _, plan, _, lease = await started(applications)
     api = KubernetesAPI()
     async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
         client = ApplicationKubernetesProvider(registry, http)
@@ -123,7 +125,7 @@ async def test_uncertain_create_and_absence_never_authorize_resend(provider):
 
 
 async def test_namespaced_create_requires_recorded_unchanged_namespace(provider):
-    client, api, registry, plan, lease = provider
+    client, api, _, plan, lease = provider
     document = named(plan["prepared"], "Deployment", "loom-service")
     with pytest.raises(ProviderBlockedError, match="namespace_identity"):
         await client.create(lease, "api", document)
@@ -170,6 +172,21 @@ async def test_wrong_reconciliation_identity_is_not_adopted(provider):
         await client.create(lease, "namespace", document)
     assert (await registry.effect_history(lease))[0].phase == "dispatched"
     assert len(api.mutations) == 1
+
+
+async def test_malformed_delete_readback_cannot_prove_old_resource_absence(provider):
+    client, api, registry, plan, lease = await namespace_ready(provider)
+    created = await client.create(lease, "api", named(plan["prepared"], "Deployment", "loom-service"))
+    target = dict(api_version="apps/v1", kind="Deployment", namespace="loom-dev-alice", name="loom-service",
+                  uid=created.observed_uid, resource_version=created.observed_resource_version)
+    api.pending_delete = True
+    with pytest.raises(ProviderWaitingError):
+        await client.delete(lease, "delete-api", **target)
+    del api.objects["/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service"]["metadata"]["uid"]
+    with pytest.raises(ProviderBlockedError):
+        await client.delete(lease, "delete-api", **target)
+    assert (await registry.effect_history(lease))[-1].phase == "dispatched"
+    assert len(api.mutations) == 3
 
 
 async def test_stale_lease_cannot_issue_a_kubernetes_write(provider, applications):
