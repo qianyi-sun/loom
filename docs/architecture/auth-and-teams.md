@@ -201,14 +201,33 @@ Administrative mutations write durable attribution records to
 `admin_audit_events`; mutations that share the service database with their
 audit record fail if that record cannot be written.
 
-## Staging browser acceptance
+## Browser acceptance
 
-Staging can enable a hidden endpoint that exchanges the singleton operator
-bearer for an audited browser session belonging to an existing platform-admin
-owner of the `admin` team. The exchange is rejected outside the staging
-runtime. Its session lasts exactly 900 seconds, uses a distinct secret prefix,
-requires secure cookies, and cannot be refreshed. It exists only for automated
-staging browser acceptance, not for user login or production access.
+Use a dedicated test account through normal username/password login. Admin page
+checks use a platform administrator; task/provider and tenant-isolation checks
+use ordinary team members. Never replace user acceptance with administrator
+access. The special staging operator-to-browser exchange is retired, and its
+old cookies are rejected without modifying ordinary sessions or audit history.
+
+From `web/`, run:
+
+```bash
+npm run smoke:admin -- --url https://YOUR-LOOM-ORIGIN --username USER --password env:LOOM_SMOKE_PASSWORD
+```
+
+A `file:PATH` password source is also supported. Add `--team-id UUID` to exercise a team switch and verify it
+survives page reload and API readback. The smoke visits the normal login form, checks the admin tabs,
+audit and rate-card pages, then logs out and confirms session invalidation. It
+does not create accounts, tokens, providers or tasks, save browser state, or
+emit credentials/screenshots. Use a dedicated account; do not reuse a person's
+interactive session. Migrate any external broker invocation of the removed
+script/image to this normal-login command before rollout; no old alias remains.
+
+Platform administrators can select an enabled team without a membership row;
+ordinary users can select only their enabled member teams. The same policy
+owns the picker, switch authorization, and subsequent session readback. A
+rejected switch preserves the previous team and returns 403/404, while invalid
+authentication continues to return 401.
 
 ## Persistence and implementation
 

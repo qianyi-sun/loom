@@ -228,6 +228,11 @@ export default function Settings(): JSX.Element {
                 </option>
               ))}
             </select>
+            {switchTeamMutation.isError ? (
+              <p role="alert" className="mt-2 text-sm text-red-700">
+                {switchTeamMutation.error.message}
+              </p>
+            ) : null}
           </div>
         </Card.Body>
       </Card>

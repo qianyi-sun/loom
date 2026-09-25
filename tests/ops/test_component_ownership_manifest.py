@@ -18,8 +18,6 @@ import scripts.component_ownership as component_ownership
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-
-
 def test_component_ownership_authority_files_exist() -> None:
     assert (REPO_ROOT / "config/component-ownership.toml").is_file()
     assert (REPO_ROOT / "scripts/component_ownership.py").is_file()
@@ -550,8 +548,6 @@ def test_repository_manifest_owns_every_dockerfile_and_test() -> None:
     } == payload_dockerfiles
 
 
-
-
 def test_validator_requires_any_docker_marked_pytest_module_in_docker_lane(
     tmp_path: Path,
 ) -> None:
@@ -996,11 +992,10 @@ def test_rollout_roles_define_exact_primary_and_auxiliary_sets() -> None:
     auxiliary_names = {entry["image_name"] for entry in auxiliary}
 
     assert len(primary) == 10
-    assert len(auxiliary) == 2
+    assert len(auxiliary) == 1
     assert not primary_names & auxiliary_names
     assert auxiliary_names == {
         "loom-rehearsal-postgres",
-        "loom-staging-admin-browser-smoke",
     }
     assert {
         component.release_digest
@@ -1014,13 +1009,11 @@ def test_release_image_matrix_is_derived_from_all_release_components() -> None:
 
     matrix = component_ownership.release_image_matrix(manifest)
 
-    assert len(matrix) == 15
+    assert len(matrix) == 14
     assert {entry["image_name"] for entry in matrix} == {
         component.release_digest for component in manifest.release_components()
     }
     assert all(entry["context"] == "." for entry in matrix)
-
-
 
 
 def test_execution_actuator_image_owns_capacity_collector_source() -> None:
@@ -1058,8 +1051,6 @@ def test_native_diagnosis_changes_select_actuator_image(module: str) -> None:
         fallback_all=True,
     )
     assert any(item["image"] == "execution-actuator" for item in selected)
-
-
 
 
 def test_pipeline_core_fixture_is_conformance_only_and_never_a_rollout_image() -> None:
@@ -1147,25 +1138,6 @@ def test_release_image_selection_uses_manifest_source_ownership() -> None:
             "image": "web",
             "image_name": "loom-web",
             "dockerfile": "deploy/Dockerfile.web",
-            "context": ".",
-        },
-    )
-
-
-def test_browser_acceptance_dockerfile_selects_its_conformance_image() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-
-    matrix = component_ownership.select_release_image_matrix(
-        manifest,
-        changed_paths=("deploy/Dockerfile.staging-admin-browser-smoke",),
-        force_all=False,
-    )
-
-    assert matrix == (
-        {
-            "image": "staging-admin-browser-smoke",
-            "image_name": "loom-staging-admin-browser-smoke",
-            "dockerfile": "deploy/Dockerfile.staging-admin-browser-smoke",
             "context": ".",
         },
     )

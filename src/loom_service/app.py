@@ -88,8 +88,6 @@ from loom_service.routes import (
 )
 from loom_service.session_auth import (
     browser_origin_allowed,
-    is_staging_admin_browser_session,
-    staging_admin_browser_request_allowed,
 )
 from loom_service.storage import create_minio_client
 from loom_service.taskset_gc import run_loop as taskset_gc_run_loop
@@ -457,36 +455,14 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
     )
 
     @app.middleware("http")
-    async def _staging_admin_validation_session_middleware(  # type: ignore[no-untyped-def]
+    async def _browser_origin_middleware(  # type: ignore[no-untyped-def]
         request: Request,
         call_next,
     ):
-        """Fail closed on every mutation except exact session cleanup."""
+        """Require the configured origin for browser writes."""
         if not browser_origin_allowed(request, settings):
             return JSONResponse(
                 status_code=403, content={"detail": "browser origin rejected"},
-                headers={"Cache-Control": "no-store"},
-            )
-        raw_cookie = request.cookies.get(settings.session_cookie_name)
-        request_path = request.scope.get("path", request.url.path)
-        hidden_bootstrap_probe = (
-            os.environ.get("LOOM_ENV", "").strip().lower() != "staging"
-            and request.method.upper() == "POST"
-            and request_path == "/api/v1/auth/staging-admin-browser-session"
-        )
-        if (
-            is_staging_admin_browser_session(raw_cookie)
-            and not hidden_bootstrap_probe
-            and not staging_admin_browser_request_allowed(
-                method=request.method,
-                path=request_path,
-            )
-        ):
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "detail": ("staging admin browser session is validation-only"),
-                },
                 headers={"Cache-Control": "no-store"},
             )
         return await call_next(request)

@@ -363,8 +363,8 @@ def test_release_contract_selects_cluster_and_staging(path: str) -> None:
         "web/package.json",
         "web/scripts/frontend-route-browser-smoke.mjs",
         "web/scripts/frontend-route-browser-smoke.test.mjs",
-        "web/scripts/staging-admin-browser-smoke.mjs",
-        "web/scripts/staging-admin-browser-smoke.test.mjs",
+        "web/scripts/admin-browser-smoke.mjs",
+        "web/scripts/admin-browser-smoke.test.mjs",
         "web/src/main.tsx",
     ],
 )

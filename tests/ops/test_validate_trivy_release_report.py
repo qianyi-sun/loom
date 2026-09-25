@@ -36,7 +36,6 @@ _EMPTY_COMPONENTS = (
     "execution-runtime",
     "llm-gateway-sandbox",
     "service",
-    "staging-admin-browser-smoke",
     "web",
 )
 _PERL_BASE_FINDINGS = frozenset(

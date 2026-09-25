@@ -191,6 +191,30 @@ describe("Settings", () => {
     });
   });
 
+  it.each([403, 404])("keeps the current session on a rejected team switch (%s)", async (status) => {
+    let reject = true;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/auth/me")) return jsonResponse(ownerMe);
+      if (url.endsWith("/api/v1/auth/team")) {
+        expect(new Headers(init?.headers).get("X-Loom-CSRF")).toBe("csrf-owner");
+        return reject ? jsonResponse({ detail: "denied" }, status) : jsonResponse(betaMe);
+      }
+      if (url.includes("/api/v1/teams/")) return jsonResponse(teamDetail);
+      if (url.endsWith("/api/v1/tokens")) return jsonResponse({ items: [] });
+      return jsonResponse({}, 404);
+    });
+    renderWithProviders(<Settings />, { route: "/settings" });
+    await screen.findByRole("heading", { name: "Team Settings" });
+    await userEvent.selectOptions(screen.getByLabelText("Current team"), "team-b");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Your current team is unchanged");
+    expect(screen.getByLabelText("Current team")).toHaveValue("team-a");
+    expect(screen.queryByRole("heading", { name: "Sign in" })).not.toBeInTheDocument();
+    reject = false;
+    await userEvent.selectOptions(screen.getByLabelText("Current team"), "team-b");
+    await waitFor(() => expect(screen.getByLabelText("Current team")).toHaveValue("team-b"));
+  });
+
   it("confirms token revoke and scopes pending state to the selected token", async () => {
     let releaseRevoke: ((response: Response) => void) | undefined;
     const revokeResponse = new Promise<Response>((resolve) => {

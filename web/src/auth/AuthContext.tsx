@@ -22,6 +22,7 @@ import {
   createBrowserFailureId,
   reportBrowserFailure,
 } from "../lib/errorReporting";
+import { TeamSwitchRejectedError } from "../api/auth";
 import {
   AuthContext,
   type AuthCtx,
@@ -108,6 +109,7 @@ function mutateAuthoritativeSession(
       }
       return next;
     } catch (error) {
+      if (error instanceof TeamSwitchRejectedError) throw error;
       // A failed response may still follow a committed cookie/team change.
       // Withhold unsafe requests until a subsequent /me reconciles authority.
       setCsrfToken(null);
@@ -315,6 +317,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
         installSession(next, true);
         return next;
       } catch (error) {
+        if (error instanceof TeamSwitchRejectedError) throw error;
         const safeError =
           error instanceof AuthSessionLoadError
             ? error
