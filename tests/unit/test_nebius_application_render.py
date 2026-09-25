@@ -147,6 +147,41 @@ def test_renderer_rejects_cross_binding_and_inactive_inputs(platform_inputs, cha
         render_application(row, release, shared, foundation)
 
 
+def test_renderer_rejects_shared_foundation_hostname_collision(platform_inputs):
+    from loom.nebius_application_render import render_application
+    from loom.nebius_environment_contract import FoundationBinding
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    config = foundation.platform_config
+    config["public_host"] = "alice.dev.example.com"
+    foundation = FoundationBinding.model_validate(
+        foundation.model_dump() | {"platform_config_json": json.dumps(config)}
+    )
+    with pytest.raises(ValueError, match="hostname overlaps shared infrastructure"):
+        render_application(row, release, shared, foundation)
+
+
+def test_renderer_rejects_legacy_environment_namespace_authority(platform_inputs):
+    from loom.nebius_application_render import render_application
+    from loom.nebius_environment_contract import FoundationBinding
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    foundation = FoundationBinding.model_validate(foundation.model_dump() | {
+        "namespace_authority": {"installation_id": str(uuid4()), "namespace": "loom-nebius-management"},
+    })
+    with pytest.raises(ValueError, match="legacy environment namespace authority"):
+        render_application(row, release, shared, foundation)
+
+
+def test_renderer_revalidates_unchecked_foundation_inputs(platform_inputs):
+    from loom.nebius_application_render import render_application
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    foundation = foundation.model_copy(update={"ingress_class_name": "bad/name"})
+    with pytest.raises(ValueError):
+        render_application(row, release, shared, foundation)
+
+
 @pytest.mark.parametrize("slug", ["dev", "staging", "prod", "shared", "Alice", "a/b", "a" * 55])
 def test_application_namespace_cannot_claim_shared_or_invalid_names(platform_inputs, slug):
     # Positive control means import/setup failure cannot satisfy the assertion.
