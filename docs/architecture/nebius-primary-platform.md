@@ -166,6 +166,33 @@ qualify immutable application inputs and enforce lifecycle generations. Renderin
 RBAC alone supplies none of those controls and does not claim malicious-manager
 isolation or authorize any live permission change.
 
+### Application registration and shared name claims
+
+Migration `0160` adds `nebius_applications`, a distinct management registration
+with application/incarnation, owner and shared-data identities, release ID,
+deployment/access generations, desired state and retained/purged metadata. It has
+no database, execution namespace, PVC or bucket ownership fields. The legacy
+environment registration and its operation journals retain their existing meaning.
+
+`nebius_deployment_name_claims` is the common transactional name index: slugs and
+public hosts are global; namespace names are unique within a cluster. Migration-
+owned invoker-permission triggers project both legacy registrations/reservations
+and new applications into that index. A concurrent application and legacy create
+cannot each commit the same physical name. Existing namespace reservations are
+backfilled as recorded, never inferred from an environment's naming convention.
+
+Retained destruction keeps the claims. Legacy verified purge releases host/slug
+but keeps a namespace claim until its original namespace reservation is removed;
+application verified purge releases its application claims. No new purge endpoint
+or permission is provided. Downgrade refuses to erase application history and
+otherwise removes only the new projection/schema, preserving legacy records.
+
+These tables do not yet expose application management routes or run provisioning.
+Authenticated lifecycle operations, frozen plans, shared capacity reservations,
+credentials and late-effect fencing remain required. This is a real application
+schema-head advance: shared deployment must coordinate migrations and compatible
+API versions through its protected workflow; personal APIs never run migrations.
+
 ## Managed environment identity and rendering
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation

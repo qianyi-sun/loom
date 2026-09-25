@@ -28,7 +28,7 @@ class NebiusApplication(Base):
                         name="nebius_application_slug_check"),
         CheckConstraint("application_namespace = 'loom-dev-' || slug", name="nebius_application_namespace_check"),
         CheckConstraint("cluster_id ~ '^[a-zA-Z0-9_-]{1,128}$'", name="nebius_application_cluster_check"),
-        CheckConstraint("length(public_host) <= 253 AND public_host ~ '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' AND position('.' in public_host) > 0",
+        CheckConstraint("length(public_host) <= 253 AND public_host ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'",
                         name="nebius_application_host_check"),
         CheckConstraint(" AND ".join(f"{name} <> '00000000-0000-0000-0000-000000000000'::uuid" for name in (
             "application_id", "incarnation", "owner_user_id", "owner_team_id", "data_environment_id", "release_id",

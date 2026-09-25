@@ -38,7 +38,7 @@ def upgrade() -> None:
             CONSTRAINT nebius_application_namespace_check CHECK (application_namespace = 'loom-dev-' || slug),
             CONSTRAINT nebius_application_cluster_check CHECK (cluster_id ~ '^[a-zA-Z0-9_-]{1,128}$'),
             CONSTRAINT nebius_application_host_check CHECK (
-                length(public_host) <= 253 AND public_host ~ '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' AND position('.' in public_host) > 0),
+                length(public_host) <= 253 AND public_host ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?([.][a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'),
             CONSTRAINT nebius_application_identity_check CHECK (
                 application_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
                 incarnation <> '00000000-0000-0000-0000-000000000000'::uuid AND
