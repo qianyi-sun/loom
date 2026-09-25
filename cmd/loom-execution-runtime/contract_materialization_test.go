@@ -162,20 +162,23 @@ func TestDecodePlanSupportsPreparedFixtureWithoutPlatformAdmission(t *testing.T)
 
 func TestFixtureRejectsForgedRoleOrControllerShape(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any, map[string]any){
-		"missing grant":     func(p, f map[string]any) { delete(p, "task_image_materialization_id") },
-		"private sandbox":   func(p, f map[string]any) { f["private_sandbox"] = true },
-		"missing component": func(p, f map[string]any) { delete(f, "task_image_component") },
-		"wrong component":   func(p, f map[string]any) { f["task_image_component"] = "sidecar:other" },
-		"missing opt in":    func(p, f map[string]any) { delete(f, "task_fixture") },
-		"reserved host":     func(p, f map[string]any) { f["hostname"] = "localhost" },
-		"numeric host":      func(p, f map[string]any) { f["hostname"] = "127.0.0.1" },
-		"host injection":    func(p, f map[string]any) { f["hostname"] = "fixture\n127.0.0.1 controller" },
-		"environment":       func(p, f map[string]any) { f["environment"] = map[string]string{"HOME": "/workspace"} },
-		"dependency":        func(p, f map[string]any) { f["depends_on"] = []string{"task-sandbox"} },
-		"missing sandbox":   func(p, f map[string]any) { p["sidecars"] = p["sidecars"].([]any)[:2] },
-		"not first":         func(p, f map[string]any) { s := p["sidecars"].([]any); s[0], s[1] = s[1], s[0] },
-		"negative grace":    func(p, f map[string]any) { f["startup_probe"].(map[string]any)["initial_delay_seconds"] = -1 },
-		"unbounded grace":   func(p, f map[string]any) { f["startup_probe"].(map[string]any)["initial_delay_seconds"] = 301 },
+		"missing grant":      func(p, f map[string]any) { delete(p, "task_image_materialization_id") },
+		"private sandbox":    func(p, f map[string]any) { f["private_sandbox"] = true },
+		"missing component":  func(p, f map[string]any) { delete(f, "task_image_component") },
+		"wrong component":    func(p, f map[string]any) { f["task_image_component"] = "sidecar:other" },
+		"missing opt in":     func(p, f map[string]any) { delete(f, "task_fixture") },
+		"reserved host":      func(p, f map[string]any) { f["hostname"] = "localhost" },
+		"numeric host":       func(p, f map[string]any) { f["hostname"] = "127.0.0.1" },
+		"hexadecimal host":   func(p, f map[string]any) { f["hostname"] = "0x08080808" },
+		"dotted hex host":    func(p, f map[string]any) { f["hostname"] = "0x7f.1" },
+		"mixed numeric host": func(p, f map[string]any) { f["hostname"] = "0177.0x0.0.01" },
+		"host injection":     func(p, f map[string]any) { f["hostname"] = "fixture\n127.0.0.1 controller" },
+		"environment":        func(p, f map[string]any) { f["environment"] = map[string]string{"HOME": "/workspace"} },
+		"dependency":         func(p, f map[string]any) { f["depends_on"] = []string{"task-sandbox"} },
+		"missing sandbox":    func(p, f map[string]any) { p["sidecars"] = p["sidecars"].([]any)[:2] },
+		"not first":          func(p, f map[string]any) { s := p["sidecars"].([]any); s[0], s[1] = s[1], s[0] },
+		"negative grace":     func(p, f map[string]any) { f["startup_probe"].(map[string]any)["initial_delay_seconds"] = -1 },
+		"unbounded grace":    func(p, f map[string]any) { f["startup_probe"].(map[string]any)["initial_delay_seconds"] = 301 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := fixturePlanPayload(t)

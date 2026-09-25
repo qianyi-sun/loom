@@ -70,6 +70,7 @@ def test_fixture_declaration_is_explicit_and_legacy_payload_stays_identical() ->
 @pytest.mark.parametrize("changed", [
     {"name": "task-sandbox"}, {"name": "bad_name"}, {"hostname": "localhost"},
     {"hostname": "fixture.example\n127.0.0.1 controller"}, {"hostname": None},
+    {"hostname": "0x08080808"}, {"hostname": "0x7f.1"}, {"hostname": "0177.0x0.0.01"},
     {"command": "python3 /server.py"}, {"command": []}, {"depends_on": ["database"]},
     {"ports": []}, {"ports": [23, 23]}, {"ports": [0]}, {"cpus": None},
     {"memory_mb": None}, {"storage_mb": None}, {"healthcheck": None},
