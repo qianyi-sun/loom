@@ -733,6 +733,13 @@ an empty complete map means the class omits explicit parameters, whereas false
 means an unknown driver, key, value or malformed parameter map was redacted.
 Incomplete observations cannot qualify installation inputs. This observation does
 not modify the class or weaken the installer's exact comparison.
+Provider storage and backup quota checks use two read-only `GetByName` requests,
+each bound to the configured tenant, quota name and region, with no RPC retry or
+list fallback. Returned identity, active/usage state, service, byte unit and
+remaining headroom must match. Nebius's quota list can include unrelated-region
+default placeholders and can exceed its requested page size; it is not the
+management installer's qualification source. This does not change provider limits
+or the separate IAM inventory checks.
 Backup credential qualification uses a
 bounded `ListObjectsV2` request (`MaxKeys=1`), after verifying the exact private,
 versioned bucket and object-only policy through IAM. Nebius can deny `HeadBucket`

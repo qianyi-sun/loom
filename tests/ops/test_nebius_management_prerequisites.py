@@ -224,7 +224,17 @@ def connected_checks(checks, installation, publication, cloud, monkeypatch):
         if quota.get("spec", {}).get("description") == "backup-full":
             backup_quota["spec"]["limit"] = backup_quota["status"]["usage"]
         return quotas.ListQuotaAllowancesResponse.from_json(json.dumps({"items": [quota, backup_quota]}))
-    monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(list=list_quotas))
+    async def get_quota(request, **kwargs):
+        assert isinstance(request, quotas.GetByNameRequest)
+        assert kwargs == {"timeout": 30, "retries": 0}
+        assert request.parent_id == client.settings.cloud.tenant_id
+        assert request.region == client.settings.cloud.region
+        assert request.name in {client.settings.storage_quota_name, client.settings.backup_quota_name}
+        events.append("quota:" + request.name)
+        reply = await list_quotas(None, **kwargs)
+        return next(row for row in reply.items if row.metadata.name == request.name)
+    monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(
+        list=list_quotas, get_by_name=get_quota))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(
         transport=github_transport(publication[1], publication[2]), **kwargs))
@@ -271,6 +281,83 @@ def test_connected_preflight_qualifies_publication_iam_capacity_storage_and_rout
     assert events.count("cloud-opened") == events.count("cloud-closed") == 1
     assert "public-route" in events and "backup-read" in events and "backup-closed" in events
     assert client.diagnostic_stage is None
+
+
+def test_quota_qualification_uses_exact_names_despite_oversized_placeholder_inventory(connected_checks, monkeypatch):
+    from nebius.api.nebius.quotas import v1 as quotas
+    from scripts.ops.nebius_management_install import render_installation
+
+    client, request, _, _, events = connected_checks
+    api = quotas.QuotaAllowanceServiceClient(None)
+    async def observed_list(request, **kwargs):
+        reply = await api.list(request, **kwargs)
+        items = json.loads(reply.to_json(preserving_proto_field_name=True))["items"]
+        # The installed provider returned 462 entries for page_size100, including
+        # unrelated-region placeholders without IDs. Do not relax the IAM pager.
+        items += [{"metadata": {"name": "unused-" + str(i), "parent_id": client.settings.cloud.tenant_id},
+                   "spec": {"region": "other-region"}} for i in range(460)]
+        return quotas.ListQuotaAllowancesResponse.from_json(json.dumps({"items": items}))
+    monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(
+        list=observed_list, get_by_name=api.get_by_name))
+    client.preflight(request, render_installation(request))
+    assert [event for event in events if event.startswith("quota:")] == [
+        "quota:" + client.settings.storage_quota_name, "quota:" + client.settings.backup_quota_name]
+    assert "backup-read" in events and "public-route" in events
+
+
+@pytest.mark.parametrize("part,field,value", [
+    ("metadata", "id", ""), ("metadata", "name", "other-quota"),
+    ("metadata", "parent_id", "other-tenant"), ("spec", "region", "other-region"),
+    ("spec", "limit", "-1"), ("spec", "limit", "0"),
+    ("status", "usage", "-1"), ("status", "service", "other-service"),
+    ("status", "unit", "count"), ("status", "state", "STATE_UNSPECIFIED"),
+    ("status", "usage_state", "USAGE_STATE_UNSPECIFIED"),
+])
+@pytest.mark.parametrize("target", ["storage", "backup"])
+def test_exact_quota_lookup_rejects_wrong_identity_state_or_capacity(
+    connected_checks, monkeypatch, part, field, value, target,
+):
+    from nebius.api.nebius.quotas import v1 as quotas
+    from scripts.ops.nebius_management_install import render_installation
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+
+    client, request, _, _, events = connected_checks
+    api = quotas.QuotaAllowanceServiceClient(None)
+    name = getattr(client.settings, target + "_quota_name")
+    async def wrong_response(request, **kwargs):
+        row = await api.get_by_name(request, **kwargs)
+        data = json.loads(row.to_json(preserving_proto_field_name=True))
+        if request.name == name:
+            data[part][field] = value
+        return quotas.QuotaAllowance.from_json(json.dumps(data))
+    monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(
+        list=api.list, get_by_name=wrong_response))
+    with pytest.raises(ManagementPrerequisiteError):
+        client.preflight(request, render_installation(request))
+    assert client.diagnostic_stage == "provider_quota"
+    assert "backup-read" not in events and "public-route" not in events
+    assert events.count("cloud-opened") == events.count("cloud-closed") == 1
+
+
+def test_exact_quota_error_has_no_inventory_fallback_and_closes_client(connected_checks, monkeypatch):
+    from nebius.api.nebius.quotas import v1 as quotas
+    from scripts.ops.nebius_management_install import render_installation
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+
+    client, request, _, _, events = connected_checks
+    calls = []
+    api = quotas.QuotaAllowanceServiceClient(None)
+    async def unavailable(request, **kwargs):
+        calls.append(request.name)
+        raise RuntimeError("private-provider-detail")
+    monkeypatch.setattr(quotas, "QuotaAllowanceServiceClient", lambda _sdk: SimpleNamespace(
+        list=api.list, get_by_name=unavailable))
+    with pytest.raises(ManagementPrerequisiteError) as error:
+        client.preflight(request, render_installation(request))
+    assert "private-provider-detail" not in str(error.value)
+    assert calls == [client.settings.storage_quota_name]
+    assert "backup-read" not in events and "public-route" not in events
+    assert events.count("cloud-opened") == events.count("cloud-closed") == 1
 
 
 @pytest.mark.parametrize("allowed", [True, False])
