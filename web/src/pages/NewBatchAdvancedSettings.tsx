@@ -72,7 +72,7 @@ export function NewBatchAdvancedSettings({
               </p>
             )}
             <label className="block max-w-sm">
-              <FieldLabel hint="default: task setting">Verifier env mode</FieldLabel>
+              <FieldLabel hint="default: separate">Verifier env mode</FieldLabel>
               <select
                 className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
                 value={advanced.verifierEnvMode}
