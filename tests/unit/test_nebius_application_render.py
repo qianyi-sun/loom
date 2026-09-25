@@ -140,7 +140,9 @@ def test_renderer_rejects_cross_binding_and_inactive_inputs(platform_inputs, cha
     else:
         config = foundation.platform_config
         config["environment"] = change
-        foundation = foundation_from(config)
+        # Normal FoundationBinding construction already rejects these classes;
+        # the renderer must also reject an unchecked/copy-mutated input.
+        foundation = foundation.model_copy(update={"platform_config_json": json.dumps(config)})
     with pytest.raises(ValueError):
         render_application(row, release, shared, foundation)
 

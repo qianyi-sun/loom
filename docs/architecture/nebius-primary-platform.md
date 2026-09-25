@@ -80,6 +80,49 @@ processes and revoke their access when retiring a generation. A cached process
 configuration is not a live registration check. No current provisioner supplies
 this new binding, and it does not establish installed shared-development readiness.
 
+### Application-only manifest contract
+
+`ApplicationRegistrationV1`, `ApplicationReleaseV1` and
+`SharedDevelopmentBindingV1` describe personal applications independently of the
+legacy full-environment registration. `render_application` produces exactly a
+frontend and API Deployment in `loom-dev-<slug>`, their internal Services and the
+personal HTTPS Ingress. It emits no database, PVC, migration, backup, Control Plane,
+Gateway, worker or build workload. Adding another application emits no bucket or
+policy creation request. Resource accounting includes both rolling-update surge
+Pods and zero persistent storage.
+
+The protected shared binding retains the existing development foundation's
+namespace, object-store names and runtime profile. Application source and image
+digests are independent of that executor profile; rendering does not rewrite its
+candidate SHA or task/runtime images to match the personal API. Application and
+shared schema revisions must match exactly. These input checks are not evidence
+of live schema, publication authenticity, running-process fencing or execution
+readiness: their caller must qualify the release and shared binding first.
+
+The API selects `api_only`, the application session audience and shared CP/Gateway
+endpoints. Namespace-local Secrets supply its individually revocable database
+login and CA (`loom-application-db`), object access (`loom-application-storage`),
+and the **shared** encryption keyring (`loom-application-auth`); the renderer does
+not create those Secrets. It supplies no admin/worker/batch-runner/JWT-signing or
+backup credentials and no workload Kubernetes permissions. The static frontend
+receives no secrets. Developer-controlled backend code still has trusted
+development-data access, not malicious-code isolation.
+
+Personal NetworkPolicies deny ingress/egress by default, admit API/web ingress
+only from the configured ingress controller, and permit API egress to the shared
+database/CP/Gateway, cluster DNS and public IPv4 HTTPS (excluding private,
+loopback and link-local destinations). This is not a hostname-level HTTPS
+allowlist. The renderer never changes the shared namespace's policies: a protected
+shared-side admission update is required for these connections to work. It also
+does not rename/recreate the existing shared foundation.
+
+No management route or provisioner invokes this renderer yet. Legacy frozen
+full-stack operations retain their original meaning. Credential provisioning,
+active registration/lifecycle fencing, schema coordination, shared network
+admission and source qualification remain prerequisites for activating the new
+personal applications; rendered resources alone do not satisfy installed
+four-plus-one acceptance.
+
 ## Managed environment identity and rendering
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation
