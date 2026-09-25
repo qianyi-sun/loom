@@ -17,7 +17,7 @@ from scripts.ops.nebius_ingress_operation import LiveIngressAPI, qualify_dns_tar
 from scripts.ops.nebius_management_capacity import _count, qualify_platform_capacity
 from scripts.ops.nebius_management_cloud_scope import (
     ManagementCloudScope,
-    _pages,
+    _read,
     qualify_cloud_material,
 )
 from scripts.ops.nebius_management_install import ManagementInstallRequest, render_installation
@@ -276,18 +276,23 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
                                              bucket_name=request.deployment.backup_bucket,
                                              backup_bytes=request.deployment.postgres_storage_gi * 1024**3)
                 self.diagnostic_stage = "provider_quota"
-                quotas = await _pages(v1.QuotaAllowanceServiceClient(sdk).list, v1.ListQuotaAllowancesRequest,
-                                      parent_id=self.settings.cloud.tenant_id)
+                quotas = v1.QuotaAllowanceServiceClient(sdk)
                 for name, unit, service, required in (
                     (self.settings.storage_quota_name, self.settings.storage_quota_unit, "compute", missing_storage_mib * 1024**2),
                     (self.settings.backup_quota_name, self.settings.backup_quota_unit, "storage", request.deployment.postgres_storage_gi * 1024**3),
                 ):
-                    rows = [row for row in quotas if row["metadata"]["name"] == name
-                            and row.get("spec", {}).get("region") == self.settings.cloud.region]
-                    if len(rows) != 1 or unit not in {"byte", "bytes", "B"}:
+                    if unit not in {"byte", "bytes", "B"}:
                         raise ValueError()
-                    row = rows[0]
-                    if (row["metadata"]["parent_id"] != self.settings.cloud.tenant_id
+                    # Nebius can return an entire cross-region inventory despite
+                    # List.page_size, including ID-less default placeholders.
+                    # Ask only for each exact regional allowance; never relax the
+                    # shared IAM pager or fall back to an ambiguous list result.
+                    row = await _read(quotas.get_by_name, v1.GetByNameRequest(
+                        parent_id=self.settings.cloud.tenant_id, name=name, region=self.settings.cloud.region))
+                    if (not row["metadata"].get("id")
+                            or row["metadata"]["parent_id"] != self.settings.cloud.tenant_id
+                            or row["metadata"]["name"] != name
+                            or row["spec"]["region"] != self.settings.cloud.region
                             or row["status"]["state"] != "STATE_ACTIVE"
                             or row["status"]["usage_state"] not in {"USAGE_STATE_USED", "USAGE_STATE_NOT_USED"}
                             or row["status"]["service"] != service or row["status"]["unit"] != unit):
