@@ -8,6 +8,7 @@ management when a generation is retired.
 from __future__ import annotations
 
 from typing import Literal, Self
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
@@ -16,6 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 def canonical_session_origin(value: str) -> str:
     """Require a single HTTPS origin, never a request-derived URL or base path."""
     if value.strip() != value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError("session audience requires a canonical HTTPS origin")
+    # Inspect structure before HttpUrl normalizes away userinfo, dot segments,
+    # missing authority separators or backslashes.
+    raw = urlsplit(value)
+    if (raw.scheme != "https" or not raw.netloc or raw.username is not None
+            or raw.path not in {"", "/"} or "\\" in value):
         raise ValueError("session audience requires a canonical HTTPS origin")
     url = HttpUrl(value)
     if (url.scheme != "https" or url.host is None or url.username is not None
