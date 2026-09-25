@@ -38,13 +38,13 @@ from loom.models.verifier import VerifierError, VerifierResult
 from loom.retry import next_attempt_at
 from loom.trajectory.reader import TrajectoryReader
 from loom.trajectory.writer import TrajectoryWriter
-from loom.verifier_runtime import resolve_verifier_env_mode
 from loom.trial.artifacts import ArtifactCollector
 from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
 from loom.trial.stale_running import effective_agent_timeout_sec
 from loom.trial.workspace import materialize_workspace, refuse_planted_private_paths
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
