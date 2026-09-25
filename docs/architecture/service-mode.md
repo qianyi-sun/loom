@@ -807,7 +807,10 @@ with a secret-row key-share lock and rejects missing refs. Other namespaces and
 unchanged historical refs keep their existing contract. Reactivating a deleted
 provider also requires its secret to exist. The guard uses a fixed-search-path
 security-definer function with public execution revoked, so reference writers
-do not gain ciphertext access. Collection locks only candidate secret rows,
+do not gain ciphertext access. Completed application-upgrade validation recognizes
+only this trigger's reviewed source hash, trigger signature and fixed search path;
+changes to its body or execution properties remain rejected.
+Collection locks only candidate secret rows,
 skips locked rows, and rechecks references after claiming rows. This makes concurrent attachment and deletion safe without locking entire
 consumer tables. Rewrap locks the same row before decrypting; concurrent walkers
 and startup validation tolerate refs reclaimed after their initial listing.
