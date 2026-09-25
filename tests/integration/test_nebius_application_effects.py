@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from loom.db.nebius_application_operation_schema import (
     NebiusApplicationOperation,
@@ -14,7 +13,9 @@ from loom.db.nebius_application_operation_schema import (
 )
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -169,3 +170,30 @@ async def test_retry_preserves_dispatched_effect_and_missing_keys_fail_closed(ap
     newer = await registry.claim(first.operation_id)
     assert await registry.dispatch_effect(newer, "api") is False
     assert (await registry.effect_history(newer))[0].phase == "dispatched"
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("Namespace", None), ("Secret", "loom-application-db"), ("Secret", "loom-application-storage"),
+    ("Secret", "loom-application-auth"), ("ResourceQuota", "loom-application-retired"),
+])
+async def test_exact_bootstrap_and_runtime_material_targets_are_recorded_without_contents(applications, kind, name):
+    registry, _, _, plan, _, lease = await started(applications)
+    ns = plan["prepared"].registration.application_namespace
+    effect = await registry.prepare_effect(lease, "setup", intent(plan, kind=kind, api_version="v1",
+        name=name or ns, namespace=None if kind == "Namespace" else ns))
+    assert effect.intent.name == (name or ns)
+    assert set(effect.intent.model_dump()) == {
+        "api_version", "kind", "namespace", "name", "action", "request_sha256", "uid", "resource_version",
+    }
+    assert await registry.dispatch_effect(lease, "setup") is True
+
+
+async def test_concurrent_distinct_intents_cannot_both_prepare_before_reconciliation(applications):
+    registry, _, _, plan, _, lease = await started(applications)
+    results = await asyncio.gather(*[
+        registry.prepare_effect(lease, key, intent(plan, name=key)) for key in ("loom-service", "loom-web")
+    ], return_exceptions=True)
+    assert sum(not isinstance(result, Exception) for result in results) == 1
+    failure = next(result for result in results if isinstance(result, Exception))
+    assert isinstance(failure, ManagementError) and failure.code == "application_effect_unresolved"
+    assert len(await registry.effect_history(lease)) == 1

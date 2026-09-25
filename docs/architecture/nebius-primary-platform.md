@@ -269,6 +269,36 @@ capacity, names and shared data until future provider integration proves routing
 Pod admission and process shutdown plus credential/connection retirement. Accepted
 shared tasks and shared users are never cancelled or revoked by these transactions.
 
+### Application external-effect evidence
+
+Migration `0162` adds a separate write-ahead journal for application Kubernetes
+mutations. The trusted lifecycle provider records a resource locator, action,
+request digest and exact UID/resourceVersion preconditions before dispatch. It
+never stores Secret bodies in this table. Secret request digests are appropriate
+only for high-entropy managed material, not guessable credentials. Targets are
+limited to frozen application manifest names, three fixed application Secrets,
+the fixed retirement quota, and exact-identity Pod deletion in the application
+namespace. Namespace and RoleBinding identities remain create-only.
+
+Effect keys have immutable replay semantics. Within each operation, only one
+unresolved effect can be prepared at a time. Dispatch is an atomic, one-winner
+transition from `prepared` to `dispatched`; only that caller receives permission
+to attempt the write. Another caller, even with the same valid lease, must not
+resend it. Expiry, retry, and supersession never erase uncertain dispatches.
+The current application lease can read its predecessor history, not another
+application's history. A provider can record an immutable observed UID/version
+after validating the real response or reconciliation readback; PATCH/DELETE
+observations must match the intended UID. Downgrade refuses any effect history.
+
+This is journal authority, not Kubernetes authorization or a completed lifecycle
+worker. The provider must still validate the exact request digest, ownership,
+response and patch/delete preconditions. A crash between dispatch commit and the
+request is deliberately ambiguous. A missing object on readback does not prove
+that a late request cannot create it; safe recovery requires provider-side
+fencing before a new attempt. `observed` means that specific effect was verified,
+not that an application is healthy, credentials are retired, or capacity can be
+released. No live installer consumes this capability yet.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal
