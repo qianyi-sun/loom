@@ -228,6 +228,10 @@ ordinary users can select only their enabled member teams. The same policy
 owns the picker, switch authorization, and subsequent session readback. A
 rejected switch preserves the previous team and returns 403/404, while invalid
 authentication continues to return 401.
+For an already selected team, session authentication preserves the user's
+identity if the team is subsequently disabled. Existing route authorization
+continues to reject ordinary members with 403, including at the control-plane
+cancellation boundary; disabling a team is not misreported as an expired login.
 
 ## Persistence and implementation
 

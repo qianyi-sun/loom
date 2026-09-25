@@ -313,12 +313,19 @@ async def create_session_for_user(
 
 async def accessible_teams(
     session: AsyncSession, user: User, *, team_id: UUID | None = None,
+    include_disabled: bool = False,
 ) -> list[tuple[Team, str]]:
-    """One policy for the picker, switching, and session readback."""
+    """Share membership/admin authority, optionally retaining a disabled context.
+
+    Existing sessions retain their identity so route authorization can return
+    the established disabled-team 403. New team selections must be enabled.
+    """
     if user.disabled_at is not None or user.status != "active":
         return []
     if user.is_platform_admin:
-        stmt = select(Team).where(Team.disabled_at.is_(None))
+        stmt = select(Team)
+        if not include_disabled:
+            stmt = stmt.where(Team.disabled_at.is_(None))
         if team_id is not None:
             stmt = stmt.where(Team.id == team_id)
         teams = (await session.execute(stmt.order_by(Team.name.asc(), Team.id.asc()))).scalars().all()
@@ -326,8 +333,10 @@ async def accessible_teams(
     membership_stmt = (
         select(Team, TeamMembership.role)
         .join(TeamMembership, TeamMembership.team_id == Team.id)
-        .where(TeamMembership.user_id == user.id, Team.disabled_at.is_(None))
+        .where(TeamMembership.user_id == user.id)
     )
+    if not include_disabled:
+        membership_stmt = membership_stmt.where(Team.disabled_at.is_(None))
     if team_id is not None:
         membership_stmt = membership_stmt.where(Team.id == team_id)
     rows = (await session.execute(membership_stmt.order_by(Team.name.asc(), Team.id.asc()))).all()
@@ -352,7 +361,9 @@ async def verify_session_cookie(
     if user_session.revoked_at is not None or user_session.expires_at < now:
         return None
     team_id = user_session.current_team_id
-    teams = await accessible_teams(session, user, team_id=team_id)
+    teams = await accessible_teams(
+        session, user, team_id=team_id, include_disabled=team_id is not None,
+    )
     if team_id is None:
         if not teams:
             return None
