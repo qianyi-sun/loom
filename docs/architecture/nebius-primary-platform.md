@@ -187,6 +187,12 @@ application verified purge releases its application claims. No new purge endpoin
 or permission is provided. Downgrade refuses to erase application history and
 otherwise removes only the new projection/schema, preserving legacy records.
 
+The schema enforces record shape and atomic name exclusion. Authenticated
+lifecycle code must enforce immutable owner, incarnation and shared-data bindings;
+arbitrary direct SQL writers are not an isolation boundary. The management role
+needs DML privileges on the claim table for invoker triggers, which the protected
+installer must verify before activating registration.
+
 These tables do not yet expose application management routes or run provisioning.
 Authenticated lifecycle operations, frozen plans, shared capacity reservations,
 credentials and late-effect fencing remain required. This is a real application
