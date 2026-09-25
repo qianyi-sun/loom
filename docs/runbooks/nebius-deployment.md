@@ -762,7 +762,11 @@ anchor and generated recovery material. No automatic rollback crosses migration.
 
 `management_installed` requires runtime-authority probes, retained storage
 identity, a completed backup with off-node object readback, healthy management
-and authenticated public HTTPS. It does **not** prove restoring that backup,
+and authenticated public HTTPS. Backup execution evidence accepts omitted Pod
+type fields only from an exact `v1/PodList`; explicit conflicting types fail.
+The recorded Job/Pod ownership, executable template, zero restarts and unchanged
+readback remain required before accepting the uploader's checksum report.
+It does **not** prove restoring that backup,
 credential renewal, two-owner lifecycle, or shared task/build execution. Those
 remain separate installed acceptance steps; a green workflow alone does not
 establish the fully operational multi-person environment.
