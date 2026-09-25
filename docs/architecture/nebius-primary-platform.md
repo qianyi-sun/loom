@@ -166,7 +166,79 @@ qualify immutable application inputs and enforce lifecycle generations. Renderin
 RBAC alone supplies none of those controls and does not claim malicious-manager
 isolation or authorize any live permission change.
 
+### Application registration and shared name claims
+
+Migration `0160` adds `nebius_applications`, a distinct management registration
+with application/incarnation, owner and shared-data identities, release ID,
+deployment/access generations, desired state and retained/purged metadata. It has
+no database, execution namespace, PVC or bucket ownership fields. The legacy
+environment registration and its operation journals retain their existing meaning.
+
+`nebius_deployment_name_claims` is the common transactional name index: slugs and
+public hosts are global; namespace names are unique within a cluster. Migration-
+owned invoker-permission triggers project both legacy registrations/reservations
+and new applications into that index. A concurrent application and legacy create
+cannot each commit the same physical name. Existing namespace reservations are
+backfilled as recorded, never inferred from an environment's naming convention.
+
+Retained destruction keeps the claims. Legacy verified purge releases host/slug
+but keeps a namespace claim until its original namespace reservation is removed;
+application verified purge releases its application claims. No new purge endpoint
+or permission is provided. Downgrade refuses to erase application history and
+otherwise removes only the new projection/schema, preserving legacy records.
+
+The schema enforces record shape and atomic name exclusion. Authenticated
+lifecycle code must enforce immutable owner, incarnation and shared-data bindings;
+arbitrary direct SQL writers are not an isolation boundary. The management role
+needs DML privileges on the claim table for invoker triggers, which the protected
+installer must verify before activating registration.
+
+These tables do not themselves expose application management routes or run provisioning.
+Credentials, qualified publication, shared access and late-effect fencing remain
+required before activation. This is a real application
+schema-head advance: shared deployment must coordinate migrations and compatible
+API versions through its protected workflow; personal APIs never run migrations.
+
+### Application intent and lease journal
+
+Migration `0161` adds separate application operation and platform reservation
+tables. The internal `ApplicationRegistry` authenticates owner/team and scope for
+create, update, suspend, resume, retained destroy, replay and progress reads. Its
+prepared-plan interface is for trusted management code, not HTTP owner payloads:
+publication and protected installation inputs must be qualified before calling it.
+No application management route or provider worker is activated by this layer.
+
+Idempotency fingerprints represent caller intent, not generated IDs or installation
+defaults. Replay returns the original operation without requiring a new publication
+lookup. Plans freeze application manifests, release metadata, shared execution/data
+bindings and measured platform costs; credentials do not belong in these plans.
+Update and resume need a completed predecessor and an exact next-generation plan.
+Suspend and destroy may supersede incomplete work. Owner, incarnation, names,
+cluster and data identity cannot change through these operations.
+
+Application and legacy reservations count against the same cluster platform
+allowance under its row lock. Applications reserve no persistent storage. Update
+retains the componentwise larger old/new hold; its future worker must retire the
+old process before starting the new one. Budget changes lock budget, application,
+then operation; lease-only operations lock application before operation. No external
+request occurs within these transactions. Downgrade refuses to erase operation or
+reservation history.
+
+Each transition advances deployment and access generations, preserves the original
+plan and records its predecessor, and invalidates the older lease. Lease checks
+bind application/incarnation, both generations, epoch, token and database-clock
+expiry. They are database progress fencing, **not** proof that a running API has
+stopped or an in-flight provider write cannot finish. This layer deliberately has
+no completion or reservation-release operation. Requested suspend/destroy retains
+capacity, names and shared data until future provider integration proves routing,
+Pod admission and process shutdown plus credential/connection retirement. Accepted
+shared tasks and shared users are never cancelled or revoked by these transactions.
+
 ## Managed environment identity and rendering
+
+This section describes the retained full-environment v1 format. New personal
+applications use the shared-data, application-only contracts above and do not own
+execution/build namespaces, databases or buckets.
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation
 from its class (`development`, `staging`, `production`), owner and mutable
