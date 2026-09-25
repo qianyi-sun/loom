@@ -28,6 +28,7 @@ class KubernetesAPI:
         self.pending_delete = False
         self.reject_next = None
         self.changing_read_versions = False
+        self.replace_uid_on_read = False
         self.read_version = 0
 
     def handle(self, request):
@@ -37,6 +38,8 @@ class KubernetesAPI:
             if value is not None and self.changing_read_versions:
                 self.read_version += 1
                 value["metadata"]["resourceVersion"] = str(self.read_version)
+                if self.replace_uid_on_read and self.read_version > 1:
+                    value["metadata"]["uid"] = "replacement-uid"
             return httpx.Response(200 if value else 404, json=value or {})
         body = json.loads(request.content)
         self.mutations.append((request.method, path, body))
@@ -117,9 +120,11 @@ async def test_namespace_create_is_single_winner_and_observed_replay_never_resen
     assert history == [observed]
 
 
-async def test_concurrent_matching_readbacks_keep_first_observation_despite_controller_rv_change(provider, monkeypatch):
+@pytest.mark.parametrize("replacement", [False, True])
+async def test_concurrent_readbacks_preserve_first_observation_and_reject_different_uid(provider, monkeypatch, replacement):
     client, api, registry, plan, lease = provider
     api.changing_read_versions = True
+    api.replace_uid_on_read = replacement
     barrier = asyncio.Event()
     arrivals, committed_versions = [], []
     observe = registry.observe_effect
@@ -139,7 +144,12 @@ async def test_concurrent_matching_readbacks_keep_first_observation_despite_cont
     assert len(set(arrivals)) == 2
     assert len(committed_versions) == 1
     history = await registry.effect_history(lease)
-    assert all(result == history[0] for result in results), results
+    if replacement:
+        conflicts = [value for value in results if isinstance(value, ManagementError)]
+        assert len(conflicts) == 1 and conflicts[0].code == "application_effect_observation_conflict"
+        assert sum(value == history[0] for value in results) == 1
+    else:
+        assert all(result == history[0] for result in results), results
     assert history[0].observed_resource_version == committed_versions[0]
     assert len(api.mutations) == 1
 

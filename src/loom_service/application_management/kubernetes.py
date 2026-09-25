@@ -18,6 +18,7 @@ from loom_service.application_management.effects import ApplicationEffect, Appli
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.environment_management.kubernetes_provider import _contains
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from loom_service.environment_management.registry import ManagementError
 
 _RESOURCES = {
     "Namespace": "namespaces", "Secret": "secrets", "Service": "services",
@@ -158,7 +159,18 @@ class ApplicationKubernetesProvider:
                 raise ProviderBlockedError("application_kubernetes_resource_identity_conflict")
         await self._namespace(lease, parsed.kind, parsed.namespace)
         assert uid is not None
-        await self.registry.observe_effect(lease, key, uid=uid, resource_version=resource_version)
+        try:
+            await self.registry.observe_effect(lease, key, uid=uid, resource_version=resource_version)
+        except ManagementError as exc:
+            if exc.code != "application_effect_observation_conflict":
+                raise
+            # Another reconciler may have recorded the same successful object
+            # before a controller changed only its RV. Preserve that immutable
+            # historical observation; never replace it with our newer readback.
+            recorded = await self.registry.prepare_effect(lease, key, intent)
+            if recorded.phase != "observed" or recorded.observed_uid != uid:
+                raise
+            return recorded
         return await self.registry.prepare_effect(lease, key, intent)
 
     async def create(self, lease: ApplicationLease, key: str, document: dict[str, Any]) -> ApplicationEffect:

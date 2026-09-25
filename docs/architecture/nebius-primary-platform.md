@@ -330,7 +330,10 @@ subsequent calls, including after lease takeover. A confirmed409/422 is retained
 as rejection so trusted orchestration can use a new key after fresh observation.
 
 This internal adapter receives qualified manifests/material from trusted lifecycle
-code, not from an owner raw-manifest endpoint. It neither creates credentials nor
+code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE
+target ownership and history before supplying UID/resourceVersion, including Pod
+owner chains; the adapter does not establish that lineage from a supplied UID.
+It neither creates credentials nor
 coordinates process shutdown, schema compatibility or capacity release. Returned
 observed effects are historical evidence, not a new health check. Kubernetes child
 CREATE has no namespace-UID precondition: readback detects namespace replacement,
