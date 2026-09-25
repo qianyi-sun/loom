@@ -690,11 +690,15 @@ build timestamp to `/opt/loom/build-sha` / `/opt/loom/build-time`, which
 changed by a later fetch — and it also stamps them into the nginx image's
 environment/`/etc/loom-frontend-build-time` so
 `deploy/web-runtime-config.sh` includes them in `loom-frontend-config.json`
-as the *served* identity. `web/src/lib/buildVersion.ts` polls that served
-identity (and the backend endpoint) only on window focus, throttled via
-react-query's `staleTime`, and surfaces drift from the loaded identity as a
-non-disruptive notice in the version details with an explicit refresh
-action — it never reloads or discards input on its own. A plain local build
+as the *served* identity. `web/src/lib/buildVersion.ts` rechecks that served
+identity (#2183) every 10 minutes while the page is visible (paused while
+hidden, with no catch-up on return), on window focus or the page becoming
+visible (at most once per 60 seconds), and immediately when version details
+open; all triggers share one in-flight request, and a failed lookup keeps the
+last valid comparison. The backend endpoint is refetched on focus, throttled
+via react-query's `staleTime`. Drift from the loaded identity shows as the
+sidebar dot and a non-disruptive notice in the version details with an
+explicit refresh action — it never reloads or discards input on its own. A plain local build
 with no `--build-arg` bakes the Dockerfiles' literal `unknown` default for
 revision/source ref (build time is always a real timestamp — it's computed
 at build time either way, not sourced from a build-arg); the frontend and

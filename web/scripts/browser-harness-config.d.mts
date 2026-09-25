@@ -7,6 +7,8 @@ export type BrowserHarnessConfig = Readonly<{
   apiBaseURL: string;
   configURL: string;
   runtimeEnvironment: "development" | "production";
+  /** Revision the browser-test bundle is stamped with (#2183). */
+  loadedBuildRevision: string;
 }>;
 
 export type BrowserWebServerConfig = Readonly<{

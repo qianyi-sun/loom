@@ -10,6 +10,7 @@ const vite = spawn(process.execPath, ["node_modules/vite/bin/vite.js", "build"],
     ...process.env,
     VITE_E2E_ROUTE_BASE: `${config.routePrefix}/`,
     VITE_BROWSER_TEST_BUILD: "true",
+    VITE_BUILD_REVISION: config.loadedBuildRevision,
   },
   stdio: "inherit",
 });
