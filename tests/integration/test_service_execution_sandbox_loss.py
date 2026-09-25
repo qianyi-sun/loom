@@ -23,8 +23,9 @@ from tests.integration.test_service_execution_leases import (
 
 
 @pytest.mark.parametrize("initial_oom", [True, False])
+@pytest.mark.parametrize("role", ["task-sandbox", "fixture-server"])
 async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
-    postgres_url, initial_oom
+    postgres_url, initial_oom, role
 ):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -45,7 +46,7 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
         )
         assert await actuator.run_commands_once(now=now) == 1
         diagnostic = ContainerDiagnostic(
-            name="task-sandbox",
+            name=role,
             restart_count=1,
             previous_termination=ContainerTerminationDiagnostic(
                 reason="OOMKilled" if initial_oom else "Error",
@@ -60,7 +61,7 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
                 if initial_oom
                 else NormalizedJobState.FAILED,
                 "reason": "SandboxRestarted",
-                "message": "task-sandbox lost its attempt process state",
+                "message": f"{role} lost its attempt process state",
                 "resource_version": "same-job-version",
                 "pod_uid": "sandbox-loss-pod",
                 "pod_resource_version": "pod-1",
@@ -114,7 +115,7 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
             if initial_oom:
                 assert "OOMKilled" in current.error_message
             else:
-                assert current.error_message == "task-sandbox lost its attempt process state"
+                assert current.error_message == f"{role} lost its attempt process state"
             assert current.revoked_at is None
             assert current.output_commit_state == "not_started"
             assert kubernetes.delete_count == 0

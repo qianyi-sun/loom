@@ -67,3 +67,16 @@ def test_initial_missing_last_state_can_be_enriched_and_diagnosis_uses_existing_
     assert report["summary"] == result["message"]
     assert report["primary_cause"]["attribution"] == "resource_limit"
     assert any("missing peak data is not zero" in e for e in report["evidence"])
+
+
+def test_fixture_oom_uses_the_bound_fixture_limit_and_cannot_name_another_fixture():
+    from tests.unit.test_task_fixtures import _plan as fixture_plan
+
+    event = _event(1, reason="OOMKilled")
+    event["payload"]["container_diagnostics"][0]["name"] = "fixture-server"
+    result = execution_failure_diagnosis([event], plan=fixture_plan(), job_uid="job", pod_uid="pod")
+    assert result is not None
+    assert result["container_role"] == "fixture-server" and result["stage"] == "fixture"
+    assert result["memory_limit_mib"] == 128
+    event["payload"]["container_diagnostics"][0]["name"] = "fixture-other"
+    assert execution_failure_diagnosis([event], plan=fixture_plan(), job_uid="job", pod_uid="pod") is None
