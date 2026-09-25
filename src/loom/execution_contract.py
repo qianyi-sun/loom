@@ -31,7 +31,7 @@ from loom.execution_requirements import (
     TaskExecutionRequirementsV1,
     execution_requirement_diagnostics,
 )
-from loom.models.networking import WebAllowlist
+from loom.models.networking import TaskHttpEgress, hosted_http_egress
 from loom.models.task import TaskConfig
 
 _IMMUTABLE_OCI_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -294,7 +294,7 @@ class WorkloadRequirementsV1(_StrictContract):
     ephemeral_storage_mib: int | None = Field(gt=0)
     isolation_level: IsolationLevel
     network_access: NetworkAccess
-    task_egress: WebAllowlist | None = None
+    task_egress: TaskHttpEgress | None = None
     image_materialization: ImageMaterialization
     image_ref: str | None
     sidecar_count: int = Field(ge=0)
@@ -509,6 +509,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         "gateway-only": NetworkAccess.GATEWAY_ONLY,
         "allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "web-allowlist": NetworkAccess.APPROVED_ALLOWLIST,
+        "public-web": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
     verifier_topology = (
@@ -526,8 +527,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         ephemeral_storage_mib=env.storage_mb,
         isolation_level=IsolationLevel.SHARED_KERNEL,
         network_access=network_access,
-        task_egress=(env.baseline_network_policy
-                     if isinstance(env.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(env.baseline_network_policy),
         image_materialization=materialization,
         image_ref=image_ref,
         sidecar_count=len(env.sidecars),

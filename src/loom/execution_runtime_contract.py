@@ -21,7 +21,7 @@ from pydantic import (
 
 from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
-from loom.models.networking import WebAllowlist
+from loom.models.networking import TaskHttpEgress
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -316,7 +316,7 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
-    task_egress: WebAllowlist | None = None
+    task_egress: TaskHttpEgress | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     node_resource_allocation: NodeResourceAllocationV1 | None = None
