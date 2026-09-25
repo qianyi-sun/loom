@@ -22,7 +22,7 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.execution_contract import workload_requirements_from_task
-from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1, runtime_pod_resources
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.service_execution_materialization import (
@@ -48,7 +48,7 @@ CONTROLLER_IMAGE = "registry.example/controller@sha256:" + "9" * 64
 
 
 async def _seed_preparing_trial(
-    session: AsyncSession, *, now: datetime, state: str,
+    session: AsyncSession, *, now: datetime, state: str, fixture: bool = False,
 ) -> tuple[UUID, dict[str, UUID]]:
     trial_id, target = await fixtures._seed_ready_trial(session, now=now)
     await fixtures._configure_scheduler_trial(session, trial_id=trial_id, now=now)
@@ -65,6 +65,7 @@ async def _seed_preparing_trial(
         agent_image_ref=CONTROLLER_IMAGE,
         runtime_image_ref=plan.runtime_image_ref,
         runtime_binary_sha256=plan.runtime_binary_sha256,
+        service_lifecycle_ready=fixture,
         image_admission=signed_image_admission_bundle(
             (plan.task_image_ref, CONTROLLER_IMAGE, plan.runtime_image_ref), now=now,
         ),
@@ -89,6 +90,18 @@ async def _seed_preparing_trial(
         "verifier": {"name": "script", "args": {"script_path": "verifier/check.sh"}},
         "steps": [{"name": "main", "instruction_file": "instruction.md"}],
     }
+    if fixture:
+        task.config["environment"].update({
+            "docker_build_context": "environment",
+            "sidecars": [{
+                "name": "server", "fixture": True, "hostname": "fixture.example",
+                "dockerfile": "fixtures/server/Dockerfile", "docker_build_context": "fixtures/server",
+                "command": ["python3", "/server.py"], "ports": [23],
+                "cpus": 0.1, "memory_mb": 128, "storage_mb": 128,
+                "healthcheck": {"command": "true", "start_period_sec": 5,
+                                "interval_sec": 2, "timeout_sec": 5, "retries": 15},
+            }],
+        })
     task.source = "s3://artifacts/frozen-task/"
     task.source_provenance = {"service_execution_input": {
         "schema_version": "loom.service-execution-input.v1",
@@ -315,6 +328,103 @@ async def test_direct_reservation_rejects_tampered_prepared_image_without_cost(
             await session.commit()
             await _assert_no_execution(session, trial_id)
             await _assert_no_execution(session, reserved_trial_id)
+    finally:
+        async with sessions() as session:
+            await _clean_image_links(session, trial_id)
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("tamper", [
+    None, "image", "component", "hostname", "command", "resources", "probe",
+    "missing", "prebuilt", "extra_image", "missing_image", "swapped_images",
+])
+async def test_fixture_reservation_requires_exact_frozen_components(
+    postgres_url: str, tamper: str | None,
+) -> None:
+    """Plan shape alone must never authorize an arbitrary uploaded service image."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    trial_id = None
+    try:
+        async with sessions() as session:
+            trial_id, ids = await _seed_preparing_trial(session, now=now, state="queued", fixture=True)
+            row = await session.get(TaskImageMaterialization, ids["x86_64"])
+            assert row is not None
+            row.state = "ready"
+            row.registry_images = {"task": TASK_IMAGE, "sidecar:server":
+                                   "registry.example/fixture@sha256:" + "a" * 64}
+            await session.commit()
+            grant = await get_trial_task_image_execution_grant(
+                session, trial_id=trial_id, cpu_arches=["x86_64"],
+            )
+            assert grant is not None
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            batch = await session.get(Batch, trial.batch_id)
+            assert batch is not None
+            task = TaskConfig.model_validate(grant.task_config)
+            plan = compile_service_execution_plan(
+                task=task, trial=TrialConfig.model_validate(trial.config),
+                task_revision_sha256="sha256:" + grant.task_checksum,
+                source_provenance=grant.task_source_provenance,
+                profile=ServiceExecutionRuntimeProfileV1.model_validate(batch.service_execution_runtime_profile),
+                task_image_grant=grant,
+            )
+            payload = plan.canonical_payload()
+            fixture = payload["sidecars"][0]
+            if tamper == "image":
+                fixture["image_ref"] = "registry.example/forged@sha256:" + "b" * 64
+            elif tamper == "component":
+                fixture.update(role_name="fixture-other", task_image_component="sidecar:other")
+            elif tamper == "hostname":
+                fixture["hostname"] = "other.example"
+            elif tamper == "command":
+                fixture["argv"] = ["/bin/false"]
+            elif tamper == "resources":
+                fixture["resources"]["cpu_millis"] = 1
+            elif tamper == "probe":
+                fixture["startup_probe"]["argv"] = ["/bin/true"]
+            elif tamper == "missing":
+                payload["sidecars"] = payload["sidecars"][1:]
+            elif tamper == "prebuilt":
+                raw = deepcopy(row.task_config)
+                # Attaching the main image UUID must not authorize a prebuilt fixture.
+                raw["environment"]["sidecars"][0].update(
+                    dockerfile=None, docker_build_context=None, docker_image=fixture["image_ref"],
+                )
+                row.task_config = raw
+                row.registry_images = {"task": TASK_IMAGE}
+            elif tamper == "extra_image":
+                row.registry_images = {**row.registry_images, "sidecar:other": fixture["image_ref"]}
+            elif tamper == "missing_image":
+                row.registry_images = {"task": TASK_IMAGE}
+            elif tamper == "swapped_images":
+                fixture["image_ref"] = TASK_IMAGE
+            plan = ExecutionRuntimePlanV1.model_validate(payload)
+            target_id = await session.scalar(select(ServiceExecutionTarget.id))
+            assert target_id is not None
+            await session.commit()
+            args = dict(
+                request_id=uuid4(), trial_id=trial_id, execution_class_id=plan.execution_class_id,
+                target_id=target_id, requirements=workload_requirements_from_task(resolve_prepared_task(task, grant)),
+                runtime_contract=plan, image_admission_keyring=fixtures.IMAGE_ADMISSION_KEYRING,
+                deadline_at=now + timedelta(seconds=3600), now=now,
+            )
+            if tamper is not None:
+                with pytest.raises(ServiceExecutionConflict, match="prepared fixture|not ready"):
+                    await reserve_trial_execution(session, **args)
+                await session.commit()
+                await _assert_no_execution(session, trial_id)
+            else:
+                lease = await reserve_trial_execution(session, **args)
+                await session.commit()
+                assert lease.workload_requirements_json["sidecar_count"] == 1
+                assert lease.runtime_contract_json["sidecars"][0]["image_ref"] == fixture["image_ref"]
+                without_fixture = plan.model_copy(update={"sidecars": plan.sidecars[1:]})
+                assert runtime_pod_resources(plan).cpu_millis == runtime_pod_resources(without_fixture).cpu_millis + 100
+                await session.refresh(trial)
+                assert trial.attempt_count == 1
     finally:
         async with sessions() as session:
             await _clean_image_links(session, trial_id)
