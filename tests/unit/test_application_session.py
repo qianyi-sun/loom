@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from uuid import UUID
 
 import pytest
@@ -83,3 +84,21 @@ def test_audience_requires_explicit_consistent_hosted_configuration(overrides):
     assert _settings().session_audience is not None
     with pytest.raises(ValueError):
         _settings(**overrides)
+
+
+def test_audience_hash_separates_purpose_and_legacy_token_preimages():
+    from loom_service.session_auth import hash_browser_secret
+
+    audience = _settings().session_audience
+    raw = "loom_session_test-proof"
+    session_hash = hash_browser_secret(raw, audience=audience, purpose="session")
+    challenge_hash = hash_browser_secret(raw, audience=audience, purpose="login_challenge")
+    assert session_hash != challenge_hash
+    assert hash_browser_secret(raw, audience=None, purpose="session") == hashlib.sha256(raw.encode()).digest()
+    # A scoped hash must not equal a legacy hash of its serialized audience and
+    # proof. Otherwise a holder could wrap the proof to authenticate in legacy mode.
+    serialized = json.dumps([
+        "loom.application-session-audience.v1", APPLICATION_ID,
+        "https://alice.dev.example.com", 1, "session", raw,
+    ], separators=(",", ":"))
+    assert session_hash != hashlib.sha256(serialized.encode()).digest()
