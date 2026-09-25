@@ -404,7 +404,9 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert "CI_PYTEST_MARKERS" in scripts
     assert "validate_environment_isolation.py" not in scripts
     assert "loom cluster render" not in scripts
-    assert contract["timeout-minutes"] <= 15
+    # Serial native fixture execution and admission now share this job with
+    # the existing ingress qualification. Keep the expanded budget bounded.
+    assert 0 < contract["timeout-minutes"] <= 25
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
