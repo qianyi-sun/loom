@@ -41,7 +41,9 @@ def evidence(installation):
     account = {"apiVersion": "v1", "kind": "ServiceAccount", "automountServiceAccountToken": False,
                "metadata": {"name": "loom-management-provisioner", "namespace": binding.namespace,
                             "uid": str(uuid4()), "labels": {"loom.nebius/management-installation": binding.installation_id}}}
-    values = {"pod": pod, "job": job, "account": account, "calls": [], "fault": None}
+    values = {"pod": pod, "job": job, "account": account, "calls": [], "fault": None,
+              "listed_type": {"apiVersion": "v1", "kind": "Pod"},
+              "list_type": {"apiVersion": "v1", "kind": "PodList"}}
     report = {"backup_key": binding.namespace + "/2026/09/24/180000-" + "a" * 12 + ".dump",
               "sha256": "a" * 64, "bytes": 12}
 
@@ -71,7 +73,9 @@ def evidence(installation):
             return httpx.Response(200, json=values["job"])
         if path.endswith("/pods"):
             assert req.url.params["labelSelector"] == "batch.kubernetes.io/controller-uid=" + job["metadata"]["uid"]
-            return httpx.Response(200, json={"kind": "PodList", "metadata": {}, "items": [values["pod"]]})
+            listed = {key: value for key, value in values["pod"].items() if key not in {"apiVersion", "kind"}}
+            return httpx.Response(200, json={**values["list_type"], "metadata": {},
+                                            "items": [{**listed, **values["listed_type"]}]})
         if path.endswith("/log"):
             assert req.url.params["container"] == "loom-platform-backup"
             if values["fault"] == "replaced_pod":
@@ -118,6 +122,31 @@ def test_backup_report_is_from_exact_completed_job_pod_and_uploader(evidence):
     api, values, report = evidence
     assert api.backup_report(job_uid=values["job"]["metadata"]["uid"]) == report
     assert all(req.method == "GET" for req in values["calls"])
+
+
+@pytest.mark.parametrize("omitted", [("apiVersion",), ("kind",), ("apiVersion", "kind")])
+def test_backup_evidence_accepts_typed_list_items_without_type_meta(evidence, omitted):
+    api, values, report = evidence
+    for key in omitted:
+        values["listed_type"].pop(key)
+    assert api.backup_report(job_uid=values["job"]["metadata"]["uid"]) == report
+    assert all(request.method == "GET" for request in values["calls"])
+
+
+@pytest.mark.parametrize("target,field,value", [
+    ("list_type", "apiVersion", "apps/v1"), ("list_type", "apiVersion", None),
+    ("list_type", "kind", "SecretList"), ("list_type", "kind", None),
+    ("listed_type", "apiVersion", "apps/v1"), ("listed_type", "apiVersion", None),
+    ("listed_type", "kind", "Secret"), ("listed_type", "kind", None),
+])
+def test_backup_evidence_rejects_explicit_conflicting_collection_or_item_type(evidence, target, field, value):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api, values, _ = evidence
+    values[target][field] = value
+    with pytest.raises(ManagementInstallError):
+        api.backup_report(job_uid=values["job"]["metadata"]["uid"])
+    assert not any(request.url.path.endswith("/log") for request in values["calls"])
 
 
 def test_backup_pod_accepts_kubernetes_equivalent_resource_quantities(evidence):

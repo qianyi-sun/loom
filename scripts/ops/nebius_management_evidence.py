@@ -115,13 +115,18 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             listing = self._request("GET", pods_path + "?" + urlencode({
                 "labelSelector": "batch.kubernetes.io/controller-uid=" + job_uid, "limit": 2,
             }))
-            if (listing is None or listing.get("kind") != "PodList" or listing.get("metadata", {}).get("continue")
+            if (listing is None or listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
+                    or listing.get("metadata", {}).get("continue")
                     or len(listing.get("items", [])) != 1):
                 raise ValueError()
-            pod = listing["items"][0]
+            # Typed Kubernetes lists omit item TypeMeta; individual GETs include
+            # it. Inherit only absent fields from this exact verified collection,
+            # retaining explicit conflicting types for rejection below.
+            pod = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
             meta = pod["metadata"]
             _uid(pod)
-            if (pod.get("kind") != "Pod" or meta.get("namespace") != namespace or meta.get("deletionTimestamp")
+            if (pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod"
+                    or meta.get("namespace") != namespace or meta.get("deletionTimestamp")
                     or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", meta["name"])
                     or meta.get("labels", {}).get("batch.kubernetes.io/controller-uid") != job_uid):
                 raise ValueError()
