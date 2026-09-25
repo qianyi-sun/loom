@@ -86,6 +86,42 @@ def test_inspection_connects_optional_binding_without_exporting_it(monkeypatch):
     assert "private" not in json.dumps(result)
 
 
+@pytest.mark.parametrize("parameters,expected,complete", [
+    ({}, {}, True),
+    ({"type": "NETWORK_SSD"}, {"type": "NETWORK_SSD"}, True),
+    ({"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"},
+     {"type": "NETWORK_SSD", "csi.storage.k8s.io/fstype": "ext4"}, True),
+    ({"type": "NETWORK_SSD_IO_M3", "csi.storage.k8s.io/fstype": "xfs"},
+     {"type": "NETWORK_SSD_IO_M3", "csi.storage.k8s.io/fstype": "xfs"}, True),
+    ({"type": "NETWORK_SSD", "private-key": "private-storage"}, {"type": "NETWORK_SSD"}, False),
+    ({"type": "private-storage"}, {}, False),
+    ({"csi.storage.k8s.io/fstype": "private-storage"}, {}, False),
+    ({"type": ["private-storage"]}, {}, False),
+    (None, {}, False),
+    (["private-storage"], {}, False),
+])
+def test_storage_parameters_observe_only_public_enums_without_hiding_redactions(parameters, expected, complete):
+    cluster = Cluster()
+    cluster.lists["storageclasses"][0].update(provisioner="compute.csi.nebius.com", parameters=parameters)
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    storage = result["storage_classes"][0]
+    assert storage["parameters"] == expected
+    assert storage["parameters_complete"] is complete
+    assert "private-" not in json.dumps(result)
+    assert all(command[0] in {"get", "config"} for command in cluster.calls)
+
+
+@pytest.mark.parametrize("provisioner,complete", [("compute.csi.nebius.com", True), ("foreign.example", False)])
+def test_missing_storage_parameters_are_complete_only_for_known_provisioner(provisioner, complete):
+    cluster = Cluster()
+    storage = cluster.lists["storageclasses"][0]
+    storage.pop("parameters")
+    storage["provisioner"] = provisioner
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert result["storage_classes"][0]["parameters"] == {}
+    assert result["storage_classes"][0]["parameters_complete"] is complete
+
+
 @pytest.mark.parametrize("mutation", ["wrong_cluster", "wrong_namespace", "wrong_server", "insecure", "non_nebius", "no_system"])
 def test_wrong_target_stops_before_cluster_inventory(mutation):
     cluster = Cluster()
