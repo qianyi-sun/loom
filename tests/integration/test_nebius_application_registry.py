@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, insert, inspect, select, text, update
+from sqlalchemy import create_engine, delete, insert, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests.integration.test_nebius_environment_migration import registration as legacy_registration
@@ -143,6 +143,35 @@ def test_application_retained_destroy_keeps_names_until_verified_purge(applicati
         new = application(connection)
         assert old["incarnation"] != new["incarnation"]
         assert len(connection.execute(select(NebiusApplication)).all()) == 2
+
+
+def test_verified_legacy_namespace_release_allows_new_application_claim(application_database):
+    from loom.db.nebius_environment_schema import NebiusEnvironmentNamespace
+
+    with application_database.begin() as connection:
+        row = legacy_registration(connection, desired_state="destroyed", purged_at=datetime.now(UTC))
+        connection.execute(insert(NebiusEnvironmentNamespace).values(
+            environment_id=row["environment_id"], cluster_id="cluster-1", role="application", namespace_name="loom-dev-alice",
+        ))
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            application(connection)
+        connection.execute(delete(NebiusEnvironmentNamespace).where(NebiusEnvironmentNamespace.environment_id == row["environment_id"]))
+        application(connection)
+        assert connection.scalar(text("SELECT count(*) FROM nebius_deployment_name_claims WHERE environment_id IS NOT NULL")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM nebius_deployment_name_claims WHERE application_id IS NOT NULL")) == 3
+
+
+def test_conflicting_name_update_rolls_back_original_claims(application_database):
+    from loom.db.nebius_application_schema import NebiusApplication
+
+    with application_database.begin() as connection:
+        row = application(connection)
+        legacy_registration(connection, "bob")
+        before = connection.execute(text("SELECT * FROM nebius_deployment_name_claims ORDER BY kind,scope,name")).mappings().all()
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            connection.execute(update(NebiusApplication).where(NebiusApplication.application_id == row["application_id"]).values(public_host="bob.dev.example.com"))
+        assert connection.execute(text("SELECT * FROM nebius_deployment_name_claims ORDER BY kind,scope,name")).mappings().all() == before
+        assert connection.scalar(select(NebiusApplication.public_host)) == "alice.dev.example.com"
 
 
 def test_backfill_and_empty_downgrade_preserve_frozen_legacy_records(application_database):
