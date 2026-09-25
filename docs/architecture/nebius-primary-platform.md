@@ -236,6 +236,10 @@ shared tasks and shared users are never cancelled or revoked by these transactio
 
 ## Managed environment identity and rendering
 
+This section describes the retained full-environment v1 format. New personal
+applications use the shared-data, application-only contracts above and do not own
+execution/build namespaces, databases or buckets.
+
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation
 from its class (`development`, `staging`, `production`), owner and mutable
 deployment generation. Multiple developers can have development environments;
