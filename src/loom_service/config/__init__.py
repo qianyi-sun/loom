@@ -28,9 +28,9 @@ class LoomServiceSettings(_BaseSettings):
                 or not math.isfinite(self.management_http_body_timeout_sec)
                 or self.management_http_body_timeout_sec <= 0):
             raise ValueError("management HTTP limits must be positive and finite")
-        if self.service_mode not in {"application", "management"}:
-            raise ValueError("service_mode must be application or management")
-        if self.service_mode == "application":
+        if self.service_mode not in {"application", "api_only", "management"}:
+            raise ValueError("service_mode must be application, api_only or management")
+        if self.service_mode in {"application", "api_only"}:
             self.storage_credentials()
         if self.managed_environment_config_file is not None and self.service_mode != "application":
             raise ValueError("child environment configuration requires application mode")
