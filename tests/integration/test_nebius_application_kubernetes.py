@@ -27,11 +27,16 @@ class KubernetesAPI:
         self.hide_objects = False
         self.pending_delete = False
         self.reject_next = None
+        self.changing_read_versions = False
+        self.read_version = 0
 
     def handle(self, request):
         path = request.url.path
         if request.method == "GET":
             value = None if self.hide_objects else self.objects.get(path)
+            if value is not None and self.changing_read_versions:
+                self.read_version += 1
+                value["metadata"]["resourceVersion"] = str(self.read_version)
             return httpx.Response(200 if value else 404, json=value or {})
         body = json.loads(request.content)
         self.mutations.append((request.method, path, body))
@@ -110,6 +115,33 @@ async def test_namespace_create_is_single_winner_and_observed_replay_never_resen
     assert len(api.mutations) == 1
     history = await registry.effect_history(lease)
     assert history == [observed]
+
+
+async def test_concurrent_matching_readbacks_keep_first_observation_despite_controller_rv_change(provider, monkeypatch):
+    client, api, registry, plan, lease = provider
+    api.changing_read_versions = True
+    barrier = asyncio.Event()
+    arrivals, committed_versions = [], []
+    observe = registry.observe_effect
+
+    async def synchronized_observe(*args, **kwargs):
+        arrivals.append(kwargs["resource_version"])
+        if len(arrivals) == 2:
+            barrier.set()
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        await observe(*args, **kwargs)  # Real transaction, no fake observation.
+        committed_versions.append(kwargs["resource_version"])
+
+    monkeypatch.setattr(registry, "observe_effect", synchronized_observe)
+    document = named(plan["prepared"], "Namespace", "loom-dev-alice")
+    results = await asyncio.gather(*[client.create(lease, "namespace", document) for _ in range(2)],
+                                   return_exceptions=True)
+    assert len(set(arrivals)) == 2
+    assert len(committed_versions) == 1
+    history = await registry.effect_history(lease)
+    assert all(result == history[0] for result in results), results
+    assert history[0].observed_resource_version == committed_versions[0]
+    assert len(api.mutations) == 1
 
 
 async def test_uncertain_create_and_absence_never_authorize_resend(provider, applications):
