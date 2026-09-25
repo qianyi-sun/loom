@@ -209,6 +209,12 @@ def _require_fixed_definers(connection: ApplicationDatabaseConnection) -> None:
         "9e7666277888bc7a3a457ece3e417938a7d04a0ae70f1440d92c279ed22e5e04",
         "trigger", ["search_path=pg_catalog", "row_security=off"],
     )
+    # Migration0156 adds this zero-argument row trigger. Pin its reviewed body
+    # and search path without admitting arbitrary new elevated routines.
+    references["guard_provider_secret_attachment"] = (
+        "04e36abf67c1b8d25fd03044a6775fb804fb03db3682b61d8a10a983fb62bb04",
+        "trigger", ["search_path=pg_catalog"],
+    )
     rows = connection.execute(
         "SELECT p.proname,encode(sha256(convert_to(p.prosrc,'UTF8')),'hex'),p.prorettype::regtype::text, "
         "p.prokind='f' AND p.pronargs=0 AND NOT p.proretset AND NOT p.proisstrict AND NOT p.proleakproof "
