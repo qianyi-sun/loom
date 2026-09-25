@@ -129,6 +129,16 @@ that admission contract requires a full-environment identity, not an application
 identity. Application IDs must not be relabelled as environment IDs to bypass
 that boundary.
 
+Personal DB, storage and authentication Secret references include the application
+incarnation and access generation. All API environment references and the DB CA
+volume move together. An old Deployment template therefore cannot implicitly
+consume newer credentials through a reused Secret name. The protected provider
+must still deliver immutable material for that generation, revoke retired DB/object
+access and terminate old connections/processes. Naming alone does not revoke a
+credential already held by a process. Existing frozen fixed-name plans retain their
+historical meaning for cleanup, but must not be activated as proof of generation-
+isolated material by the new lifecycle provider.
+
 ### Application namespace authority
 
 `ApplicationNamespaceAuthorityV1` is a separate, opt-in protected binding for one
@@ -276,7 +286,8 @@ mutations. The trusted lifecycle provider records a resource locator, action,
 request digest and exact UID/resourceVersion preconditions before dispatch. It
 never stores Secret bodies in this table. Secret request digests are appropriate
 only for high-entropy managed material, not guessable credentials. Targets are
-limited to frozen application manifest names, three fixed application Secrets,
+limited to frozen application manifest names, Secret names referenced by those
+Deployments' environment/CA-volume bindings,
 the fixed retirement quota, and exact-identity Pod deletion in the application
 namespace. Namespace and RoleBinding identities remain create-only.
 

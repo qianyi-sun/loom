@@ -77,6 +77,31 @@ def _view(row: NebiusApplicationEffect) -> ApplicationEffect:
                              row.dispatch_epoch, row.observed_uid, row.observed_resource_version)
 
 
+def _secret_targets(operation: NebiusApplicationOperation) -> set[str]:
+    """Use frozen references, including predecessor material on a stop plan.
+
+    This is not qualification of arbitrary Deployment templates. Plans are
+    trusted management inputs; new active providers must qualify their material
+    generation before use. Historical fixed-name plans remain readable/retirable.
+    """
+    names: set[str] = set()
+    for docs in operation.plan_json["files"].values():
+        for doc in docs:
+            if doc["kind"] != "Deployment":
+                continue
+            pod = doc["spec"]["template"]["spec"]
+            for container in pod.get("containers", []):
+                for env in container.get("env", []):
+                    name = env.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+                    if isinstance(name, str):
+                        names.add(name)
+            for volume in pod.get("volumes", []):
+                name = volume.get("secret", {}).get("secretName")
+                if isinstance(name, str):
+                    names.add(name)
+    return names
+
+
 def _validate_target(operation: NebiusApplicationOperation, intent: KubernetesEffectIntent) -> None:
     binding = ApplicationRegistrationV1.model_validate(operation.plan_json["registration"])
     ns = binding.application_namespace
@@ -87,9 +112,8 @@ def _validate_target(operation: NebiusApplicationOperation, intent: KubernetesEf
     planned = any(doc["kind"] == intent.kind and doc["apiVersion"] == intent.api_version
                   and doc["metadata"]["name"] == intent.name
                   for docs in operation.plan_json["files"].values() for doc in docs)
-    additional = (intent.kind == "Secret" and intent.name in {
-        "loom-application-db", "loom-application-storage", "loom-application-auth",
-    }) or (intent.kind == "ResourceQuota" and intent.name == "loom-application-retired") or intent.kind == "Pod"
+    additional = (intent.kind == "Secret" and intent.name in _secret_targets(operation)) or (
+        intent.kind == "ResourceQuota" and intent.name == "loom-application-retired") or intent.kind == "Pod"
     if not owned or not (planned or additional):
         raise ManagementError("invalid_application_effect", 422)
 

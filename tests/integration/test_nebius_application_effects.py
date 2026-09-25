@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from dataclasses import replace
 
 import pytest
@@ -206,6 +207,36 @@ async def test_credential_effects_follow_frozen_source_not_new_stop_intent_gener
     old_material = await registry.prepare_effect(stop_lease, "retire-db", intent(plan, api_version="v1", kind="Secret",
         name=prefix + "-g1", action="delete", uid="old-secret-uid", resource_version="2"))
     assert old_material.intent.name == prefix + "-g1" and stop_lease.access_generation == 2
+
+
+async def test_retained_historical_fixed_name_plan_is_not_silently_rewritten(applications):
+    registry, _, (alice, _), prepare, _, _ = applications
+    plan = prepare()
+    files = copy.deepcopy(plan["prepared"].files)
+    suffix = f"-{plan['prepared'].registration.incarnation.hex}-g1"
+    # Model a plan frozen by the older renderer, without changing any live row.
+    for docs in files.values():
+        for doc in docs:
+            if doc["kind"] == "Deployment":
+                pod = doc["spec"]["template"]["spec"]
+                for container in pod["containers"]:
+                    for env in container.get("env", []):
+                        if "valueFrom" in env:
+                            ref = env["valueFrom"]["secretKeyRef"]
+                            ref["name"] = ref["name"].removesuffix(suffix)
+                for volume in pod.get("volumes", []):
+                    if "secret" in volume:
+                        secret = volume["secret"]
+                        secret["secretName"] = secret["secretName"].removesuffix(suffix)
+    plan["prepared"] = replace(plan["prepared"], files=files)
+    first = await registry.create(principal=alice, idempotency_key="historical", **plan)
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+        action="destroy_retained", expected_generation=1)
+    lease = await registry.claim(stopped.operation_id)
+    assert (await registry.frozen_plan(lease))["files"] == files
+    effect = await registry.prepare_effect(lease, "old-db", intent(plan, api_version="v1", kind="Secret",
+        name="loom-application-db", action="delete", uid="historical-uid", resource_version="4"))
+    assert effect.intent.name == "loom-application-db"
 
 
 async def test_concurrent_distinct_intents_cannot_both_prepare_before_reconciliation(applications):
