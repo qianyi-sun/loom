@@ -146,7 +146,7 @@ All declared and required artifact paths are frozen into the runtime plan with
 the lossless model-call trajectory, attributed usage and structured verifier
 output. Multiple artifacts are supported within those path constraints.
 
-The compiler rejects GPU, multi-step, custom identity, sidecar, skill, MCP,
+The compiler rejects GPU, multi-step, undeclared identity extensions, ordinary sidecars, skill, MCP,
 extra environment-variable, custom DNS/host/tmpfs, health-check, capability,
 multi-model and other extended-runtime shapes. A mutable image is not accepted
 as an execution image. Supporting another harness or task shape requires a
@@ -729,16 +729,42 @@ Declared sidecars render as ordered Kubernetes native sidecar init containers
 startup/readiness probes, dropped capabilities, and no service-account token.
 Unsupported compositions fail closed.
 
+Automatic Terminus compilation also supports one explicitly isolated service
+fixture (`environment.sidecars[].fixture = true`). Its primary and fixture images
+must be built from dedicated, disjoint bundle directories. The fixture declares
+bounded command argv, one DNS hostname, TCP ports, healthcheck timing and explicit
+CPU/memory/storage limits. Both build results must belong to the exact frozen
+Trial materialization grant. Prebuilt fixture references, dependencies, environment
+overrides, multiple fixtures, shared or root build contexts remain unsupported.
+The deployment must have `service_lifecycle_ready` enabled.
+
+The fixture has a reserved `fixture-<name>` native init role and starts before both
+private sandboxes. It runs as UID/GID 65532 with a read-only root filesystem,
+without capabilities, volume mounts or identity tokens. Startup grace and
+healthcheck argv, intervals, timeout and retries are preserved. Its requests
+count in Pod peak resources and capacity admission; it shares the attempt's
+Pod lifetime, deadline, cancellation and cleanup. A fixture exit or restart before
+the controller finishes enters the existing native-process-loss failure path;
+the first loss and OOM evidence remain attributed to that fixture. Replacement
+processes cannot silently resume the same attempt. Normal teardown after the
+controller finishes is not a failure. Fixture source directories
+and Dockerfiles are excluded from agent input as well as the main image build
+context. Services needing writable storage, root, their own network identity or
+cross-trial sharing require a different execution class.
+
 For private task and verifier sandboxes, the materializer also initializes
 independent copies of `/etc/hosts` and `/etc/resolv.conf` in each sandbox's
 existing socket volume. The renderer mounts those exact files through `subPath`;
 the controller retains its original Pod-generated files. Container-local root
 can change its own name resolution without changing the controller or another
-sandbox. Initialization rejects pre-existing directories or linked destinations.
+sandbox. A prepared fixture's hostname maps to `127.0.0.1` only in these private
+hosts copies; it never creates Pod-wide `hostAliases` or modifies controller DNS.
+Existing hostname conflicts, reserved names, duplicate aliases and injection are
+rejected. Initialization rejects pre-existing directories or linked destinations.
 The materializer, renderer and constrained-root admission policy must be deployed
 or rolled back together through the idle rollout guard.
 
-Task identity, web egress, mutable paths and retained-service declarations require
+Task identity, web egress, mutable paths, isolated fixtures and retained-service declarations require
 automatic native execution. A task-supplied `service_execution.runtime_template`
 cannot enable these extensions or bypass deployment readiness; intake rejects
 such combinations before submission or scheduling.
@@ -960,10 +986,10 @@ with a suspended Job and makes no Nebius call.
 Each attempt owns one task-scoped Kubernetes object bearing the Loom trial ID,
 attempt generation, lease generation, requirements digest, and image digest.
 The primary task runs in one Pod/Job. Declared sidecars are containers in that
-Pod when they share the workspace and lifecycle. A dependency requiring a
-separate network identity becomes a separately owned Pod and ClusterIP Service
-with explicit readiness, resource, network, and image contracts. Undeclared
-service discovery and cross-trial sharing are forbidden.
+Pod under their declared lifecycle. Trusted platform sidecars may share the
+workspace; prepared untrusted fixtures have no volume mounts. Dependencies needing
+a separate network identity are not admitted by the bounded fixture compiler.
+Undeclared service discovery and cross-trial sharing are forbidden.
 
 An in-attempt verifier runs after the agent inside the same sandbox and
 workspace. A verifier requiring stronger separation runs as a second,

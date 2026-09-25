@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func materialize(arguments []string) error {
@@ -98,6 +99,16 @@ func materialize(arguments []string) error {
 // containers. Copy them into each sandbox's own emptyDir before starting any
 // untrusted process; the renderer binds only that role's files into /etc.
 func materializeNetworkFiles(sidecars []sidecar, sandboxRoot, sourceRoot string) error {
+	aliases := []string{}
+	for _, item := range sidecars {
+		if !item.TaskFixture {
+			continue
+		}
+		if item.Hostname == nil || !validFixtureHostname(*item.Hostname) || len(aliases) != 0 {
+			return fmt.Errorf("only one valid fixture hostname is supported")
+		}
+		aliases = append(aliases, *item.Hostname)
+	}
 	for _, sidecar := range sidecars {
 		if !sidecar.PrivateSandbox {
 			continue
@@ -122,6 +133,20 @@ func materializeNetworkFiles(sidecars []sidecar, sandboxRoot, sourceRoot string)
 			body, err := os.ReadFile(filepath.Join(sourceRoot, name))
 			if err != nil {
 				return err
+			}
+			if name == "hosts" && len(aliases) != 0 {
+				for _, line := range strings.Split(string(body), "\n") {
+					fields := strings.Fields(strings.SplitN(line, "#", 2)[0])
+					for index, field := range fields {
+						if index > 0 && strings.EqualFold(field, aliases[0]) {
+							return fmt.Errorf("fixture hostname conflicts with existing hosts entry")
+						}
+					}
+				}
+				if len(body) > 0 && body[len(body)-1] != '\n' {
+					body = append(body, '\n')
+				}
+				body = append(body, []byte("127.0.0.1 "+aliases[0]+"\n")...)
 			}
 			if err := writeExclusive(filepath.Join(network, name), body, 0o644); err != nil {
 				return err

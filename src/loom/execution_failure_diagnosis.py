@@ -22,6 +22,7 @@ def execution_failure_diagnosis(
     """
     if not job_uid or not pod_uid:
         return None
+    fixture_roles = {sidecar.role_name for sidecar in plan.sidecars if sidecar.task_fixture}
     observations = [event for event in sorted(events, key=lambda e: e["ordinal"])
                     if event["payload"].get("job_uid") == job_uid
                     and event["payload"].get("pod_uid") == pod_uid]
@@ -32,7 +33,7 @@ def execution_failure_diagnosis(
             continue
         for container in payload.get("container_diagnostics", []):
             name = container.get("name")
-            if name not in {"execution", "task-sandbox", "verifier-sandbox"}:
+            if name not in {"execution", "task-sandbox", "verifier-sandbox", *fixture_roles}:
                 continue
             restarts = container.get("restart_count", 0)
             previous = container.get("previous_termination")
@@ -69,8 +70,8 @@ def execution_failure_diagnosis(
                 )
                 return {
                     "reason": "oom_killed", "container_role": name,
-                    "stage": {"execution": "controller" if plan.controller_resources else "execution", "task-sandbox": "agent",
-                              "verifier-sandbox": "verifier"}[name],
+                    "stage": ({"execution": "controller" if plan.controller_resources else "execution", "task-sandbox": "agent",
+                               "verifier-sandbox": "verifier"}.get(name, "fixture")),
                     "container_incarnation": incarnation, "started_at": started,
                     "terminated_at": termination.get("finished_at"),
                     "exit_code": termination.get("exit_code"), "signal": termination.get("signal"),

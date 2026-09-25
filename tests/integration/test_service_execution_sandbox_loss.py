@@ -6,7 +6,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from loom.db.schema import ServiceExecutionEvent, ServiceExecutionLease, Trial
+from loom.db.schema import (
+    ServiceExecutionEvent,
+    ServiceExecutionLease,
+    TaskImageMaterialization,
+    Trial,
+)
 from loom_execution_actuator.contracts import (
     ContainerDiagnostic,
     ContainerTerminationDiagnostic,
@@ -23,29 +28,52 @@ from tests.integration.test_service_execution_leases import (
 
 
 @pytest.mark.parametrize("initial_oom", [True, False])
+@pytest.mark.parametrize("role", ["task-sandbox", "fixture-server"])
 async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
-    postgres_url, initial_oom
+    postgres_url, initial_oom, role
 ):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     kubernetes = _FakeKubernetesJobApi()
+    fixture_trial_id = None
     try:
-        async with sessions() as session, session.begin():
-            trial_id, target = await _seed_ready_trial(session, now=now)
-            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+        async with sessions() as session:
+            if role == "fixture-server":
+                from loom_control_plane.service_execution_scheduler import (
+                    reserve_next_service_execution,
+                )
+                from tests.integration.test_service_execution_image_readiness import (
+                    TASK_IMAGE,
+                    _seed_preparing_trial,
+                )
+                from tests.integration.test_service_execution_leases import IMAGE_ADMISSION_KEYRING
+
+                trial_id, ids = await _seed_preparing_trial(session, now=now, state="queued", fixture=True)
+                fixture_trial_id = trial_id
+                image = await session.get(TaskImageMaterialization, ids["x86_64"])
+                image.state = "ready"
+                image.registry_images = {"task": TASK_IMAGE, "sidecar:server": "registry.example/fixture@sha256:" + "a" * 64}
+                await session.commit()
+                lease = await reserve_next_service_execution(session, environment="staging", pool_id="nebius-cpu",
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now)
+                assert lease is not None
+            else:
+                trial_id, target = await _seed_ready_trial(session, now=now)
+                lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
         actuator = ExecutionActuator(
             sessions=sessions,
             kubernetes=kubernetes,
             target=ExecutionTargetRuntime(
-                target_id=target.target_id, namespace=target.namespace_name
+                target_id=lease.target_id, namespace=lease.namespace_name
             ),
             controller_id="sandbox-loss-test",
             command_lease_seconds=5,
         )
         assert await actuator.run_commands_once(now=now) == 1
         diagnostic = ContainerDiagnostic(
-            name="task-sandbox",
+            name=role,
             restart_count=1,
             previous_termination=ContainerTerminationDiagnostic(
                 reason="OOMKilled" if initial_oom else "Error",
@@ -60,7 +88,7 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
                 if initial_oom
                 else NormalizedJobState.FAILED,
                 "reason": "SandboxRestarted",
-                "message": "task-sandbox lost its attempt process state",
+                "message": f"{role} lost its attempt process state",
                 "resource_version": "same-job-version",
                 "pod_uid": "sandbox-loss-pod",
                 "pod_resource_version": "pod-1",
@@ -114,7 +142,7 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
             if initial_oom:
                 assert "OOMKilled" in current.error_message
             else:
-                assert current.error_message == "task-sandbox lost its attempt process state"
+                assert current.error_message == f"{role} lost its attempt process state"
             assert current.revoked_at is None
             assert current.output_commit_state == "not_started"
             assert kubernetes.delete_count == 0
@@ -192,4 +220,8 @@ async def test_sandbox_restart_diagnostics_persist_before_bounded_cleanup(
                 if event.payload_json.get("container_diagnostics")
             )
     finally:
+        if fixture_trial_id is not None:
+            from tests.integration.test_service_execution_image_readiness import _clean_image_links
+            async with sessions() as session:
+                await _clean_image_links(session, fixture_trial_id)
         await engine.dispose()

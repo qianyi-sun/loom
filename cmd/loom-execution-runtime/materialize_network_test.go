@@ -80,3 +80,79 @@ func TestNetworkFileInitializationRejectsPreexistingOrLinkedDestinations(t *test
 		t.Fatalf("ordinary sidecar unexpectedly requires private network files: %v", err)
 	}
 }
+
+func TestFixtureAliasesOnlyEnterPrivateHostsCopies(t *testing.T) {
+	source, root := t.TempDir(), t.TempDir()
+	hostname := "fixture.example"
+	roles := []sidecar{{RoleName: "fixture-server", TaskFixture: true, Hostname: &hostname},
+		{RoleName: "task-sandbox", PrivateSandbox: true}, {RoleName: "verifier-sandbox", PrivateSandbox: true}}
+	original := "127.0.0.1 localhost\n10.0.0.1 controller" // No final newline.
+	for name, body := range map[string]string{"hosts": original, "resolv.conf": "nameserver 10.0.0.10\n"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, role := range roles[1:] {
+		if err := os.Mkdir(filepath.Join(root, role.RoleName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := materializeNetworkFiles(roles, root, source); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range roles[1:] {
+		body, err := os.ReadFile(filepath.Join(root, role.RoleName, "network", "hosts"))
+		if err != nil || string(body) != original+"\n127.0.0.1 fixture.example\n" {
+			t.Fatalf("private alias missing or changed source lines: %q %v", body, err)
+		}
+		body, err = os.ReadFile(filepath.Join(root, role.RoleName, "network", "resolv.conf"))
+		if err != nil || string(body) != "nameserver 10.0.0.10\n" {
+			t.Fatalf("resolver changed: %q %v", body, err)
+		}
+	}
+	body, err := os.ReadFile(filepath.Join(source, "hosts"))
+	if err != nil || string(body) != original {
+		t.Fatalf("controller hosts changed: %q %v", body, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "fixture-server")); !os.IsNotExist(err) {
+		t.Fatal("fixture gained private mounts")
+	}
+}
+
+func TestFixtureAliasesRejectConflictsDuplicatesAndInjection(t *testing.T) {
+	for _, test := range []struct {
+		name, hostname, hosts string
+		duplicate             bool
+	}{
+		{"existing", "fixture.example", "10.0.0.1 existing fixture.example\n", false},
+		{"same address", "fixture.example", "127.0.0.1 fixture.example\n", false},
+		{"case conflict", "fixture.example", "10.0.0.1 FIXTURE.EXAMPLE\n", false},
+		{"injection", "fixture\n127.0.0.1 controller", "127.0.0.1 localhost\n", false},
+		{"reserved", "localhost", "127.0.0.1 localhost\n", false},
+		{"duplicate", "fixture.example", "127.0.0.1 localhost\n", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source, root := t.TempDir(), t.TempDir()
+			for name, body := range map[string]string{"hosts": test.hosts, "resolv.conf": "nameserver 10.0.0.10\n"} {
+				if err := os.WriteFile(filepath.Join(source, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Mkdir(filepath.Join(root, "task-sandbox"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			roles := []sidecar{{RoleName: "fixture-server", TaskFixture: true, Hostname: &test.hostname},
+				{RoleName: "task-sandbox", PrivateSandbox: true}}
+			if test.duplicate {
+				roles = append(roles, roles[0])
+			}
+			if err := materializeNetworkFiles(roles, root, source); err == nil {
+				t.Fatal("unsafe fixture alias accepted")
+			}
+			body, err := os.ReadFile(filepath.Join(source, "hosts"))
+			if err != nil || string(body) != test.hosts {
+				t.Fatal("controller hosts changed on failure")
+			}
+		})
+	}
+}

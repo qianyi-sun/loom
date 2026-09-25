@@ -127,7 +127,10 @@ func main() {
 			return
 		}
 		fmt.Println("exit:0")
-	case "sidecar":
+	case "sidecar", "crashing-sidecar":
+		if os.Args[1] == "crashing-sidecar" {
+			time.AfterFunc(12*time.Second, func() { os.Exit(73) })
+		}
 		http.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 			response.WriteHeader(http.StatusNoContent)
 		})

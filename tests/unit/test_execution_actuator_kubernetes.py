@@ -176,13 +176,14 @@ def test_kubernetes_status_normalization_is_exhaustive(
     "reason,expected",
     [("OOMKilled", NormalizedJobState.OOM_KILLED), ("Error", NormalizedJobState.FAILED)],
 )
-def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, expected) -> None:
+@pytest.mark.parametrize("role", ["task-sandbox", "fixture-server"])
+def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, expected, role) -> None:
     pod = _pod(phase="Running")
     finished = datetime.now(UTC)
     pod.metadata.resource_version = "44"
     pod.status.init_container_statuses = [
         _ns(
-            name="task-sandbox",
+            name=role,
             restart_count=1,
             state=_ns(running=_ns(started_at=finished), terminated=None),
             last_state=_ns(
@@ -203,7 +204,7 @@ def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, e
     assert observed.pod_resource_version == "44"
     payload = observed.event_payload()
     diagnostic = payload["container_diagnostics"][0]
-    assert diagnostic["name"] == "task-sandbox"
+    assert diagnostic["name"] == role
     assert diagnostic["restart_count"] == 1
     assert diagnostic["previous_termination"]["reason"] == reason
     assert diagnostic["previous_termination"]["exit_code"] == 137
@@ -211,11 +212,12 @@ def test_restarted_native_sandbox_is_terminal_even_when_pod_is_running(reason, e
     assert "must-not-be-persisted" not in json.dumps(payload)
 
 
-def test_normal_sidecar_shutdown_after_execution_is_not_sandbox_failure() -> None:
+@pytest.mark.parametrize("role", ["task-sandbox", "fixture-server"])
+def test_normal_sidecar_shutdown_after_execution_is_not_sandbox_failure(role) -> None:
     pod = _pod(phase="Succeeded")
     pod.status.init_container_statuses = [
         _ns(
-            name="task-sandbox",
+            name=role,
             restart_count=0,
             state=_ns(terminated=_ns(reason="Error", exit_code=137, signal=9)),
             last_state=_ns(terminated=None),

@@ -146,6 +146,38 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
                 failures.append(result.output.decode())
         assert not failures, "\n".join(failures)
 
+        from tests.unit.test_task_fixtures import _plan as fixture_plan
+
+        fixture_pod = deepcopy(pod)
+        fixture_pod["spec"]["initContainers"].insert(1, _sidecar(fixture_plan().sidecars[0]))
+        result = apply([fixture_pod], dry_run=True)
+        assert result.exit_code == 0, result.output.decode()
+        fixture_mutations = [
+            lambda p, c: c.update(volumeMounts=[{"name": "workspace", "mountPath": "/workspace"}]),
+            lambda p, c: c["securityContext"].update(runAsUser=1000),
+            lambda p, c: c["securityContext"].update(runAsGroup=0),
+            lambda p, c: c["securityContext"].update(readOnlyRootFilesystem=False),
+            lambda p, c: c["securityContext"]["capabilities"].update(add=["NET_BIND_SERVICE"]),
+            lambda p, c: c.update(envFrom=[{"secretRef": {"name": "controller-token"}}]),
+            lambda p, c: c.update(env=[{"name": "HOST", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}]),
+            lambda p, c: c.update(lifecycle={"postStart": {"exec": {"command": ["true"]}}}),
+            lambda p, c: [c.pop(key) for key in ("restartPolicy", "startupProbe", "readinessProbe")],
+            lambda p, c: p["spec"].update(hostAliases=[{"ip": "127.0.0.1", "hostnames": ["fixture.example"]}]),
+        ]
+        for mutate in fixture_mutations:
+            bad = deepcopy(fixture_pod)
+            mutate(bad, bad["spec"]["initContainers"][1])
+            result = apply([bad], dry_run=True)
+            assert result.exit_code != 0, "unsafe fixture variation was admitted"
+            assert "private-root-v1" in result.output.decode()
+        regular_fixture = deepcopy(fixture_pod)
+        fixture_container = regular_fixture["spec"]["initContainers"].pop(1)
+        fixture_container.pop("restartPolicy")
+        regular_fixture["spec"]["containers"].append(fixture_container)
+        result = apply([regular_fixture], dry_run=True)
+        assert result.exit_code != 0, "regular-container fixture was admitted"
+        assert "private-root-v1" in result.output.decode()
+
         for platform_pod in platform_pods:
             for section in ("containers", "initContainers"):
                 for index in range(len(platform_pod["spec"].get(section, []))):

@@ -7,6 +7,7 @@ from loom.task_image_materialization import (
     TaskImageExecutionGrantV1,
     canonical_task_checksum,
     required_task_image_architectures,
+    resolve_prepared_task,
     task_image_materialization_key,
 )
 
@@ -264,3 +265,58 @@ def test_historical_arm_execution_grant_remains_readable(declared_arch: str) -> 
         "registry_images": {"task": "registry.example/loom-task@sha256:" + "3" * 64},
     })
     assert TaskImageExecutionGrantV1.model_validate_json(grant.model_dump_json()).cpu_arch == "arm64"
+
+
+@pytest.mark.parametrize("primary_built", [True, False])
+def test_resolves_built_sidecars_by_component_without_mutating_source(primary_built: bool) -> None:
+    from pathlib import PurePosixPath
+    from uuid import uuid4
+
+    primary = "registry.example/prebuilt@sha256:" + "a" * 64
+    prebuilt = "registry.example/cache@sha256:" + "b" * 64
+    fixture = "registry.example/fixture@sha256:" + "c" * 64
+    task = _task_config(
+        docker_image=None if primary_built else primary,
+        dockerfile="environment/Dockerfile" if primary_built else None,
+        sidecars=[
+            {"name": "cache", "docker_image": prebuilt},
+            {"name": "fixture", "dockerfile": "fixtures/server/Dockerfile",
+             "docker_build_context": "fixtures/server", "command": ["python3", "/server.py"]},
+        ],
+    )
+    frozen = task.model_dump(mode="json")
+    images = {"sidecar:fixture": fixture}
+    if primary_built:
+        images["task"] = primary
+    grant = TaskImageExecutionGrantV1(
+        schema_version="loom.task-image-execution-grant.v1", materialization_id=uuid4(),
+        materialization_key="1" * 64, cpu_arch="x86_64", task_checksum="2" * 64,
+        task_config=frozen, task_source=None, task_source_provenance={}, registry_images=images,
+    )
+
+    resolved = resolve_prepared_task(task, grant)
+
+    assert resolved.environment.docker_image == primary
+    assert resolved.environment.dockerfile is None
+    cache, server = resolved.environment.sidecars
+    assert cache.docker_image == prebuilt
+    assert server.docker_image == fixture
+    assert server.dockerfile is None and server.docker_build_context is None
+    assert server.command == ["python3", "/server.py"]
+    assert task.model_dump(mode="json") == frozen
+    assert task.environment.sidecars[1].dockerfile == PurePosixPath("fixtures/server/Dockerfile")
+
+
+def test_prepared_resolution_rejects_another_frozen_task() -> None:
+    from uuid import uuid4
+
+    task = _task_config(dockerfile="environment/Dockerfile")
+    grant = TaskImageExecutionGrantV1(
+        schema_version="loom.task-image-execution-grant.v1", materialization_id=uuid4(),
+        materialization_key="1" * 64, cpu_arch="x86_64", task_checksum="2" * 64,
+        task_config=task.model_dump(mode="json"), task_source=None, task_source_provenance={},
+        registry_images={"task": "registry.example/task@sha256:" + "a" * 64},
+    )
+    other = task.model_copy(update={"task": task.task.model_copy(update={"id": "another/task"})})
+    with pytest.raises(ValueError, match="frozen task"):
+        resolve_prepared_task(other, grant)

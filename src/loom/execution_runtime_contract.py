@@ -158,6 +158,7 @@ class ProcessPhaseV1(_Strict):
 
 class ProbeV1(_Strict):
     kind: Literal["http", "tcp", "exec"]
+    initial_delay_seconds: int = Field(default=0, ge=0, le=300, exclude_if=lambda value: value == 0)
     timeout_seconds: int = Field(default=2, gt=0, le=30)
     period_seconds: int = Field(default=2, gt=0, le=60)
     failure_threshold: int = Field(default=30, gt=0, le=300)
@@ -194,9 +195,21 @@ class SidecarContainerV1(_Strict):
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
     identity: SandboxIdentityV1 | None = None
+    task_fixture: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    task_image_component: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    hostname: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _identity_is_private(self) -> SidecarContainerV1:
+        if self.task_fixture:
+            from loom.task_fixtures import validate_fixture_component, validate_fixture_hostname
+
+            validate_fixture_component(self.role_name, self.task_image_component)
+            validate_fixture_hostname(self.hostname)
+            if self.private_sandbox or self.identity is not None or self.depends_on or self.environment:
+                raise ValueError("fixture cannot share a sandbox identity or trusted sidecar contract")
+        elif self.task_image_component is not None or self.hostname is not None or self.role_name.startswith("fixture-"):
+            raise ValueError("fixture metadata and roles require explicit fixture isolation")
         if self.identity is not None and not self.private_sandbox:
             raise ValueError("task identity requires a private sandbox")
         if self.identity is not None and "HOME" in self.environment:
@@ -340,6 +353,16 @@ class ExecutionRuntimePlanV1(_Strict):
 
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
+        fixtures = [sidecar for sidecar in self.sidecars if sidecar.task_fixture]
+        if fixtures and (
+            len(fixtures) != 1 or self.task_image_materialization_id is None
+            or self.agent_image_ref is None or self.execution_role != "attempt"
+            or self.composition != RuntimeComposition.INIT_PAYLOAD
+            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+            != {"task-sandbox", "verifier-sandbox"}
+            or len(self.sidecars) != 3 or not self.sidecars[0].task_fixture
+        ):
+            raise ValueError("one prepared fixture requires an isolated attempt controller and both sandboxes")
         if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
             raise ValueError("task egress requires its immutable diagnostic output declaration")
         if self.task_image_materialization_id is not None and (
@@ -501,8 +524,9 @@ class ExecutionRuntimePlanV1(_Strict):
             sidecar.image_ref for sidecar in self.sidecars
             if not (
                 self.task_image_materialization_id is not None
-                and sidecar.private_sandbox
-                and sidecar.image_ref == self.task_image_ref
+                and (sidecar.task_fixture or (
+                    sidecar.private_sandbox and sidecar.image_ref == self.task_image_ref
+                ))
             )
         )
         return tuple(sorted(refs))

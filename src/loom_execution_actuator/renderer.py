@@ -93,6 +93,8 @@ def _probe(value: ProbeV1) -> dict[str, Any]:
         "periodSeconds": value.period_seconds,
         "failureThreshold": value.failure_threshold,
     }
+    if value.initial_delay_seconds:
+        result["initialDelaySeconds"] = value.initial_delay_seconds
     if value.kind == "http":
         result["httpGet"] = {"port": value.port, "path": value.path}
     elif value.kind == "tcp":
@@ -123,7 +125,10 @@ def _sidecar(
         "securityContext": _security_context(),
         "volumeMounts": [{"name": "workspace", "mountPath": "/workspace"}],
     }
-    if value.private_sandbox:
+    if value.task_fixture:
+        result["volumeMounts"] = []
+        result["securityContext"].update(runAsUser=65532, runAsGroup=65532)
+    elif value.private_sandbox:
         result["securityContext"] = _security_context(read_only_root=False)
         if value.identity is not None:
             identity = value.identity

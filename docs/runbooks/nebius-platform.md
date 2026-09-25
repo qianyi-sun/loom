@@ -376,8 +376,8 @@ canonical publication and retention rules apply; no model retry or new execution
 is created. A still-present execution or a superseded attempt cannot use this
 recovery path. Rollout guards remain in force until archival actually converges.
 
-Native task/verifier sidecar restarts invalidate the attempt even while the Pod
-still reports Running. The actuator records current and previous termination
+Native task/verifier sandbox and prepared fixture sidecar restarts invalidate the
+attempt even while the Pod still reports Running. The actuator records current and previous termination
 reason, exit code, signal, timestamps and restart count in the existing
 UID-bound Kubernetes observation before cleanup. Pod resource versions retain
 distinct sidecar updates under an unchanged Job. Arbitrary termination messages

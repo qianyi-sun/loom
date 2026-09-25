@@ -39,6 +39,15 @@ root private containers add `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID
 and `KILL` after dropping all capabilities; they retain no-new-privileges and
 private PID namespaces. This supports package installation and cleanup of
 task descendants that drop UID, without host/device/kernel privileges.
+A prepared service fixture is a separate untrusted native sidecar with no volume
+mounts. Its reserved `fixture-` role runs as UID/GID 65532, drops all capabilities,
+has a read-only root filesystem and receives no environment-based identity or
+service-account token. Namespace admission rejects alternate identities, mounts,
+capabilities, lifecycle hooks and ordinary-container substitution. It requires
+both private sandboxes and forbids Pod-wide host aliases. The exact image and
+runtime declaration are bound to the Trial's frozen build grant before admission;
+a fixture cannot acquire a trusted platform sidecar role by supplying a digest.
+
 Each private sandbox receives its own writable `/etc/hosts` and
 `/etc/resolv.conf` files. The trusted materializer copies the Pod's initial files
 into that sandbox's socket `emptyDir` before task processes start; exact file

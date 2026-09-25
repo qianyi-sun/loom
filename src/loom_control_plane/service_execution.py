@@ -670,7 +670,7 @@ async def reserve_trial_execution(
         grant = await get_trial_task_image_execution_grant(
             session, trial_id=trial_id, cpu_arches=[class_contract.cpu_architecture],
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise ServiceExecutionConflict("task image is not ready for this trial") from exc
     if grant is not None:
         if (
@@ -679,7 +679,16 @@ async def reserve_trial_execution(
             or runtime_contract.task_revision_sha256 != "sha256:" + grant.task_checksum
         ):
             raise ServiceExecutionConflict("runtime plan does not match the trial's prepared image")
-        prepared_task = resolve_prepared_task(TaskConfig.model_validate(grant.task_config), grant)
+        from loom.task_fixtures import validate_prepared_fixtures
+
+        frozen_task = TaskConfig.model_validate(grant.task_config)
+        prepared_task = resolve_prepared_task(frozen_task, grant)
+        try:
+            validate_prepared_fixtures(
+                runtime_contract, frozen_task=frozen_task, prepared_task=prepared_task,
+            )
+        except ValueError as exc:
+            raise ServiceExecutionConflict(str(exc)) from exc
         if requirements != workload_requirements_from_task(prepared_task):
             raise ServiceExecutionConflict("requirements do not match the prepared task")
     elif runtime_contract.task_image_materialization_id is not None:

@@ -142,6 +142,7 @@ def _executable_lease(
     task_image_ref: str,
     runtime_image_ref: str,
     runtime_binary_sha256: str,
+    prepared_fixture: bool = False,
 ) -> ServiceExecutionLease:
     now = datetime.now(UTC)
     requirements = WorkloadRequirementsV1(
@@ -211,7 +212,7 @@ def _executable_lease(
         ),
         sidecars=(
             SidecarContainerV1(
-                role_name="fixture-sidecar",
+                role_name="service-sidecar",
                 image_ref=task_image_ref,
                 argv=("/fixture", "sidecar"),
                 resources=ContainerResourcesV1(
@@ -226,6 +227,25 @@ def _executable_lease(
         max_log_bytes_per_stream=1024 * 1024,
         max_artifact_bytes=16 * 1024 * 1024,
     )
+    if prepared_fixture:
+        fixture = runtime.sidecars[0].model_copy(update={
+            "role_name": "fixture-server", "task_fixture": True,
+            "task_image_component": "sidecar:server", "hostname": "fixture.example",
+        })
+        private = []
+        for role in ("task-sandbox", "verifier-sandbox"):
+            socket = f"/loom/sandboxes/{role}/sandbox.sock"
+            probe = ProbeV1(kind="exec", argv=("/loom/bin/loom-sandbox-runtime", "--check-socket", socket))
+            private.append(SidecarContainerV1(
+                role_name=role, image_ref=task_image_ref, private_sandbox=True,
+                argv=("/loom/bin/loom-sandbox-runtime", "--socket", socket, "--exec-timeout-seconds", "900"),
+                resources=resources, startup_probe=probe, readiness_probe=probe,
+            ))
+        runtime = ExecutionRuntimePlanV1.model_validate({
+            **runtime.canonical_payload(), "task_image_materialization_id": str(uuid4()),
+            "agent_image_ref": task_image_ref,
+            "sidecars": [item.model_dump(mode="json") for item in (fixture, *private)],
+        })
     requirements_json = requirements.model_dump(mode="json")
     runtime_json = runtime.canonical_payload()
     return ServiceExecutionLease(
@@ -958,8 +978,12 @@ async def test_attempt_network_policy_allows_only_dns_and_gateway() -> None:
         )
 
 
-@pytest.mark.timeout(300)
-async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_socket() -> None:
+@pytest.mark.timeout(360)
+@pytest.mark.parametrize("prepared_fixture,termination", [(False, None), (True, "deadline"), (True, "fixture_exit")],
+                         ids=["trusted-sidecar", "prepared-fixture-deadline", "prepared-fixture-exit"])
+async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_socket(
+    prepared_fixture: bool, termination: str | None,
+) -> None:
     from kubernetes import client
 
     suffix = uuid4().hex[:10]
@@ -1066,7 +1090,7 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                 namespace,
                 task_image_ref=task_image_ref,
                 runtime_image_ref=runtime_image_ref,
-                runtime_binary_sha256=runtime_binary_sha256,
+                runtime_binary_sha256=runtime_binary_sha256, prepared_fixture=prepared_fixture,
             )
             manifest = render_execution_job(
                 lease,
@@ -1112,7 +1136,7 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                         details = client.ApiClient().sanitize_for_serialization(failed_pod.status)
                         for container_name in (
                             "runtime-materializer",
-                            "fixture-sidecar",
+                            *(item.role_name for item in ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json).sidecars),
                             "execution",
                         ):
                             try:
@@ -1186,10 +1210,14 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
             pod_dict = client.ApiClient().sanitize_for_serialization(pod)
             assert "/var/run/docker.sock" not in str(pod_dict)
             assert "hostPath" not in str(pod_dict)
-            assert [item.name for item in pod.spec.init_containers] == [
-                "runtime-materializer",
-                "fixture-sidecar",
-            ]
+            expected_roles = (["fixture-server", "task-sandbox", "verifier-sandbox"]
+                              if prepared_fixture else ["service-sidecar"])
+            assert [item.name for item in pod.spec.init_containers] == ["runtime-materializer", *expected_roles]
+            assert all(item.state.terminated is not None for item in pod.status.init_container_statuses)
+            if prepared_fixture:
+                assert not pod.spec.init_containers[1].volume_mounts
+                assert pod.spec.init_containers[1].security_context.run_as_user == 65532
+                assert not pod.spec.host_aliases
             logs = await asyncio.to_thread(
                 core.read_namespaced_pod_log,
                 pod.metadata.name,
@@ -1199,6 +1227,72 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
             assert "fixture-phase=setup" in logs
             assert "fixture-phase=agent" in logs
             assert "fixture-phase=verifier" in logs
+            if prepared_fixture:
+                # A Job deadline must stop this native fixture together with
+                # both private sandboxes, even while the controller is idle.
+                expired = _executable_lease(namespace, task_image_ref=task_image_ref,
+                    runtime_image_ref=runtime_image_ref, runtime_binary_sha256=runtime_binary_sha256,
+                    prepared_fixture=True)
+                expired_plan = ExecutionRuntimePlanV1.model_validate(expired.runtime_contract_json)
+                expired_plan = expired_plan.model_copy(update={
+                    "setup": (), "termination_grace_seconds": 2,
+                    "main": expired_plan.main.model_copy(update={"argv": ("/fixture", "idle"), "timeout_seconds": 60}),
+                })
+                if termination == "fixture_exit":
+                    expired_plan = expired_plan.model_copy(update={"sidecars": (
+                        expired_plan.sidecars[0].model_copy(update={"argv": ("/fixture", "crashing-sidecar")}),
+                        *expired_plan.sidecars[1:],
+                    )})
+                expired.runtime_contract_json = expired_plan.canonical_payload()
+                expired.runtime_contract_sha256 = canonical_digest(expired.runtime_contract_json)
+                expired.deadline_at = datetime.now(UTC) + timedelta(seconds=25 if termination == "deadline" else 90)
+                expired_manifest = render_execution_job(expired, target=ExecutionTargetRuntime(
+                    target_id="disposable-k3s", namespace=namespace, runtime_class_name="loom-sandbox",
+                    credential_broker_url=f"http://execution-broker.{namespace}.svc.cluster.local:9100/internal/service-execution",
+                ))
+                await api.create_job(namespace=namespace, manifest=expired_manifest)
+                deadline = time.monotonic() + 90
+                fixture_started = False
+                while time.monotonic() < deadline:
+                    observation = await api.get_job(namespace=namespace, job_name=expired.job_name)
+                    current = await asyncio.to_thread(core.list_namespaced_pod, namespace,
+                        label_selector=f"loom.openai.com/lease-id={expired.id}")
+                    for item in current.items:
+                        fixture_started |= any(status.name == "fixture-server" and status.state.running is not None
+                                               for status in (item.status.init_container_statuses or []))
+                    expected_state = "deadline_exceeded" if termination == "deadline" else "failed"
+                    if observation is not None and observation.normalized_state == expected_state:
+                        break
+                    await asyncio.sleep(.5)
+                else:
+                    raise AssertionError(f"fixture Job did not report {termination}: {observation}")
+                expired_pods = await asyncio.to_thread(core.list_namespaced_pod, namespace,
+                    label_selector=f"loom.openai.com/lease-id={expired.id}")
+                assert fixture_started, "failure test never started its native fixture"
+                if termination == "fixture_exit":
+                    assert observation.reason in {"SandboxRestarted", "SandboxTerminated"}
+                    diagnostic = next(item for item in observation.container_diagnostics if item.name == "fixture-server")
+                    ending = diagnostic.previous_termination or diagnostic.current_termination
+                    assert ending is not None and ending.exit_code == 73
+                # Kubernetes may already have deleted the failed Pod. If it
+                # retains the terminal Pod, every native process must be stopped.
+                for item in expired_pods.items:
+                    statuses = item.status.init_container_statuses
+                    assert {status.name for status in statuses} == {"runtime-materializer", *expected_roles}
+                    if termination == "deadline":
+                        assert all(status.state.terminated is not None for status in statuses)
+                assert observation.job_uid is not None
+                await api.delete_job(namespace=namespace, job_name=expired.job_name,
+                    expected_uid=observation.job_uid, grace_period_seconds=2)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    remaining = await asyncio.to_thread(core.list_namespaced_pod, namespace,
+                        label_selector=f"loom.openai.com/lease-id={expired.id}")
+                    if not remaining.items and await api.get_job(namespace=namespace, job_name=expired.job_name) is None:
+                        break
+                    await asyncio.sleep(.5)
+                else:
+                    raise AssertionError("fixture Job resources survived UID-bound deletion")
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)

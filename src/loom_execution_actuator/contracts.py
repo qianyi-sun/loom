@@ -84,7 +84,7 @@ class ContainerTerminationDiagnostic(BaseModel):
 
 class ContainerDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    name: str = Field(pattern=r"^(execution|task-sandbox|verifier-sandbox)$")
+    name: str = Field(pattern=r"^(execution|task-sandbox|verifier-sandbox|fixture-[a-z][a-z0-9-]{0,54})$")
     restart_count: int = Field(ge=0)
     current_termination: ContainerTerminationDiagnostic | None = None
     previous_termination: ContainerTerminationDiagnostic | None = None
@@ -106,7 +106,7 @@ class KubernetesJobObservation(BaseModel):
     pod_ip: str | None = Field(default=None, min_length=3, max_length=45)
     resource_version: str | None = Field(default=None, min_length=1, max_length=128)
     pod_resource_version: str | None = Field(default=None, min_length=1, max_length=128)
-    container_diagnostics: tuple[ContainerDiagnostic, ...] = Field(default=(), max_length=3)
+    container_diagnostics: tuple[ContainerDiagnostic, ...] = Field(default=(), max_length=4)
     node_name: str | None = Field(default=None, min_length=1, max_length=253)
     scheduled_at: datetime | None = None
     started_at: datetime | None = None

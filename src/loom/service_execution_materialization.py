@@ -368,7 +368,7 @@ def automatic_service_execution_rejections(
         reasons.append("gateway_only_network_required")
     if (
         (set(env.environment) - ({"HOME"} if terminus else set()))
-        or env.sidecars
+        or (env.sidecars and (not terminus or not all(sidecar.fixture for sidecar in env.sidecars)))
         or env.extra_hosts
         or env.dns
         or env.tmpfs
@@ -377,6 +377,13 @@ def automatic_service_execution_rejections(
         or env.mcp_servers
     ):
         reasons.append("extended_environment_unsupported")
+    if any(sidecar.fixture for sidecar in env.sidecars):
+        if allow_task_image_preparation:
+            if env.dockerfile is None or any(sidecar.dockerfile is None for sidecar in env.sidecars):
+                reasons.append("fixture_build_inputs_required")
+        elif any(sidecar.docker_image is None or _DIGEST_REF.fullmatch(sidecar.docker_image) is None
+                 or sidecar.dockerfile is not None for sidecar in env.sidecars):
+            reasons.append("immutable_fixture_images_required")
     if task.required_agent_capabilities:
         reasons.append("agent_capabilities_unsupported")
     if task.agent.extra_mcp_servers or task.agent.skills or task.agent.user is not None:
@@ -458,6 +465,10 @@ def compile_service_execution_plan(
             task_revision_sha256=task_revision_sha256, override=override,
         ) if override is not None else None
     )
+    if any(sidecar.fixture for sidecar in task.environment.sidecars) and (
+        task_image_grant is None or any(sidecar.dockerfile is None for sidecar in task.environment.sidecars)
+    ):
+        raise ValueError("fixture execution requires the frozen task's prepared component grant")
     if task_image_grant is not None:
         if (trial.agent_name != "terminus-2"
             or task.environment.dockerfile is None
@@ -467,7 +478,7 @@ def compile_service_execution_plan(
             raise ValueError("prepared task image does not match the frozen task")
         task = resolve_prepared_task(task, task_image_grant)
     task = normalize_steps(task)
-    if task.environment.service_lifecycle is not None and not profile.service_lifecycle_ready:
+    if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
         raise ValueError("service_lifecycle runtime is not ready")
     reasons = automatic_service_execution_rejections(
         task,
@@ -709,7 +720,7 @@ def runtime_profile_rejections(
                 else ("task_image_not_in_runtime_profile",))
     if _requires_task_identity(task) and not profile.supports_task_identity:
         return ("task_identity_runtime_unavailable",)
-    if task.environment.service_lifecycle is not None and not profile.service_lifecycle_ready:
+    if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
         return ("service_lifecycle_runtime_unavailable",)
     agent_image = controller_image_for_trial(profile, trial)
     if agent_image is None:
@@ -751,7 +762,9 @@ def _compile_terminus_plan(
     verifier_timeout = ((trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
                         * trial.verifier_timeout_multiplier)
     exec_limit = str(math.ceil(max(900, agent_timeout, verifier_timeout)))
-    sidecars = []
+    from loom.task_fixtures import fixture_sidecars
+
+    sidecars = list(fixture_sidecars(task))
     for role in ("task-sandbox", "verifier-sandbox"):
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
