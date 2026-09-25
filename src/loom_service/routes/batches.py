@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
@@ -618,6 +618,18 @@ def _effective_provider_fields(
     )
 
 
+def _rerun_selection_error(selection: dict[str, Any]) -> str | None:
+    agent_name = selection.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name:
+        return None
+    model_raw = selection.get("agent_model")
+    try:
+        model = None if model_raw is None else ModelSpec.model_validate(model_raw)
+    except ValidationError as exc:
+        return f"agent_model failed to validate: {exc}"
+    return validate_agent_model_compat(agent_name, model)
+
+
 def _combination_context(index: int, combo: Combination) -> str:
     label = combo.label or _derive_combination_label(combo)
     return f"combinations[{index}] {label!r}"
@@ -983,6 +995,7 @@ async def _create_batch_record(
                 s,
                 conn_id,
                 team_id=submission_team_id,
+                agent_submission=True,
             )
         except HTTPException:
             SUBMISSION_REJECTS_TOTAL.labels(
@@ -2630,6 +2643,35 @@ async def rerun_failed_batch(
                 continue
             agent_name = raw_agent_name
         agent_task_pairs.append((task_id, agent_name))
+    # #2054: a rerun submits new trials, so it follows current submission
+    # policy. The parent batch and its accepted trials are left untouched.
+    rerun_combination_idxs = sorted({int(t["combination_idx"]) for t in targets})
+    for combination_idx in rerun_combination_idxs:
+        selection = combinations[combination_idx] if combinations else rerun_trial_config
+        err = _rerun_selection_error(selection)
+        if err is not None:
+            context = f"combinations[{combination_idx}]" if combinations else "trial_config"
+            reject_submission(
+                reason="invalid_input",
+                status_code=400,
+                detail=f"cannot rerun {context}: {err}",
+            )
+    rerun_connection_ids = {b.provider_connection_id} | {
+        UUID(str(combinations[idx]["provider_connection_id"]))
+        for idx in rerun_combination_idxs
+        if combinations and combinations[idx].get("provider_connection_id")
+    }
+    for conn_id in sorted((c for c in rerun_connection_ids if c is not None), key=str):
+        try:
+            await validate_provider_connection(
+                s,
+                conn_id,
+                team_id=b.team_id,
+                agent_submission=True,
+            )
+        except HTTPException:
+            SUBMISSION_REJECTS_TOTAL.labels(reason="provider_connection").inc()
+            raise
     await validate_submission_agent_task_pairs(
         s,
         team_id=b.team_id,
