@@ -177,7 +177,7 @@ async def test_hosted_cookie_cancellation_keeps_identity_across_internal_http(ca
 
 
 @pytest.mark.parametrize("resource", ["trials", "batches"])
-@pytest.mark.parametrize("denial", ["cross-team", "missing-csrf", "invalid-csrf"])
+@pytest.mark.parametrize("denial", ["cross-team", "missing-csrf", "invalid-csrf", "disabled-team"])
 async def test_service_rejects_cookie_cancellation_before_forward(
     cancel_stack: CancelStack, resource: str, denial: str,
 ) -> None:
@@ -186,7 +186,14 @@ async def test_service_rejects_cookie_cancellation_before_forward(
     headers = {"X-Test-CSRF": stack.csrf}
     if denial != "cross-team":
         identifier = stack.trial_id if resource == "trials" else stack.batch_id
-        headers = {} if denial == "missing-csrf" else {"X-Test-CSRF": "invalid"}
+        if denial == "disabled-team":
+            async with stack.sessions() as session:
+                await session.execute(update(Team).where(Team.id == stack.team_id).values(
+                    disabled_at=datetime.now(UTC),
+                ))
+                await session.commit()
+        else:
+            headers = {} if denial == "missing-csrf" else {"X-Test-CSRF": "invalid"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=stack.service), base_url="http://svc",
         cookies={"test_session": stack.session_cookie},

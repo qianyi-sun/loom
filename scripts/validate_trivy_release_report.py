@@ -55,7 +55,6 @@ _EMPTY_COMPONENTS = (
     "nebius-terminal-bench",
     "llm-gateway-sandbox",
     "service",
-    "staging-admin-browser-smoke",
     "web",
 )
 _PERL_BASE_FINDINGS = frozenset(

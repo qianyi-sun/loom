@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, delete, insert
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -359,6 +359,39 @@ async def test_team_switch_requires_csrf_and_membership(
             headers={"X-Loom-CSRF": csrf},
         )
         assert forbidden.status_code == 403
+        unchanged = await ac.get("/api/v1/auth/me")
+        assert unchanged.status_code == 200
+        assert unchanged.json()["current_team"]["id"] == str(team_b)
+
+
+async def test_admin_switch_without_membership_survives_readback(
+    auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],
+) -> None:
+    app, team_a, _team_b, _team_c, team_d = auth_setup
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://svc",
+    ) as ac:
+        body, _cookies = await _login(ac, "admin@example.com")
+        body = (await ac.get("/api/v1/auth/me")).json()
+        assert body["current_team"]["id"] == str(team_d)
+        switched = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(team_a)},
+            headers={"X-Loom-CSRF": str(body["csrf_token"])},
+        )
+        assert switched.status_code == 200, switched.text
+        assert switched.json()["current_team"]["id"] == str(team_a)
+        assert switched.json()["role"] == "platform_admin"
+        me = await ac.get("/api/v1/auth/me")
+        assert me.status_code == 200, me.text
+        assert me.json()["current_team"]["id"] == str(team_a)
+        back = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(team_d)},
+            headers={"X-Loom-CSRF": str(me.json()["csrf_token"])},
+        )
+        assert back.status_code == 200, back.text
 
 
 async def test_logout_revokes_session(
@@ -559,3 +592,100 @@ async def test_platform_admin_user_can_read_any_team(
         read_c = await ac.get(f"/api/v1/teams/{team_d}")
         assert read_a.status_code == 200, read_a.text
         assert read_c.status_code == 200, read_c.text
+
+
+@pytest.mark.parametrize("target_state", ["disabled", "missing"])
+async def test_admin_rejected_switch_preserves_original_session(auth_setup, target_state):
+    app, team_a, _team_b, _team_c, team_d = auth_setup
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc"
+    ) as ac:
+        await _login(ac, "admin@example.com")
+        if target_state == "disabled":
+            async with app.state.session_factory() as session:
+                await session.execute(
+                    update(Team).where(Team.id == team_a).values(disabled_at=datetime.now(UTC))
+                )
+                await session.commit()
+            target, expected = team_a, 403
+        else:
+            target, expected = uuid4(), 404
+        before = (await ac.get("/api/v1/auth/me")).json()
+        assert str(target) not in {team["id"] for team in before["teams"]}
+        rejected = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(target)},
+            headers={"X-Loom-CSRF": before["csrf_token"]},
+        )
+        assert rejected.status_code == expected, rejected.text
+        after = await ac.get("/api/v1/auth/me")
+        assert after.status_code == 200
+        assert after.json()["current_team"]["id"] == str(team_d)
+
+
+@pytest.mark.parametrize("change", ["demoted", "disabled", "expired", "revoked"])
+async def test_switched_admin_session_rechecks_authority(auth_setup, change):
+    from datetime import timedelta
+
+    app, team_a, *_ = auth_setup
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc"
+    ) as ac:
+        body, _ = await _login(ac, "admin@example.com")
+        switched = await ac.post(
+            "/api/v1/auth/team",
+            json={"team_id": str(team_a)},
+            headers={"X-Loom-CSRF": body["csrf_token"]},
+        )
+        assert switched.status_code == 200, switched.text
+        async with app.state.session_factory() as session:
+            admin_id = (
+                await session.execute(select(User.id).where(User.email == "admin@example.com"))
+            ).scalar_one()
+            if change in {"demoted", "disabled"}:
+                values = (
+                    {"is_platform_admin": False}
+                    if change == "demoted"
+                    else {"disabled_at": datetime.now(UTC)}
+                )
+                await session.execute(update(User).where(User.id == admin_id).values(**values))
+            else:
+                values = (
+                    {"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+                    if change == "expired"
+                    else {"revoked_at": datetime.now(UTC)}
+                )
+                await session.execute(
+                    update(UserSession).where(UserSession.user_id == admin_id).values(**values)
+                )
+            await session.commit()
+        assert (await ac.get("/api/v1/auth/me")).status_code == 401
+
+
+async def test_retired_staging_exchange_and_existing_cookie_are_rejected(auth_setup, monkeypatch):
+    app, *_ = auth_setup
+    monkeypatch.setenv("LOOM_ENV", "staging")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc"
+    ) as ac:
+        body, _ = await _login(ac, "admin@example.com")
+        removed = await ac.post(
+            "/api/v1/auth/staging-admin-browser-session",
+            json={"username": "admin"},
+            headers={"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"},
+        )
+        assert removed.status_code == 404
+        old_raw = "loom_session_staging_admin_" + "x" * 43
+        async with app.state.session_factory() as session:
+            await session.execute(
+                update(UserSession)
+                .where(UserSession.user_id == UUID(body["user"]["id"]))
+                .values(session_hash=hashlib.sha256(old_raw.encode()).digest())
+            )
+            await session.commit()
+        ac.cookies.clear()
+        ac.cookies.set("loom_session", old_raw)
+        assert (await ac.get("/api/v1/auth/me")).status_code == 401
+        assert (
+            await ac.post("/api/v1/auth/refresh", headers={"X-Loom-CSRF": body["csrf_token"]})
+        ).status_code == 401

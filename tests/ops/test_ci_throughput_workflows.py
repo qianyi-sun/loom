@@ -1505,68 +1505,6 @@ def test_web_nginx_has_same_raw_path_and_case_guard_as_controller() -> None:
     assert ("location ~* ^/(?:prod|dev|staging)(?:/|$) {\n        return 404;\n    }") in config
 
 
-def test_staging_admin_browser_smoke_is_bounded_and_secret_safe() -> None:
-    package = json.loads((REPO_ROOT / "web/package.json").read_text(encoding="utf-8"))
-    assert package["scripts"]["smoke:staging-admin"] == (
-        "node scripts/staging-admin-browser-smoke.mjs"
-    )
-    assert package["scripts"]["test:staging-admin-browser-unit"] == (
-        "vitest run scripts/staging-admin-browser-smoke.test.mjs"
-    )
-
-    smoke = (REPO_ROOT / "web/scripts/staging-admin-browser-smoke.mjs").read_text(
-        encoding="utf-8",
-    )
-    assert "`${options.route}/api/v1/auth/logout`" in smoke
-    assert "cleanup.auth_me_after_logout_status" in smoke
-    assert "recordVideo: undefined" in smoke
-    for api_path in (
-        "/api/v1/admin/registration-requests?status=pending",
-        "/api/v1/admin/team-registrations?status=pending",
-        "/api/v1/admin/password-reset-requests?status=pending",
-        "/api/v1/admin/teams",
-        "/api/v1/invites?status=pending",
-        "/api/v1/tokens",
-        "/api/v1/admin/audit-events?limit=50",
-        "/api/v1/rate-cards",
-    ):
-        assert api_path in smoke
-    for event in (
-        'page.on("console"',
-        'page.on("pageerror"',
-        'page.on("request"',
-        'page.on("requestfinished"',
-        'page.on("requestfailed"',
-    ):
-        assert event in smoke
-    for query_name in (
-        "registration-requests",
-        "team-registrations",
-        "password-reset-requests",
-        "admin-teams",
-        "invites",
-        "api-tokens",
-        "audit-events",
-        "rate-cards",
-    ):
-        assert f'"{query_name}"' in smoke
-    assert "await pageMonitor.waitForQuiet(options.timeoutMs)" in smoke
-    assert smoke.index("await pageMonitor.waitForQuiet") < smoke.index("await page.close()")
-    assert smoke.index("await page.close()") < smoke.index("pageMonitor.applyChecks(checks)")
-    assert "name: auditIdentity.requestId" in smoke
-    assert "name: `user:${auditIdentity.targetUserId}`" in smoke
-    assert smoke.count("exact: true") >= 6
-    assert "verifyAdminTabsAccessibility" in smoke
-    for keyboard_key in ("ArrowRight", "ArrowLeft", "Home", "End"):
-        assert f'"{keyboard_key}"' in smoke
-    assert 'getAttribute("aria-controls")' in smoke
-    assert 'getAttribute("role") === "tabpanel"' in smoke
-    assert 'getAttribute("aria-labelledby") === tab.id' in smoke
-    assert "checks.all_admin_tabs_operable =" in smoke
-    assert "screenshot(" not in smoke
-    assert "storageState" not in smoke
-
-
 def test_staging_browser_route_smoke_waits_for_explicit_settled_state() -> None:
     main = (REPO_ROOT / "web/src/main.tsx").read_text(encoding="utf-8")
     smoke = (REPO_ROOT / "web/scripts/frontend-route-browser-smoke.mjs").read_text(encoding="utf-8")

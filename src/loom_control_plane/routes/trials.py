@@ -47,7 +47,6 @@ from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_service.auth_guards import require_human_or_admin, require_scope
 from loom_service.session_auth import (
-    is_staging_admin_browser_session,
     verify_csrf,
     verify_session_cookie,
 )
@@ -615,8 +614,6 @@ async def cancel_trial(
         )
         if not authorization:
             cookie = request.cookies.get("loom_session")
-            if is_staging_admin_browser_session(cookie):
-                raise HTTPException(status_code=403, detail="validation-only browser session")
             ctx = require_human_or_admin(await verify_session_cookie(session, cookie))
             verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
             require_scope(ctx, "submit")

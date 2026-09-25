@@ -39,7 +39,6 @@ compatibility_test_paths = [
   "tests/loom_cli/test_staging_*.py",
   "tests/ops/test_staging_*.py",
   "tests/unit/test_staging_*.py",
-  "tests/integration/test_staging_admin_browser_session.py",
   "tests/**/test_*slurm*.py",
   # Old rollout database sealing/ownership handoff, not Nebius bootstrap.
   # Keep application_migration_authority, application_runtime_grants and
@@ -540,25 +539,6 @@ attestation_owner = "release-provenance"
 release_digest = "loom-web"
 runtime_policy = "start"
 rollout_role = "primary"
-
-[[components]]
-id = "staging-admin-browser-smoke"
-kind = "release-image"
-dockerfile = "deploy/Dockerfile.staging-admin-browser-smoke"
-build_context = "."
-source_paths = [
-  ".dockerignore",
-  "deploy/Dockerfile.staging-admin-browser-smoke",
-  "web/package.json",
-  "web/package-lock.json",
-  "web/scripts/staging-admin-browser-smoke.mjs",
-]
-smoke_owner = "frontend-smoke"
-scan_owner = "images"
-attestation_owner = "release-provenance"
-release_digest = "loom-staging-admin-browser-smoke"
-runtime_policy = "conformance"
-rollout_role = "auxiliary"
 
 [[components]]
 id = "rehearsal-postgres"

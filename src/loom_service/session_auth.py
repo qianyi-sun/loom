@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,12 +20,7 @@ from loom.db.schema import LoginChallenge, Team, TeamMembership, User, UserSessi
 from loom_service.config import LoomServiceSettings
 from loom_service.public_links import configured_public_base_url
 
-SessionSecretPrefix = Literal["loom_session", "loom_session_staging_admin"]
-
-_DEFAULT_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session"
-STAGING_ADMIN_SESSION_SECRET_PREFIX: SessionSecretPrefix = "loom_session_staging_admin"
-_STAGING_ADMIN_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_STAGING_ADMIN_LOGOUT_PATH = "/api/v1/auth/logout"
+_SAFE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass(frozen=True)
@@ -64,21 +58,14 @@ def _raw_secret(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
 
 
-def session_cookie_options(
-    settings: LoomServiceSettings,
-    *,
-    max_age: int | None = None,
-    force_secure: bool = False,
-) -> CookieOptions:
-    """Return browser cookie options without permitting a security downgrade."""
-    if max_age is not None and max_age <= 0:
-        raise ValueError("session cookie max_age must be positive")
+def session_cookie_options(settings: LoomServiceSettings) -> CookieOptions:
+    """Use the ordinary session lifetime and host-cookie security policy."""
     return {
         "key": settings.session_cookie_name,
         "httponly": True,
-        "secure": settings.hosted_session_cookie or force_secure,
+        "secure": settings.hosted_session_cookie,
         "samesite": "lax",
-        "max_age": settings.auth_session_ttl_sec if max_age is None else max_age,
+        "max_age": settings.auth_session_ttl_sec,
         "path": "/",
     }
 
@@ -90,7 +77,7 @@ def browser_origin_allowed(request: Request, settings: LoomServiceSettings) -> b
     headers as the public origin. Non-browser clients without Origin/Fetch
     Metadata still require the normal authentication and session CSRF token.
     """
-    if not settings.hosted_session_cookie or request.method.upper() in _STAGING_ADMIN_SAFE_METHODS:
+    if not settings.hosted_session_cookie or request.method.upper() in _SAFE_HTTP_METHODS:
         return True
     origin = request.headers.get("origin")
     if origin is None:
@@ -110,27 +97,6 @@ def browser_origin_allowed(request: Request, settings: LoomServiceSettings) -> b
         return identity(supplied) == identity(expected)
     except ValueError:
         return False
-
-
-def is_staging_admin_browser_session(raw_cookie: str | None) -> bool:
-    """Identify the short-lived staging-only admin browser credential."""
-    return bool(raw_cookie and raw_cookie.startswith(
-        f"{STAGING_ADMIN_SESSION_SECRET_PREFIX}_",
-    ))
-
-
-def staging_admin_browser_request_allowed(*, method: str, path: str) -> bool:
-    """Return whether a validation-only staging session may make a request.
-
-    The bootstrap bearer exchange is not authenticated by this session. Once
-    issued, its cookie is deliberately read-only across the entire ASGI app so
-    public mutation routes cannot be used to establish durable credentials.
-    The exact logout endpoint remains available so cleanup can revoke the row.
-    """
-    normalized_method = method.upper()
-    return normalized_method in _STAGING_ADMIN_SAFE_METHODS or (
-        normalized_method == "POST" and path == _STAGING_ADMIN_LOGOUT_PATH
-    )
 
 
 def verify_csrf(ctx: AuthContext, header_value: str | None) -> None:
@@ -300,8 +266,6 @@ async def create_session_for_user(
     user: User,
     session_ttl_seconds: int,
     current_team_id: UUID | None = None,
-    session_secret_prefix: SessionSecretPrefix = _DEFAULT_SESSION_SECRET_PREFIX,
-    update_last_login_at: bool = True,
 ) -> CreatedSession:
     """Create a browser session after a trusted onboarding action.
 
@@ -325,7 +289,7 @@ async def create_session_for_user(
     if role is None:
         role = membership.role
 
-    raw_session = _raw_secret(session_secret_prefix)
+    raw_session = _raw_secret("loom_session")
     raw_csrf = _raw_secret("loom_csrf")
     user_session = UserSession(
         session_hash=hash_secret(raw_session),
@@ -338,26 +302,52 @@ async def create_session_for_user(
         last_seen_at=now,
     )
     session.add(user_session)
-    if update_last_login_at:
-        await session.execute(
-            update(User).where(User.id == user.id).values(last_login_at=now),
-        )
+    await session.execute(
+        update(User).where(User.id == user.id).values(last_login_at=now),
+    )
     ctx = _ctx_from_session(
         user=user, user_session=user_session, role=role, team_id=team_id,
     )
     return CreatedSession(raw_session=raw_session, raw_csrf=raw_csrf, ctx=ctx)
 
 
+async def accessible_teams(
+    session: AsyncSession, user: User, *, team_id: UUID | None = None,
+    include_disabled: bool = False,
+) -> list[tuple[Team, str]]:
+    """Share membership/admin authority, optionally retaining a disabled context.
+
+    Existing sessions retain their identity so route authorization can return
+    the established disabled-team 403. New team selections must be enabled.
+    """
+    if user.disabled_at is not None or user.status != "active":
+        return []
+    if user.is_platform_admin:
+        stmt = select(Team)
+        if not include_disabled:
+            stmt = stmt.where(Team.disabled_at.is_(None))
+        if team_id is not None:
+            stmt = stmt.where(Team.id == team_id)
+        teams = (await session.execute(stmt.order_by(Team.name.asc(), Team.id.asc()))).scalars().all()
+        return [(team, "platform_admin") for team in teams]
+    membership_stmt = (
+        select(Team, TeamMembership.role)
+        .join(TeamMembership, TeamMembership.team_id == Team.id)
+        .where(TeamMembership.user_id == user.id)
+    )
+    if not include_disabled:
+        membership_stmt = membership_stmt.where(Team.disabled_at.is_(None))
+    if team_id is not None:
+        membership_stmt = membership_stmt.where(Team.id == team_id)
+    rows = (await session.execute(membership_stmt.order_by(Team.name.asc(), Team.id.asc()))).all()
+    return [(team, role) for team, role in rows]
+
+
 async def verify_session_cookie(
     session: AsyncSession, raw_cookie: str | None,
 ) -> AuthContext | None:
-    if not raw_cookie:
-        return None
-    staging_admin_session = is_staging_admin_browser_session(raw_cookie)
-    if (
-        staging_admin_session
-        and os.environ.get("LOOM_ENV", "").strip().lower() != "staging"
-    ):
+    # Retired credentials must never gain ordinary-session write authority.
+    if not raw_cookie or raw_cookie.startswith("loom_session_staging_admin_"):
         return None
     now = datetime.now(UTC)
     row = (await session.execute(
@@ -370,51 +360,26 @@ async def verify_session_cookie(
     user_session, user = row
     if user_session.revoked_at is not None or user_session.expires_at < now:
         return None
-    if staging_admin_session and (
-        user.disabled_at is not None
-        or user.status not in {"active", "pending_setup"}
-        or not user.is_platform_admin
-    ):
-        return None
-
-    role = "platform_admin" if user.is_platform_admin else None
     team_id = user_session.current_team_id
-    if staging_admin_session and team_id is None:
-        return None
+    teams = await accessible_teams(
+        session, user, team_id=team_id, include_disabled=team_id is not None,
+    )
     if team_id is None:
-        first = await _first_membership(session, user.id)
-        if first is None:
+        if not teams:
             return None
-        membership, _team = first
-        team_id = membership.team_id
-        if role is None:
-            role = membership.role
+        first = await _first_membership(session, user.id)
+        team_id = (
+            first[1].id if first is not None and any(team.id == first[1].id for team, _ in teams)
+            else teams[0][0].id
+        )
         await session.execute(
             update(UserSession)
             .where(UserSession.session_hash == user_session.session_hash)
             .values(current_team_id=team_id),
         )
-    else:
-        membership_row = await _membership_for_team(
-            session, user_id=user.id, team_id=team_id,
-        )
-        if membership_row is None:
-            return None
-        if role is None:
-            role = membership_row[0].role
-        if staging_admin_session:
-            membership, team = membership_row
-            enabled_admin_team_ids = list((await session.execute(
-                select(Team.id)
-                .where(func.lower(Team.name) == "admin")
-                .where(Team.disabled_at.is_(None)),
-            )).scalars().all())
-            if (
-                membership.role != "owner"
-                or len(enabled_admin_team_ids) != 1
-                or enabled_admin_team_ids[0] != team.id
-            ):
-                return None
+    role = next((role for team, role in teams if team.id == team_id), None)
+    if role is None:
+        return None
     await session.execute(
         update(UserSession)
         .where(UserSession.session_hash == user_session.session_hash)
@@ -430,18 +395,14 @@ async def switch_session_team(
 ) -> None:
     if ctx.session_hash is None or ctx.user_id is None:
         raise HTTPException(status_code=401, detail="missing browser session")
-    if ctx.role == "platform_admin":
-        exists = (await session.execute(
-            select(Team.id).where(Team.id == team_id),
-        )).scalar_one_or_none()
-        if exists is None:
+    user = await session.get(User, ctx.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="missing user")
+    teams = await accessible_teams(session, user, team_id=team_id)
+    if not any(team.id == team_id for team, _role in teams):
+        if user.is_platform_admin and await session.get(Team, team_id) is None:
             raise HTTPException(status_code=404, detail="team not found")
-    else:
-        membership = await _membership_for_team(
-            session, user_id=ctx.user_id, team_id=team_id,
-        )
-        if membership is None:
-            raise HTTPException(status_code=403, detail="user is not a team member")
+        raise HTTPException(status_code=403, detail="team is disabled or not accessible")
     await session.execute(
         update(UserSession)
         .where(UserSession.session_hash == ctx.session_hash)

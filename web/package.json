@@ -13,13 +13,13 @@
     "gen-api": "node scripts/generate-api.mjs",
     "smoke:tasksets": "node scripts/taskset-nginx-smoke.mjs",
     "smoke:routes": "node scripts/frontend-route-browser-smoke.mjs",
-    "smoke:staging-admin": "node scripts/staging-admin-browser-smoke.mjs",
+    "smoke:admin": "node scripts/admin-browser-smoke.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:desktop": "playwright test --project=chromium-desktop",
     "test:route-browser-unit": "vitest run scripts/frontend-route-browser-smoke.test.mjs",
-    "test:staging-admin-browser-unit": "vitest run scripts/staging-admin-browser-smoke.test.mjs",
+    "test:admin-browser-unit": "vitest run scripts/admin-browser-smoke.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {
