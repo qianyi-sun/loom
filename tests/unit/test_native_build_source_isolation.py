@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from loom.models.exec import ExecResult
-from loom.models.task import TaskConfig
+from loom.models.task import TaskConfig, TaskSidecarConfig
 from loom.service_execution_sandbox_task import (
     _POLICY,
     _agent_input_exclusions,
@@ -162,3 +162,38 @@ instruction_file = "instruction.md"
     main()
     assert driver.quiesced
     assert (tmp_path / "task.toml").read_text() == original
+
+
+@pytest.mark.parametrize("context", ["fixtures/server", "fixtures/server[private]"])
+async def test_fixture_build_source_never_reaches_agent(tmp_path: Path, context: str) -> None:
+    task, _, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "sidecars": [TaskSidecarConfig(
+            name="server", dockerfile=PurePosixPath("docker/fixture.Dockerfile"),
+            docker_build_context=PurePosixPath(context), command=["python3", "/server.py"],
+        )],
+    })})
+    for name, content in {
+        f"{context}/server.py": "fixture response contains the answer",
+        f"{context}/subdir/secret.txt": "build-only source",
+        "docker/fixture.Dockerfile": "FROM python\nCOPY . /fixture/\n",
+        "fixtures/runtime.txt": "ordinary task input",
+        "docker/notes.txt": "ordinary task input",
+        "tests/check.py": "private grading",
+    }.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    driver = Sandbox()
+    await driver.start()
+    try:
+        await materialize_workspace(driver=driver, task_dir=tmp_path, dst=PurePosixPath("/app"),
+                                    policy=_POLICY, excluded_paths=_agent_input_exclusions(task))
+    finally:
+        await driver.stop()
+    assert not any(str(path).startswith(f"/app/{context}/") for path in driver.filesystem)
+    assert PurePosixPath("/app/docker/fixture.Dockerfile") not in driver.filesystem
+    assert PurePosixPath("/app/tests/check.py") not in driver.filesystem
+    assert driver.filesystem[PurePosixPath("/app/fixtures/runtime.txt")] == b"ordinary task input"
+    assert driver.filesystem[PurePosixPath("/app/docker/notes.txt")] == b"ordinary task input"
+    assert (tmp_path / context / "server.py").read_text() == "fixture response contains the answer"
