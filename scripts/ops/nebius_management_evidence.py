@@ -89,6 +89,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
 
     def backup_report(self, *, job_uid: str) -> dict[str, Any]:
         """Read only the completed recorded Job's unique, unrestarted uploader."""
+        stage = "backup_job"
         try:
             if str(UUID(job_uid)) != job_uid or UUID(job_uid).int == 0:
                 raise ValueError()
@@ -112,6 +113,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
                 return value
 
             job = completed_job()
+            stage = "backup_pod_list"
             listing = self._request("GET", pods_path + "?" + urlencode({
                 "labelSelector": "batch.kubernetes.io/controller-uid=" + job_uid, "limit": 2,
             }))
@@ -123,6 +125,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             # it. Inherit only absent fields from this exact verified collection,
             # retaining explicit conflicting types for rejection below.
             pod = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
+            stage = "backup_pod_identity"
             meta = pod["metadata"]
             _uid(pod)
             if (pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod"
@@ -138,7 +141,11 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             # Match executable contents from the actual Job; quantity spelling may
             # be canonicalized by the API. Extra containers cannot supply evidence.
             expected = job["spec"]["template"]["spec"]
-            if not _matches_backup_template(pod["spec"], expected) or pod.get("status", {}).get("phase") != "Succeeded":
+            stage = "backup_pod_template"
+            if not _matches_backup_template(pod["spec"], expected):
+                raise ValueError()
+            stage = "backup_pod_status"
+            if pod.get("status", {}).get("phase") != "Succeeded":
                 raise ValueError()
             for field, status_field in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
                 names = {row["name"] for row in expected.get(field, [])}
@@ -151,6 +158,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             uploader = expected["containers"][0]["name"]
             path = pods_path + "/" + meta["name"]
             query = urlencode({"container": uploader, "tailLines": 20, "limitBytes": 16384, "timestamps": "false"})
+            stage = "backup_log"
             with self.client.stream("GET", path + "/log?" + query) as response:
                 if response.status_code != 200 or response.headers.get("content-encoding", "identity").lower() != "identity":
                     raise ValueError()
@@ -163,6 +171,7 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
             report = json.loads(payload)
             if not isinstance(report, dict) or set(report) != {"backup_key", "sha256", "bytes"}:
                 raise ValueError()
+            stage = "backup_readback"
             after = self._request("GET", path)
             # A Pod has its validated Job owner; the stage snapshot deliberately
             # forbids owners for directly installed objects and cannot be used.
@@ -170,4 +179,4 @@ class HTTPSManagementEvidenceAPI(HTTPSManagementStageAPI):
                 raise ValueError()
             return report
         except Exception:
-            raise ManagementInstallError("management backup execution evidence unavailable") from None
+            raise ManagementInstallError("management backup execution evidence unavailable", stage=stage) from None

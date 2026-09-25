@@ -33,7 +33,13 @@ MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install"}
 DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
     "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
-    "publication", "cloud_identity", "provider_quota", "backup_access", "public_route"})
+    "publication", "cloud_identity", "provider_quota", "backup_access", "public_route",
+    "recovery", "runtime_authority", "public_authentication", "backup_execution", "backup_object",
+    "install_bootstrap", "install_config", "install_authority", "install_supplied", "install_database",
+    "install_storage", "install_migration", "install_backup", "install_schedule", "install_service", "install_public",
+    "ready_database", "ready_migration", "ready_backup", "ready_service",
+    "backup_job", "backup_pod_list", "backup_pod_identity", "backup_pod_template", "backup_pod_status",
+    "backup_log", "backup_readback"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 

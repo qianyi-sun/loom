@@ -754,6 +754,12 @@ nonzero; successful delivery of a diagnostic report is not successful installati
 An unqualified input/transport failure remains generic. Diagnose the reported
 stage and preserve recovery evidence before retrying; a diagnostic is not a grant
 to bypass the check or broaden permissions.
+Installed-phase failures also identify `recovery`, `install_<phase>`,
+`runtime_authority`, `ready_<phase>` or `public_authentication`. Backup diagnostics
+distinguish the recorded Job, Pod list/identity/template/status, bounded uploader
+log, unchanged readback and off-node object proof (`backup_object`). These are
+fixed allowlisted stage names, not raw exception text, object payloads or logs.
+They do not add requests, change writes, or make a blocked phase retryable.
 `pending` records a database, migration,
 backup or service readiness barrier; a later invocation with identical inputs
 reconciles existing identities before advancing. A failed/unknown outcome is not

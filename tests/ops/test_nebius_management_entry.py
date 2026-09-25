@@ -139,7 +139,11 @@ def test_install_error_stage_survives_fixed_transport_without_exception_text(ent
                                                                            stage, expected):
     from scripts.ops.nebius_management_install import ManagementInstallError
 
-    _, _, path, _ = entry_inputs
+    _, _, path, api = entry_inputs
+    @contextmanager
+    def connect(*args):
+        yield api
+    monkeypatch.setattr(module(), "connected_api", connect)
     def fail(**kwargs):
         raise ManagementInstallError("private-secret", stage=stage)
     monkeypatch.setattr(module(), "install_management", fail)
