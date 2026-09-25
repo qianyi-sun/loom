@@ -100,12 +100,20 @@ def task_bundle_content_manifest_digest(provenance: Mapping[str, Any]) -> str:
 
 def resolve_prepared_task(task: TaskConfig, grant: TaskImageExecutionGrantV1) -> TaskConfig:
     """Use the ready image for resource admission without changing its frozen source."""
+    if task != TaskConfig.model_validate(grant.task_config):
+        raise ValueError("prepared images do not match the frozen task")
     payload = task.model_dump(mode="json")
-    payload["environment"].update(
-        dockerfile=None, docker_build_context=None, docker_build_args={},
-        docker_build_target=None, docker_image=grant.registry_images["task"],
-        cpu_arch=grant.cpu_arch,
-    )
+    environment = payload["environment"]
+    environment["cpu_arch"] = grant.cpu_arch
+    if task.environment.dockerfile is not None:
+        environment.update(
+            dockerfile=None, docker_build_context=None, docker_build_args={},
+            docker_build_target=None, docker_image=grant.registry_images["task"],
+        )
+    for sidecar in environment["sidecars"]:
+        if sidecar["dockerfile"] is not None:
+            sidecar.update(dockerfile=None, docker_build_context=None,
+                           docker_image=grant.registry_images[f"sidecar:{sidecar['name']}"])
     return TaskConfig.model_validate(payload)
 
 

@@ -80,6 +80,12 @@ def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
         context = env.docker_build_context
         if context is not None and context != PurePosixPath("."):
             excluded.append(escape(context.as_posix()) + "/**")
+    for sidecar in env.sidecars:
+        if sidecar.dockerfile is not None:
+            excluded.append(escape(sidecar.dockerfile.as_posix()))
+            context = sidecar.docker_build_context
+            if context is not None and context != PurePosixPath("."):
+                excluded.append(escape(context.as_posix()) + "/**")
     return tuple(excluded)
 
 
