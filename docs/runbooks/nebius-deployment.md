@@ -729,6 +729,15 @@ bounded `ListObjectsV2` request (`MaxKeys=1`), after verifying the exact private
 versioned bucket and object-only policy through IAM. Nebius can deny `HeadBucket`
 for that policy even when object access works; do not broaden the backup identity
 to work around it. A successful list is not backup write or restore evidence.
+When a bound operation fails, `blocked` may include an allowlisted `stage` such
+as `cluster_identity`, `foundation`, `platform_capacity`, `storage_class`,
+`publication`, `cloud_identity`, `provider_quota`, `backup_access` or
+`public_route`. This identifies the failed prerequisite without exporting raw
+exceptions, credentials or cluster payloads. The protected rollout still exits
+nonzero; successful delivery of a diagnostic report is not successful installation.
+An unqualified input/transport failure remains generic. Diagnose the reported
+stage and preserve recovery evidence before retrying; a diagnostic is not a grant
+to bypass the check or broaden permissions.
 `pending` records a database, migration,
 backup or service readiness barrier; a later invocation with identical inputs
 reconciles existing identities before advancing. A failed/unknown outcome is not

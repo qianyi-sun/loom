@@ -131,3 +131,36 @@ def test_unknown_action_never_opens_private_inputs(entry_inputs, monkeypatch):
     _, _, path, _ = entry_inputs
     monkeypatch.setattr(module(), "load_inputs", lambda *args: pytest.fail("private inputs opened"))
     assert module().main(path, "shell") == 1
+
+
+@pytest.mark.parametrize("action", ["preflight", "install"])
+@pytest.mark.parametrize("stage,prerequisite,expected", [
+    ("cluster_identity", None, "cluster_identity"),
+    ("prerequisites", "storage_class", "storage_class"),
+    (None, "storage_class", "operation"),
+    ("private-secret", "private-secret", "operation"),
+])
+def test_bound_failure_exports_only_current_allowlisted_stage(entry_inputs, monkeypatch, capsys,
+                                                              action, stage, prerequisite, expected):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    metadata, _, path, api = entry_inputs
+    api.diagnostic_stage = stage
+    api.checks = SimpleNamespace(diagnostic_stage=prerequisite)
+    def fail(*args):
+        raise RuntimeError("private-secret raw-provider-response")
+    api.preflight = fail
+    @contextmanager
+    def connect(*args):
+        yield api
+    monkeypatch.setattr(module(), "connected_api", connect)
+    # A valid failure report must survive the private transport. The rollout
+    # CLI, tested separately, treats blocked as nonzero rather than readiness.
+    assert module().main(path, action) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report == {"status": "blocked", "stage": expected,
+        **{key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
+    assert "private-secret" not in output and "raw-provider-response" not in output
+    assert not Path(metadata["state_dir"]).exists()

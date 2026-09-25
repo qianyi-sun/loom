@@ -57,6 +57,7 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
                  certificate_config: dict[str, Any], ingress_state: Path, operator_cloud_credentials: Path,
                  api_server: str, ssl_context: ssl.SSLContext, token: str | None = None):
         self.settings, self.ingress, self.certificate_config = settings, ingress, certificate_config
+        self.diagnostic_stage: str | None = None
         self.ingress_state, self.operator_cloud_credentials = ingress_state, operator_cloud_credentials
         super().__init__(api_server=api_server, ssl_context=ssl_context, token=token)
 
@@ -152,11 +153,16 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
 
     def preflight(self, request: ManagementInstallRequest, rendered: RenderedManagement) -> None:
         try:
+            self.diagnostic_stage = "render"
             if rendered != render_installation(request):
                 raise ValueError()
+            self.diagnostic_stage = "foundation"
             self.foundation(request)
+            self.diagnostic_stage = "platform_capacity"
             missing_storage = self.platform_capacity(request, rendered)
+            self.diagnostic_stage = "publication"
             asyncio.run(self.provider_and_publication(request, missing_storage))
+            self.diagnostic_stage = "backup_access"
             with backup_client(request) as objects:
                 # Nebius object-only bucket policies allow object listing but
                 # not HeadBucket. IAM qualification above pins the bucket and
@@ -165,7 +171,9 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
                 response = objects.list_objects_v2(Bucket=request.deployment.backup_bucket, MaxKeys=1)
                 if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 200:
                     raise ValueError()
+            self.diagnostic_stage = "public_route"
             self.public_route(request)
+            self.diagnostic_stage = None
         except Exception:
             raise ManagementPrerequisiteError("management installation prerequisites unqualified") from None
 
@@ -187,6 +195,7 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
         children = min(getattr(budget, key) // value for key, value in bounds.items())
         child_slots = sum(_count(doc) for docs in child.files.values() for doc in docs
                           if doc["kind"] in {"Deployment", "StatefulSet", "Job", "CronJob"})
+        self.diagnostic_stage = "resource_inventory"
         nodes, pods = self.inventory("v1", "nodes", "Node"), self.inventory("v1", "pods", "Pod")
         controllers = []
         for api, resource, kind in (("apps/v1", "deployments", "Deployment"), ("apps/v1", "statefulsets", "StatefulSet"),
@@ -205,8 +214,10 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
             row["spec"]["replicas"] = max(row["spec"].get("replicas", 1), maximum)
         planned = [row for docs in rendered.files.values() for row in docs
                    if row["kind"] in {"Deployment", "StatefulSet", "Job", "CronJob"}]
+        self.diagnostic_stage = "platform_capacity"
         qualify_platform_capacity(nodes=nodes, pods=pods, controllers=controllers, planned=planned,
                                   reserve=PlatformEnvelope(**budget.model_dump()), reserve_pods=children * child_slots)
+        self.diagnostic_stage = "storage_class"
         storage_class = self._request("GET", "/apis/storage.k8s.io/v1/storageclasses/" + config["storage_class"])
         if (storage_class is None or storage_class.get("kind") != "StorageClass"
                 or storage_class["metadata"].get("uid") != str(self.settings.storage_class_uid)
@@ -216,6 +227,7 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
                 or storage_class.get("parameters", {}) != self.settings.storage_parameters
                 or storage_class.get("volumeBindingMode") not in {"Immediate", "WaitForFirstConsumer"}):
             raise ValueError()
+        self.diagnostic_stage = "persistent_storage"
         claims = self.inventory("v1", "persistentvolumeclaims", "PersistentVolumeClaim")
         pending = 0
         existing = {(row["metadata"]["namespace"], row["metadata"]["name"]): row for row in claims}
@@ -250,10 +262,12 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
         from nebius.api.nebius.quotas import v1
         from nebius.sdk import SDK
 
+        self.diagnostic_stage = "publication"
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=30) as http:
             await qualify_management_publication(request=request, candidate_id=self.settings.candidate_id, http=http)
         # The observing operator SDK never becomes runtime material. Its private
         # path is installation-owned and cannot come from a personal deployment.
+        self.diagnostic_stage = "cloud_identity"
         before = private_state._private_read(self.operator_cloud_credentials, limit=1024 * 1024)
         sdk = SDK(credentials_file_name=str(self.operator_cloud_credentials), user_agent_prefix="loom-management-installer/1.0")
         try:
@@ -261,6 +275,7 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
                 await qualify_cloud_material(sdk=sdk, scope=self.settings.cloud, material=request.material,
                                              bucket_name=request.deployment.backup_bucket,
                                              backup_bytes=request.deployment.postgres_storage_gi * 1024**3)
+                self.diagnostic_stage = "provider_quota"
                 quotas = await _pages(v1.QuotaAllowanceServiceClient(sdk).list, v1.ListQuotaAllowancesRequest,
                                       parent_id=self.settings.cloud.tenant_id)
                 for name, unit, service, required in (

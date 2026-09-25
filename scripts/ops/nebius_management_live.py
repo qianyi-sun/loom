@@ -81,6 +81,7 @@ class HTTPSManagementInstallationAPI:
     def __init__(self, *, request: ManagementInstallRequest, api_server: str, ssl_context: ssl.SSLContext,
                  runtime_ca_pem: str | None, checks: ManagementPrerequisites, token: str | None = None):
         self.request, self.rendered, self.checks = request, render_installation(request), checks
+        self.diagnostic_stage: str | None = None
         self.api_server, self.ssl_context, self.token = api_server, ssl_context, token
         # Never reuse operator mTLS for a supposed runtime-subject probe. Build a
         # clean trust-only context; the only authentication is its short-lived SA token.
@@ -99,11 +100,15 @@ class HTTPSManagementInstallationAPI:
 
     def preflight(self, request: ManagementInstallRequest, rendered: RenderedManagement) -> None:
         try:
+            self.diagnostic_stage = "render"
             if request != self.request or rendered != self.rendered:
                 raise ValueError()
+            self.diagnostic_stage = "cluster_identity"
             with self.bootstrap_api() as api:
                 api.verify_cluster(request.binding)
+            self.diagnostic_stage = "prerequisites"
             self.checks.preflight(request, rendered)
+            self.diagnostic_stage = None
         except Exception:
             raise ManagementInstallError("management live prerequisites unavailable") from None
 

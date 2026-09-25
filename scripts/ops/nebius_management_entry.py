@@ -17,7 +17,7 @@ from scripts.ops.nebius_ingress_bootstrap import validate_config
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_operation import LiveIngressAPI
 from scripts.ops.nebius_management_bootstrap import BootstrapBinding
-from scripts.ops.nebius_management_gateway import safe_report, validate_operation
+from scripts.ops.nebius_management_gateway import DIAGNOSTIC_STAGES, safe_report, validate_operation
 from scripts.ops.nebius_management_install import (
     ManagementInstallRequest,
     install_management,
@@ -136,6 +136,8 @@ def connected_api(inputs: PrivateInputs, request: ManagementInstallRequest,
 
 
 def main(operation_path: str, action: str) -> int:
+    qualified: dict[str, Any] | None = None
+    api: HTTPSManagementInstallationAPI | None = None
     try:
         if action not in {"qualify", "preflight", "install"}:
             raise ValueError()
@@ -145,6 +147,7 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         inputs, request, ingress = load_inputs(operation)
+        qualified = operation
         with connected_api(inputs, request, ingress) as api:
             if action == "preflight":
                 api.preflight(request, render_installation(request))
@@ -156,5 +159,17 @@ def main(operation_path: str, action: str) -> int:
         print(json.dumps(safe_report(json.dumps(report).encode(), operation), sort_keys=True))
         return 0
     except Exception:
+        if qualified is not None:
+            stage = getattr(api, "diagnostic_stage", None) if api is not None else "connection"
+            if stage == "prerequisites" and api is not None:
+                stage = getattr(api.checks, "diagnostic_stage", None)
+            if not isinstance(stage, str) or stage not in DIAGNOSTIC_STAGES:
+                stage = "operation"
+            failure = {"status": "blocked", "stage": stage,
+                       **{key: qualified[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
+            print(json.dumps(safe_report(json.dumps(failure).encode(), qualified), sort_keys=True))
+            # Zero here means a bound protocol response was delivered. Only the
+            # outer rollout CLI decides success, and blocked always exits one.
+            return 0
         print(json.dumps({"status": "blocked", "reason": "management operation incomplete; retain private recovery state"}))
         return 1
