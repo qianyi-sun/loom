@@ -47,12 +47,16 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
         await asyncio.to_thread(_build_image, tag=fixture_tag,
             dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile", platform=platform)
         with tempfile.TemporaryDirectory(prefix="loom-personal-network-") as temporary:
-            container = await asyncio.to_thread(_start_k3s)
+            # Testcontainers sees the host's multi-TB filesystem; a percentage
+            # floor can evict tiny fixture Pods with hundreds of GiB still free.
+            container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
             _, core, _ = await asyncio.to_thread(_load_client, container)
             api = client.ApiClient()
             image = await asyncio.to_thread(_import_image, container, tag=fixture_tag, root=Path(temporary), ordinal=1)
             data_ns = shared.platform_namespace
             await asyncio.to_thread(core.create_namespace, {"metadata": {"name": data_ns}})
+            await asyncio.to_thread(core.create_namespaced_service_account, data_ns,
+                {"metadata": {"name": "network-fixture"}, "automountServiceAccountToken": False})
             policy_names = {doc["spec"]["podSelector"]["matchLabels"]["app"]: doc["metadata"]["name"] for doc in policies}
             for doc in [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
                          "metadata": {"name": "shared-deny", "namespace": data_ns},
@@ -63,6 +67,7 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                 return {"apiVersion": "v1", "kind": "Pod", "metadata": {
                     "name": name, "namespace": namespace, "labels": {"app": app}}, "spec": {
                         "restartPolicy": "Never", "automountServiceAccountToken": False,
+                        "serviceAccountName": "network-fixture",
                         "securityContext": {"runAsNonRoot": True, "runAsUser": 1000,
                                             "seccompProfile": {"type": "RuntimeDefault"}},
                         "containers": [{"name": "fixture", "image": image, "imagePullPolicy": "IfNotPresent",
@@ -93,6 +98,8 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                     namespace["metadata"]["labels"] = {}
                 ns = namespace["metadata"]["name"]
                 await asyncio.to_thread(core.create_namespace, namespace)
+                await asyncio.to_thread(core.create_namespaced_service_account, ns,
+                    {"metadata": {"name": "network-fixture"}, "automountServiceAccountToken": False})
                 await asyncio.to_thread(core.create_namespaced_pod, ns, pod("api", ns, "loom-service", ["idle"]))
                 await asyncio.to_thread(_wait_for_pod, core, ns, "api")
                 clients[slug] = (ns, "api")
@@ -113,7 +120,8 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                         await _wait_for_allowed_peer(core, ns, client_name, url)
                     else:
                         denied = await asyncio.to_thread(_pod_probe, core, ns, client_name, url)
-                        assert "exit:0" not in denied, f"unexpected shared access: {slug} -> {name}: {denied}"
+                        assert ("exit:1 reason:network " in denied or "exit:1 reason:timeout " in denied), (
+                            f"expected network denial: {slug} -> {name}: {denied}")
     finally:
         if container is not None:
             await asyncio.to_thread(container.stop)

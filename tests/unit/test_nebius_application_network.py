@@ -1,6 +1,7 @@
 """Protected shared-side admission cannot become a personal shared-policy writer."""
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -57,6 +58,8 @@ def test_shared_access_rejects_mismatched_or_non_development_bindings(platform_i
     elif change == "invalid-authority":
         authority = authority.model_copy(update={"namespace": "kube-system"})
     else:
-        foundation = foundation.model_copy(update={"platform_config": foundation.platform_config | {"environment": change}})
+        foundation = foundation.model_copy(update={
+            "platform_config_json": json.dumps(foundation.platform_config | {"environment": change}),
+        })
     with pytest.raises(ValueError):
         render_application_shared_access(authority, shared, foundation)
