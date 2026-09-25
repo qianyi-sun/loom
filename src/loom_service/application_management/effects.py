@@ -102,7 +102,8 @@ def _secret_targets(operation: NebiusApplicationOperation) -> set[str]:
     return names
 
 
-def _validate_target(operation: NebiusApplicationOperation, intent: KubernetesEffectIntent) -> None:
+async def _validate_target(session: AsyncSession, operation: NebiusApplicationOperation,
+                           intent: KubernetesEffectIntent) -> None:
     binding = ApplicationRegistrationV1.model_validate(operation.plan_json["registration"])
     ns = binding.application_namespace
     if intent.kind == "Namespace":
@@ -114,6 +115,16 @@ def _validate_target(operation: NebiusApplicationOperation, intent: KubernetesEf
                   for docs in operation.plan_json["files"].values() for doc in docs)
     additional = (intent.kind == "Secret" and intent.name in _secret_targets(operation)) or (
         intent.kind == "ResourceQuota" and intent.name == "loom-application-retired") or intent.kind == "Pod"
+    if owned and not (planned or additional) and intent.kind == "Secret" and intent.action == "delete":
+        # Update/resume freeze NEW references and supersede the old lease. A
+        # subsequent stop may interrupt that update before older material retires.
+        # Consult all earlier plans for this application, never another app's
+        # history, and never authorize CREATE/PATCH of retired material.
+        predecessors = await session.scalars(select(NebiusApplicationOperation).where(
+            NebiusApplicationOperation.application_id == operation.application_id,
+            NebiusApplicationOperation.deployment_generation < operation.deployment_generation,
+        ))
+        additional = any(intent.name in _secret_targets(previous) for previous in predecessors)
     if not owned or not (planned or additional):
         raise ManagementError("invalid_application_effect", 422)
 
@@ -129,7 +140,7 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
             raise ManagementError("invalid_application_effect", 422)
         async with self.session_factory.begin() as session:
             operation, _ = await self._leased(session, lease)
-            _validate_target(operation, parsed)
+            await _validate_target(session, operation, parsed)
             existing = await session.get(NebiusApplicationEffect, (lease.operation_id, key))
             value = parsed.model_dump(mode="json")
             if existing is not None:

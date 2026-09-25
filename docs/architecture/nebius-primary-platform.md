@@ -290,6 +290,11 @@ limited to frozen application manifest names, Secret names referenced by those
 Deployments' environment/CA-volume bindings, the fixed retirement quota, and
 exact-identity Pod deletion in the application
 namespace. Namespace and RoleBinding identities remain create-only.
+The current lease may also delete exact Secret names referenced by earlier frozen
+plans of the same application, with mandatory UID/resourceVersion preconditions.
+This covers updates, resumes and stops that interrupt an update before old material
+is retired. Historical references never authorize creation or patching, and neither
+another application's history nor a foreign namespace expands the target set.
 
 Effect keys have immutable replay semantics. Within each operation, only one
 unresolved effect can be prepared at a time. Dispatch is an atomic, one-winner
