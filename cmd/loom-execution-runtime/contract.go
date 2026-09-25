@@ -44,26 +44,30 @@ type phase struct {
 }
 
 type probe struct {
-	Kind             string   `json:"kind"`
-	TimeoutSeconds   int64    `json:"timeout_seconds"`
-	PeriodSeconds    int64    `json:"period_seconds"`
-	FailureThreshold int64    `json:"failure_threshold"`
-	Port             *int64   `json:"port"`
-	Path             *string  `json:"path"`
-	Argv             []string `json:"argv"`
+	InitialDelaySeconds int64    `json:"initial_delay_seconds,omitempty"`
+	Kind                string   `json:"kind"`
+	TimeoutSeconds      int64    `json:"timeout_seconds"`
+	PeriodSeconds       int64    `json:"period_seconds"`
+	FailureThreshold    int64    `json:"failure_threshold"`
+	Port                *int64   `json:"port"`
+	Path                *string  `json:"path"`
+	Argv                []string `json:"argv"`
 }
 
 type sidecar struct {
-	Identity       *sandboxIdentity  `json:"identity,omitempty"`
-	PrivateSandbox bool              `json:"private_sandbox,omitempty"`
-	RoleName       string            `json:"role_name"`
-	ImageRef       string            `json:"image_ref"`
-	Argv           []string          `json:"argv"`
-	Environment    map[string]string `json:"environment"`
-	Resources      resources         `json:"resources"`
-	StartupProbe   probe             `json:"startup_probe"`
-	ReadinessProbe probe             `json:"readiness_probe"`
-	DependsOn      []string          `json:"depends_on"`
+	TaskFixture        bool              `json:"task_fixture,omitempty"`
+	TaskImageComponent *string           `json:"task_image_component,omitempty"`
+	Hostname           *string           `json:"hostname,omitempty"`
+	Identity           *sandboxIdentity  `json:"identity,omitempty"`
+	PrivateSandbox     bool              `json:"private_sandbox,omitempty"`
+	RoleName           string            `json:"role_name"`
+	ImageRef           string            `json:"image_ref"`
+	Argv               []string          `json:"argv"`
+	Environment        map[string]string `json:"environment"`
+	Resources          resources         `json:"resources"`
+	StartupProbe       probe             `json:"startup_probe"`
+	ReadinessProbe     probe             `json:"readiness_probe"`
+	DependsOn          []string          `json:"depends_on"`
 }
 
 type sandboxIdentity struct {
@@ -304,7 +308,11 @@ func (p plan) validate() error {
 		return fmt.Errorf("invalid verifier execution unit")
 	}
 	known := map[string]bool{}
+	fixtureCount := 0
 	for _, item := range p.Sidecars {
+		if item.TaskFixture {
+			fixtureCount++
+		}
 		if item.PrivateSandbox && p.AgentImageRef == nil {
 			return fmt.Errorf("private sandboxes require an agent image reference")
 		}
@@ -312,6 +320,11 @@ func (p plan) validate() error {
 			return err
 		}
 		known[item.RoleName] = true
+	}
+	if fixtureCount > 0 && (fixtureCount != 1 || p.TaskImageMaterializationID == nil ||
+		p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" ||
+		!known["task-sandbox"] || !known["verifier-sandbox"] || len(p.Sidecars) != 3 || !p.Sidecars[0].TaskFixture) {
+		return fmt.Errorf("one prepared fixture requires an isolated attempt controller and both sandboxes")
 	}
 	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||
 		p.Composition != "init_payload" || p.AgentImageRef == nil ||
@@ -423,7 +436,7 @@ func (p plan) validate() error {
 		requiredImages = append(requiredImages, *p.AgentImageRef)
 	}
 	for _, item := range p.Sidecars {
-		if p.TaskImageMaterializationID != nil && item.PrivateSandbox && item.ImageRef == p.TaskImageRef {
+		if p.TaskImageMaterializationID != nil && (item.TaskFixture || (item.PrivateSandbox && item.ImageRef == p.TaskImageRef)) {
 			continue
 		}
 		requiredImages = append(requiredImages, item.ImageRef)
@@ -547,6 +560,23 @@ func (p phase) validate() error {
 }
 
 func (s sidecar) validate(known map[string]bool) error {
+	if s.TaskFixture {
+		if s.TaskImageComponent == nil || !strings.HasPrefix(*s.TaskImageComponent, "sidecar:") {
+			return fmt.Errorf("fixture requires its prepared sidecar component")
+		}
+		name := strings.TrimPrefix(*s.TaskImageComponent, "sidecar:")
+		if !fixtureName.MatchString(name) || fixtureReserved[name] || s.RoleName != "fixture-"+name {
+			return fmt.Errorf("fixture role must match its prepared component")
+		}
+		if s.Hostname == nil || !validFixtureHostname(*s.Hostname) {
+			return fmt.Errorf("fixture requires a non-reserved DNS hostname")
+		}
+		if s.PrivateSandbox || s.Identity != nil || len(s.DependsOn) != 0 || len(s.Environment) != 0 {
+			return fmt.Errorf("fixture cannot share a sandbox identity or trusted sidecar contract")
+		}
+	} else if s.TaskImageComponent != nil || s.Hostname != nil || strings.HasPrefix(s.RoleName, "fixture-") {
+		return fmt.Errorf("fixture metadata and roles require explicit fixture isolation")
+	}
 	if s.Identity != nil {
 		i := s.Identity
 		if !s.PrivateSandbox || i.RunAsUser == nil || i.RunAsGroup == nil || *i.RunAsUser < 0 || *i.RunAsUser > 2_147_483_647 || *i.RunAsGroup < 0 || *i.RunAsGroup > 2_147_483_647 {
@@ -605,7 +635,7 @@ func (s sidecar) validate(known map[string]bool) error {
 }
 
 func (p probe) validate() error {
-	if p.TimeoutSeconds <= 0 || p.TimeoutSeconds > 30 ||
+	if p.InitialDelaySeconds < 0 || p.InitialDelaySeconds > 300 || p.TimeoutSeconds <= 0 || p.TimeoutSeconds > 30 ||
 		p.PeriodSeconds <= 0 || p.PeriodSeconds > 60 ||
 		p.FailureThreshold <= 0 || p.FailureThreshold > 300 || len(p.Argv) > 32 {
 		return fmt.Errorf("invalid probe bounds")
@@ -647,4 +677,20 @@ func (r resources) validate() error {
 		return fmt.Errorf("resource values are outside supported bounds")
 	}
 	return nil
+}
+
+var (
+	fixtureName            = regexp.MustCompile(`^[a-z][a-z0-9-]{0,54}$`)
+	fixtureHostname        = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
+	fixtureNumericHostname = regexp.MustCompile(`^[0-9.]+$`)
+	fixtureReserved        = map[string]bool{
+		"localhost": true, "localhost.localdomain": true, "ip6-localhost": true, "ip6-loopback": true,
+		"execution": true, "runtime-materializer": true, "agent": true, "verifier": true,
+		"task-sandbox": true, "verifier-sandbox": true,
+	}
+)
+
+func validFixtureHostname(value string) bool {
+	return len(value) <= 253 && fixtureHostname.MatchString(value) && !fixtureReserved[value] &&
+		!strings.HasSuffix(value, ".localhost") && !fixtureNumericHostname.MatchString(value)
 }

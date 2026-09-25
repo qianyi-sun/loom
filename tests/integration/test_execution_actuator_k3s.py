@@ -211,7 +211,7 @@ def _executable_lease(
         ),
         sidecars=(
             SidecarContainerV1(
-                role_name="fixture-sidecar",
+                role_name="service-sidecar",
                 image_ref=task_image_ref,
                 argv=("/fixture", "sidecar"),
                 resources=ContainerResourcesV1(
@@ -1112,7 +1112,7 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
                         details = client.ApiClient().sanitize_for_serialization(failed_pod.status)
                         for container_name in (
                             "runtime-materializer",
-                            "fixture-sidecar",
+                            "service-sidecar",
                             "execution",
                         ):
                             try:
@@ -1188,7 +1188,7 @@ async def test_runtime_executes_task_native_sidecar_and_verifier_without_docker_
             assert "hostPath" not in str(pod_dict)
             assert [item.name for item in pod.spec.init_containers] == [
                 "runtime-materializer",
-                "fixture-sidecar",
+                "service-sidecar",
             ]
             logs = await asyncio.to_thread(
                 core.read_namespaced_pod_log,

@@ -59,6 +59,19 @@ class TaskSidecarConfig(BaseModel):
     hostname: str | None = None
     healthcheck: HealthcheckSpec | None = None
     depends_on: list[str] = []
+    fixture: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
+    ports: tuple[int, ...] = Field(default=(), exclude_if=lambda value: not value)
+    cpus: float | None = Field(default=None, gt=0, le=4, allow_inf_nan=False,
+                               exclude_if=lambda value: value is None)
+    memory_mb: int | None = Field(default=None, gt=0, le=4096, exclude_if=lambda value: value is None)
+    storage_mb: int | None = Field(default=None, gt=0, le=4096, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def _fixture_contract(self) -> TaskSidecarConfig:
+        from loom.task_fixtures import validate_fixture_config
+
+        validate_fixture_config(self)
+        return self
 
 
 class ServiceLifecycleConfig(BaseModel):
@@ -180,6 +193,9 @@ class EnvironmentConfig(BaseModel):
             raise ValueError("docker_build_args and docker_build_target require dockerfile")
         if any("\x00" in value for value in self.docker_build_args.values()):
             raise ValueError("docker_build_args values cannot contain NUL")
+        from loom.task_fixtures import validate_fixture_contexts
+
+        validate_fixture_contexts(self)
         return self
 
 

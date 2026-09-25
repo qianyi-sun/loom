@@ -96,7 +96,7 @@ def test_only_one_self_contained_fixture_is_admitted() -> None:
     second = deepcopy(raw["environment"]["sidecars"][0])
     second.update(name="another", hostname="another.example")
     raw["environment"]["sidecars"].append(second)
-    with pytest.raises(ValueError, match="one.*fixture"):
+    with pytest.raises(ValueError, match=r"one.*fixture"):
         TaskConfig.model_validate(raw)
 
 

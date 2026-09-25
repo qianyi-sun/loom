@@ -412,7 +412,7 @@ async def test_fixture_reservation_requires_exact_frozen_components(
                 deadline_at=now + timedelta(seconds=3600), now=now,
             )
             if tamper is not None:
-                with pytest.raises(ServiceExecutionConflict, match="prepared fixture|not ready"):
+                with pytest.raises(ServiceExecutionConflict, match=r"prepared fixture|not ready"):
                     await reserve_trial_execution(session, **args)
                 await session.commit()
                 await _assert_no_execution(session, trial_id)
