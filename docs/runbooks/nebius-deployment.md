@@ -724,7 +724,16 @@ Configure the public metadata as protected `NEBIUS_MANAGEMENT_OPERATION_JSON` an
 the dedicated transport key as `NEBIUS_MANAGEMENT_SSH_KEY`.
 
 Run preflight before install. `preflight_qualified` is a read-only observation,
-not a reservation or installed result. Backup credential qualification uses a
+not a reservation or installed result. Pin the storage-class UID and parameters
+from a fresh protected `inspect` result, not from documentation's default
+semantics. Its `storage_classes` projection exposes only the Nebius driver options
+`type` (`NETWORK_SSD` or `NETWORK_SSD_IO_M3`) and `csi.storage.k8s.io/fstype`
+(`ext4` or `xfs`). Use `parameters` only when `parameters_complete` is true:
+an empty complete map means the class omits explicit parameters, whereas false
+means an unknown driver, key, value or malformed parameter map was redacted.
+Incomplete observations cannot qualify installation inputs. This observation does
+not modify the class or weaken the installer's exact comparison.
+Backup credential qualification uses a
 bounded `ListObjectsV2` request (`MaxKeys=1`), after verifying the exact private,
 versioned bucket and object-only policy through IAM. Nebius can deny `HeadBucket`
 for that policy even when object access works; do not broaden the backup identity
