@@ -302,7 +302,7 @@ async def test_post_trial_rejects_agent_without_service_runtime(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
+    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "codex", False)
     app, raw, _team_id, captured = fwd_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -315,14 +315,14 @@ async def test_post_trial_rejects_agent_without_service_runtime(
             json={
                 "task_id": "local/task-1",
                 "config": {
-                    "agent_name": "opencode",
+                    "agent_name": "codex",
                     "agent_model": {"provider": "openai", "name": "gpt-4o"},
                 },
             },
         )
     assert r.status_code == 400
     detail = r.json()["detail"]
-    assert "opencode" in detail
+    assert "codex" in detail
     assert "runtime" in detail.lower()
     assert "GET /api/v1/agents" in detail
     assert captured["reqs"] == []

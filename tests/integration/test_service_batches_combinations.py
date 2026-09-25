@@ -471,6 +471,70 @@ async def test_combinations_preserve_per_combo_provider_routing(
     sync_engine.dispose()
 
 
+@pytest.mark.parametrize("provider_type", ["anthropic", "google"])
+async def test_combinations_reject_native_provider_connection(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+    provider_type: str,
+) -> None:
+    """#2054: hosted agent submissions accept only OpenAI-compatible
+    Provider Connections; native Anthropic/Google are rejected up front."""
+    app, raw = setup
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    conn_id = uuid4()
+    with sl() as s:
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+                Token.type == "team",
+            )
+        ).scalar_one()
+        s.execute(
+            insert(ProviderConnection).values(
+                id=conn_id,
+                team_id=team_id,
+                provider_type=provider_type,
+                display_name=f"Native {provider_type}",
+                base_url="https://api.example.test/v1",
+                upstream_host="api.example.test",
+                resolved_egress_ips=["203.0.113.10"],
+                encrypted_api_key_ref=f"test://{conn_id}",
+                status="valid",
+                pricing_source="tokens-only",
+                created_by="test:combo",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": f"combo-native-{provider_type}",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "litellm",
+                    "agent_model": {"provider": provider_type, "name": "native-model"},
+                    "provider_connection_id": str(conn_id),
+                    "provider_model_id": "native-model",
+                    "n_per_task": 1,
+                    "label": "native",
+                },
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert provider_type in detail
+    assert "OpenAI-compatible" in detail
+
+
 async def test_combinations_reject_provider_model_cache_per_combo(
     setup: tuple[FastAPI, str],
     postgres_url: str,
@@ -631,22 +695,22 @@ async def test_combinations_reject_agent_without_service_runtime(
     setup: tuple[FastAPI, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "opencode", False)
+    monkeypatch.setitem(agent_catalog._ADAPTER_RUNTIME_READY, "codex", False)
     app, raw = setup
     r = await _post(
         app,
         raw,
         {
-            "name": "opencode-combo",
+            "name": "codex-combo",
             "purpose": "evaluation",
             "task_filter": {"license": "MIT"},
             "trial_config": {},
             "combinations": [
                 {
-                    "agent_name": "opencode",
+                    "agent_name": "codex",
                     "agent_model": {"provider": "openai", "name": "gpt-4o"},
                     "n_per_task": 1,
-                    "label": "opencode",
+                    "label": "codex",
                 }
             ],
         },
@@ -654,7 +718,7 @@ async def test_combinations_reject_agent_without_service_runtime(
     assert r.status_code == 400
     detail = r.json()["detail"]
     assert "combinations[0]" in detail
-    assert "opencode" in detail
+    assert "codex" in detail
     assert "runtime" in detail.lower()
     assert "GET /api/v1/agents" in detail
 

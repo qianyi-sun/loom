@@ -168,6 +168,17 @@ def test_artifact_patterns_adds_verifier_glob_for_terminus2() -> None:
     assert ".loom/verifier/output.json" in platform_patterns
 
 
+@pytest.mark.parametrize("agent_name", ["openhands-sdk", "openhands"])
+def test_artifact_patterns_capture_openhands_under_either_name(agent_name: str) -> None:
+    """#2054: `openhands` is the legacy alias of `openhands-sdk`."""
+    ctx = SimpleNamespace(
+        agent=SimpleNamespace(name=agent_name),
+        verifier=SimpleNamespace(name="script"),
+    )
+    step = SimpleNamespace(artifacts=["output.txt"])
+    assert ".loom/agent/**" in _artifact_patterns(ctx, step)  # type: ignore[arg-type]
+
+
 def test_artifact_patterns_adds_verifier_glob_for_script_verifier() -> None:
     ctx = SimpleNamespace(
         agent=SimpleNamespace(name="oracle"),

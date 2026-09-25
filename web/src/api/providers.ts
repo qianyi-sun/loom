@@ -26,6 +26,8 @@ export interface ModelEntry {
   provider_connection_id?: string;
   provider_connection_name?: string;
   provider_connection_type?: string;
+  /** How Gateway serves Codex's Responses requests on this connection. */
+  responses_route?: "native" | "translated" | "unprobed" | "unsupported";
   agent_capable?: boolean;
   recommended?: boolean;
   visibility?: string;
@@ -121,6 +123,10 @@ export const priceCatalogApi = {
     }),
 };
 
+/** Connection types Gateway routes with the OpenAI wire protocol; the only
+ * types hosted agent submissions accept (#2054). */
+export const OPENAI_SHAPED_CONNECTION_TYPES: ReadonlySet<string> = new Set(["openai-compatible", "custom"]);
+
 export interface ProviderConnectionEntry extends ProviderPricing {
   id: string;
   name: string;
@@ -183,6 +189,11 @@ export const providersApi = {
         readiness_message?: string | null;
         /** User-facing APIs normally return only displayed entries. */
         catalog_visibility?: "displayed" | "internal";
+        /** #2054: deferred entries stay listed for history but are not selectable. */
+        product_support?: "supported" | "deferred";
+        deferred_reason?: string | null;
+        /** User-facing name; `name` stays the canonical submission value. */
+        display_name?: string;
         runtime_contract?: {
           execution: string;
           capture: string;

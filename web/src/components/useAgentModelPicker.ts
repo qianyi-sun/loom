@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, type ModelEntry } from "../api";
+import { api, type ModelEntry, OPENAI_SHAPED_CONNECTION_TYPES } from "../api";
 import { queryKeys } from "../api/queryKeys";
 import { agentServiceModeReady } from "../lib/agentReadiness";
 import { type TabItem } from "./Tabs";
@@ -130,7 +130,7 @@ export function useAgentModelPicker({
   const agentList = useMemo(
     () =>
       [...(agents.data?.items ?? [])]
-        .filter((a) => a.catalog_visibility !== "internal")
+        .filter((a) => a.catalog_visibility !== "internal" && a.product_support !== "deferred")
         .sort((a, b) => a.name.localeCompare(b.name)),
     [agents.data],
   );
@@ -175,7 +175,10 @@ export function useAgentModelPicker({
   }, [selectedAgent, availableSources, value, onChange]);
 
   const connectionList = useMemo(
-    () => [...(providerConnections.data?.items ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
+    () =>
+      (providerConnections.data?.items ?? [])
+        .filter((c) => OPENAI_SHAPED_CONNECTION_TYPES.has(c.type))
+        .sort((a, b) => a.name.localeCompare(b.name)),
     [providerConnections.data],
   );
 

@@ -49,6 +49,7 @@ export interface AgentEntry extends AgentReadinessLike {
   provides_capabilities?: string[];
   readiness_status?: "ready" | "unavailable";
   catalog_visibility?: "displayed" | "internal";
+  display_name?: string;
 }
 
 export interface LocalServerEntry {
