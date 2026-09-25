@@ -159,6 +159,21 @@ projected workload token. The personal renderer disables token automount and emi
 no token projection or workload RBAC, and management must use qualified rendered
 inputs. This authority is not a sandbox for arbitrary manager-supplied templates.
 
+For application shutdown, `application_pod_fence` renders the fixed
+`loom-application-retired` ResourceQuota with `hard.pods: 0`. Its admission rule
+requires namespace-matching application/incarnation/data/install identities, no
+quota scopes or scope selector, and a positive deployment generation plus operation
+UUID. Updates cannot lower the generation or change the operation at the same
+generation. The manager may create only that form and may get/patch/delete only
+that quota name; it gains no general quota, shared-namespace or worker authority.
+
+The quota blocks new Pods, including delayed controller creations; it does not
+stop existing processes. A provider must observe enforcement, stop routing and
+controllers, verify Pod shutdown, and revoke credentials/connections before it
+claims retirement or releases resources. Reopening admission requires its recorded
+UID/resourceVersion delete preconditions after prior-generation retirement. No
+installer or lifecycle worker activates this primitive yet.
+
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
 and only then grant bootstrap authority. The manager must still authenticate owners,

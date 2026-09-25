@@ -41,6 +41,16 @@ def _exercise_pod_fence(http, core, authority, registration, rendered):
     fence = application_pod_fence(authority, registration, operation_id=uuid4())
     ns = registration.application_namespace
     path = "/api/v1/namespaces/" + ns + "/resourcequotas"
+    invalid = copy.deepcopy(fence)
+    invalid["metadata"]["name"] = "arbitrary-quota"
+    deadline = time.monotonic() + 20
+    while True:
+        observed = http.post(path + "?dryRun=All", json=invalid)
+        if observed.status_code == 403 and "application pod-fence boundary" in observed.text:
+            break
+        assert observed.status_code in (201, 403), observed.text
+        assert time.monotonic() < deadline, "Pod-fence admission not effective"
+        time.sleep(0.1)
     for change in ("name", "pods", "scopes", "selector", "extra-resource", "owner", "generation", "nil-operation"):
         invalid = copy.deepcopy(fence)
         if change == "name":
@@ -65,6 +75,14 @@ def _exercise_pod_fence(http, core, authority, registration, rendered):
     created = http.post(path, json=fence)
     assert created.status_code == 201, created.text
     resource = path + "/loom-application-retired"
+    assert http.get(path + "/arbitrary-quota").status_code == 403
+    assert http.delete(path + "/arbitrary-quota").status_code == 403
+    # Scope changes are already immutable at the API layer; CREATE above proves
+    # our policy denies scoped quotas. Exercise mutable UPDATE fields here.
+    for patch in ({"spec": {"hard": {"pods": "1"}}},
+                  {"metadata": {"labels": {"loom.nebius/incarnation": str(uuid4())}}}):
+        denied = http.patch(resource, json=patch, headers={"Content-Type": "application/merge-patch+json"})
+        assert denied.status_code == 403 and "application pod-fence boundary" in denied.text, denied.text
     deadline = time.monotonic() + 20
     while True:
         observed = http.get(resource)
@@ -81,16 +99,31 @@ def _exercise_pod_fence(http, core, authority, registration, rendered):
     changed = http.patch(resource, json={"metadata": {"annotations": annotations}},
                          headers={"Content-Type": "application/merge-patch+json"})
     assert changed.status_code == 200, changed.text
+    replay = http.patch(resource, json={"metadata": {"annotations": annotations}},
+                        headers={"Content-Type": "application/merge-patch+json"})
+    assert replay.status_code == 200, replay.text
     denied = http.patch(resource, json={"metadata": {"annotations": fence["metadata"]["annotations"]}},
                         headers={"Content-Type": "application/merge-patch+json"})
     assert denied.status_code == 403, denied.text
     # Use operator authority to isolate ResourceQuota from manager RBAC denial.
     pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "fence-probe"},
            "spec": copy.deepcopy(named(rendered, "Deployment", "loom-service")["spec"]["template"]["spec"])}
-    with pytest.raises(ApiException) as rejected:
-        core.create_namespaced_pod(ns, pod, dry_run="All")
-    assert rejected.value.status == 403 and "exceeded quota: loom-application-retired" in rejected.value.body
-    metadata = changed.json()["metadata"]
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            core.create_namespaced_pod(ns, pod, dry_run="All")
+        except ApiException as rejected:
+            assert rejected.status == 403 and "exceeded quota: loom-application-retired" in rejected.body, rejected.body
+            break
+        assert time.monotonic() < deadline, "zero-Pod quota not enforced"
+        time.sleep(0.1)
+    # Neither a replaced UID nor the earlier generation's version can reopen it.
+    for stale in ({"uid": str(uuid4())}, {
+        "uid": created.json()["metadata"]["uid"], "resourceVersion": created.json()["metadata"]["resourceVersion"],
+    }):
+        wrong = http.request("DELETE", resource, json={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": stale})
+        assert wrong.status_code == 409, wrong.text
+    metadata = http.get(resource).json()["metadata"]
     removed = http.request("DELETE", resource, json={"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {
         "uid": metadata["uid"], "resourceVersion": metadata["resourceVersion"],
     }})
@@ -140,7 +173,11 @@ def test_application_manager_can_manage_apps_but_not_shared_or_legacy_resources(
         while True:
             observed = [admission.read_validating_admission_policy(name) for name in policies]
             if all(item.status and item.status.type_checking for item in observed):
-                assert all(not item.status.type_checking.expression_warnings for item in observed)
+                warnings = {item.metadata.name: [line for warning in item.status.type_checking.expression_warnings
+                                                 for line in warning.warning.splitlines() if line.startswith("ERROR:")]
+                            for item in observed
+                            if item.status.type_checking.expression_warnings}
+                assert not warnings, repr(warnings)
                 break
             assert time.monotonic() < deadline, "application policies were not type-checked"
             time.sleep(0.1)
