@@ -13,6 +13,7 @@ from loom.db.nebius_application_operation_schema import (
     NebiusApplicationReservation,
 )
 from loom_service.environment_management.registry import ManagementError
+from tests.integration.test_nebius_application_operations import _next_plan, _observed_complete
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
@@ -237,6 +238,63 @@ async def test_retained_historical_fixed_name_plan_is_not_silently_rewritten(app
     effect = await registry.prepare_effect(lease, "old-db", intent(plan, api_version="v1", kind="Secret",
         name="loom-application-db", action="delete", uid="historical-uid", resource_version="4"))
     assert effect.intent.name == "loom-application-db"
+
+
+@pytest.mark.parametrize("action", ["update", "resume", "suspend", "destroy_retained"])
+async def test_current_lease_can_only_delete_own_prior_generation_material(applications, platform_inputs, action):
+    registry, factory, alice, plan, first, first_lease = await started(applications)
+    original_files = copy.deepcopy((await registry.frozen_plan(first_lease))["files"])
+    _, _, _, prepare, _, _ = applications
+    sibling_plan = prepare("alice-feature", alice)
+    sibling = await registry.create(principal=alice, idempotency_key="sibling", **sibling_plan)
+    await _observed_complete(factory, sibling.operation_id)
+    old_generations = [1]
+    if action == "resume":
+        stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="suspend",
+            action="suspend", expected_generation=1)
+        await _observed_complete(factory, stopped.operation_id)
+        newer = _next_plan(plan, platform_inputs, new_release=False, deployment_generation=3, access_generation=3)
+        current = await registry.transition(first.application_id, principal=alice, idempotency_key="resume",
+            action="resume", expected_generation=2, **newer)
+    else:
+        await _observed_complete(factory, first.operation_id)
+        newer = _next_plan(plan, platform_inputs)
+        current = await registry.transition(first.application_id, principal=alice, idempotency_key="update",
+            action="update", expected_generation=1, release_id=newer["release"].release_id, **newer)
+        if action != "update":
+            # Stop interrupts g2 before it has retired g1. Neither old lease can
+            # perform cleanup, so g3 must cover BOTH retained material generations.
+            current = await registry.transition(first.application_id, principal=alice, idempotency_key="stop-update",
+                action=action, expected_generation=2)
+            old_generations.append(2)
+    lease = await registry.claim(current.operation_id)
+    prefix = f"loom-application-db-{plan['prepared'].registration.incarnation.hex}"
+    old = intent(plan, api_version="v1", kind="Secret", name=prefix + "-g1", action="delete",
+                 uid="old-secret-uid", resource_version="2")
+    sibling_name = f"loom-application-db-{sibling_plan['prepared'].registration.incarnation.hex}-g1"
+    for change in (
+        {"action": "create", "uid": None, "resource_version": None}, {"action": "patch"},
+        {"uid": None}, {"resource_version": None}, {"namespace": "loom-shared"},
+        {"name": sibling_name}, {"name": prefix + "-g99"},
+    ):
+        with pytest.raises(ManagementError, match="invalid_application_effect"):
+            await registry.prepare_effect(lease, "invalid", old | change)
+    assert await registry.effect_history(lease) == []
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await registry.prepare_effect(first_lease, "stale-delete", old)
+    for generation in old_generations:
+        for purpose in ("db", "storage", "auth"):
+            name = f"loom-application-{purpose}-{plan['prepared'].registration.incarnation.hex}-g{generation}"
+            key = f"retire-{purpose}-{generation}"
+            effect = await registry.prepare_effect(lease, key, old | {"name": name})
+            assert effect.intent.name == name and effect.intent.action == "delete"
+            assert await registry.dispatch_effect(lease, key) is True
+            await registry.observe_effect(lease, key, uid="old-secret-uid", resource_version=None)
+    history = await registry.effect_history(lease)
+    assert len(history) == 3 * len(old_generations)
+    assert all(effect.phase == "observed" for effect in history)
+    async with factory() as session:
+        assert (await session.get(NebiusApplicationOperation, first.operation_id)).plan_json["files"] == original_files
 
 
 async def test_concurrent_distinct_intents_cannot_both_prepare_before_reconciliation(applications):
