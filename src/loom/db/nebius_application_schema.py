@@ -20,6 +20,7 @@ class NebiusApplication(Base):
     __tablename__ = "nebius_applications"
     __table_args__ = (
         UniqueConstraint("incarnation", name="nebius_application_incarnation_key"),
+        UniqueConstraint("application_id", "cluster_id", name="nebius_application_cluster_key"),
         Index("nebius_application_owner_idx", "owner_user_id", "desired_state"),
         CheckConstraint("deployment_generation > 0 AND access_generation > 0", name="nebius_application_generation_check"),
         CheckConstraint("desired_state IN ('active', 'suspended', 'destroyed')", name="nebius_application_state_check"),

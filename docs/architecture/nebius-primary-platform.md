@@ -193,13 +193,52 @@ arbitrary direct SQL writers are not an isolation boundary. The management role
 needs DML privileges on the claim table for invoker triggers, which the protected
 installer must verify before activating registration.
 
-These tables do not yet expose application management routes or run provisioning.
-Authenticated lifecycle operations, frozen plans, shared capacity reservations,
-credentials and late-effect fencing remain required. This is a real application
+These tables do not themselves expose application management routes or run provisioning.
+Credentials, qualified publication, shared access and late-effect fencing remain
+required before activation. This is a real application
 schema-head advance: shared deployment must coordinate migrations and compatible
 API versions through its protected workflow; personal APIs never run migrations.
 
+### Application intent and lease journal
+
+Migration `0161` adds separate application operation and platform reservation
+tables. The internal `ApplicationRegistry` authenticates owner/team and scope for
+create, update, suspend, resume, retained destroy, replay and progress reads. Its
+prepared-plan interface is for trusted management code, not HTTP owner payloads:
+publication and protected installation inputs must be qualified before calling it.
+No application management route or provider worker is activated by this layer.
+
+Idempotency fingerprints represent caller intent, not generated IDs or installation
+defaults. Replay returns the original operation without requiring a new publication
+lookup. Plans freeze application manifests, release metadata, shared execution/data
+bindings and measured platform costs; credentials do not belong in these plans.
+Update and resume need a completed predecessor and an exact next-generation plan.
+Suspend and destroy may supersede incomplete work. Owner, incarnation, names,
+cluster and data identity cannot change through these operations.
+
+Application and legacy reservations count against the same cluster platform
+allowance under its row lock. Applications reserve no persistent storage. Update
+retains the componentwise larger old/new hold; its future worker must retire the
+old process before starting the new one. Budget changes lock budget, application,
+then operation; lease-only operations lock application before operation. No external
+request occurs within these transactions. Downgrade refuses to erase operation or
+reservation history.
+
+Each transition advances deployment and access generations, preserves the original
+plan and records its predecessor, and invalidates the older lease. Lease checks
+bind application/incarnation, both generations, epoch, token and database-clock
+expiry. They are database progress fencing, **not** proof that a running API has
+stopped or an in-flight provider write cannot finish. This layer deliberately has
+no completion or reservation-release operation. Requested suspend/destroy retains
+capacity, names and shared data until future provider integration proves routing,
+Pod admission and process shutdown plus credential/connection retirement. Accepted
+shared tasks and shared users are never cancelled or revoked by these transactions.
+
 ## Managed environment identity and rendering
+
+This section describes the retained full-environment v1 format. New personal
+applications use the shared-data, application-only contracts above and do not own
+execution/build namespaces, databases or buckets.
 
 `loom.nebius_environment_contract` separates an environment's UUID/incarnation
 from its class (`development`, `staging`, `production`), owner and mutable
