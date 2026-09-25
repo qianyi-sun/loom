@@ -346,6 +346,11 @@ their environment, mounts and network settings must not disappear. Preserve
 supplied service fixtures and qualify their isolated images, network aliases,
 health checks, dependencies and verifier lifecycle; a packaged local service
 does not establish a missing external endpoint.
+After explicit package review, one self-contained service can use the
+[prepared fixture declaration](../architecture/nebius-service-execution.md):
+separate disjoint build contexts, a bounded non-root read-only service with no
+mounts, private task/verifier hostname resolution and an exact frozen build grant.
+This declaration does not translate arbitrary Compose overrides or dependencies.
 The report also identifies literal `echo`/`printf`-generated workspace shell
 scripts that invoke `pytest`, `python -m pytest`, or `uvx ... pytest` against a
 file in the bundled private `/tests` tree as `agent_private_verifier_dependency`.
