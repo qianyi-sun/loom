@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir --requirement deploy/execution-actuator-requireme
 COPY src/loom/__init__.py src/loom/execution_contract.py src/loom/execution_architecture.py \
     src/loom/execution_image_admission.py src/loom/execution_runtime_contract.py \
     src/loom/execution_diagnosis_store.py src/loom/execution_failure_diagnosis.py \
-    src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py \
+    src/loom/execution_requirements.py src/loom/mutable_paths.py src/loom/sandbox_identity.py src/loom/task_fixtures.py \
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
     src/loom/nebius_rollout_guard.py src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/
 COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execution_materialization.py \
@@ -40,8 +40,28 @@ COPY src/loom_execution_actuator ./src/loom_execution_actuator
 COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
 COPY database/migrations ./database/migrations
 USER 65532:65532
-# Source admission and failure diagnosis are imported lazily during claims and
-# observations. Exercise both dependency closures without credentials or connections.
-RUN python -c "import loom_execution_actuator.__main__; import loom_execution_capacity_collector.__main__; import loom.task_bundle_source_journal; import loom.execution_diagnosis_store"
+# Claims validate task models after imports complete. Exercise that lazy
+# dependency path as well, without credentials, connections or task execution.
+RUN python - <<'PY'
+import loom_execution_actuator.__main__
+import loom_execution_capacity_collector.__main__
+import loom.task_bundle_source_journal
+import loom.execution_diagnosis_store
+from loom.models.task import EnvironmentConfig, TaskSidecarConfig
+
+EnvironmentConfig(os="linux", docker_image="registry.example/task@sha256:" + "a" * 64)
+fixture = TaskSidecarConfig(
+    name="server", fixture=True, hostname="fixture.example",
+    dockerfile="fixtures/server/Dockerfile", docker_build_context="fixtures/server",
+    command=["python3", "/server.py"], ports=(23,),
+    cpus=0.1, memory_mb=128, storage_mb=128,
+    healthcheck={"command": "true", "interval_sec": 1, "timeout_sec": 1, "retries": 1},
+)
+EnvironmentConfig(
+    os="linux",
+    dockerfile="environment/Dockerfile", docker_build_context="environment",
+    sidecars=[fixture],
+)
+PY
 EXPOSE 8093
 CMD ["python", "-m", "loom_execution_actuator"]
