@@ -149,3 +149,55 @@ def test_runtime_fixture_shape_cannot_be_reinterpreted_as_trusted(changed: dict)
     payload["sidecars"][0].update(changed)
     with pytest.raises(ValueError):
         ExecutionRuntimePlanV1.model_validate(payload)
+
+
+def test_fixture_renderer_has_no_mounts_and_preserves_native_healthcheck() -> None:
+    from loom_execution_actuator.renderer import _sidecar
+
+    fixture = _plan().sidecars[0]
+    rendered = _sidecar(fixture)
+    assert rendered.get("volumeMounts", []) == []
+    assert rendered["securityContext"] == {
+        "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
+        "readOnlyRootFilesystem": True, "runAsNonRoot": True,
+        "runAsUser": 65532, "runAsGroup": 65532,
+    }
+    assert rendered["restartPolicy"] == "Always"
+    assert rendered["startupProbe"] == {
+        "exec": {"command": ["/bin/sh", "-c", "python3 /healthcheck.py"]},
+        "initialDelaySeconds": 5, "timeoutSeconds": 5, "periodSeconds": 2, "failureThreshold": 15,
+    }
+    assert rendered["readinessProbe"] == {
+        "exec": {"command": ["/bin/sh", "-c", "python3 /healthcheck.py"]},
+        "timeoutSeconds": 5, "periodSeconds": 2, "failureThreshold": 15,
+    }
+    assert rendered["resources"]["requests"] == rendered["resources"]["limits"] == {
+        "cpu": "100m", "memory": "128Mi", "ephemeral-storage": "128Mi",
+    }
+    assert not rendered.get("env") and not rendered.get("envFrom")
+
+
+def test_fixture_job_orders_native_roles_without_pod_wide_hostname_aliases() -> None:
+    from loom.execution_contract import workload_requirements_from_task
+    from loom.pipeline.keys import canonical_digest
+    from loom.task_image_materialization import resolve_prepared_task
+    from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
+    from tests.unit.test_execution_actuator import _lease
+
+    task, trial, profile, grant = _prepared()
+    plan = compile_service_execution_plan(task=task, trial=trial, profile=profile,
+        task_image_grant=grant, source_provenance=_provenance(), task_revision_sha256="sha256:" + "2" * 64)
+    lease = _lease()
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+    lease.workload_requirements_json = workload_requirements_from_task(resolve_prepared_task(task, grant)).model_dump(mode="json")
+    lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
+    pod = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=lease.namespace_name,
+    ))["spec"]["template"]["spec"]
+    assert [item["name"] for item in pod["initContainers"]] == [
+        "runtime-materializer", "fixture-server", "task-sandbox", "verifier-sandbox",
+    ]
+    assert "hostAliases" not in pod and "hostname" not in pod
+    assert not pod["initContainers"][1].get("volumeMounts")
+    assert pod["automountServiceAccountToken"] is False
