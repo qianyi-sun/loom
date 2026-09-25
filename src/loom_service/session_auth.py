@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from fastapi import HTTPException, Request
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.application_session import ApplicationSessionAudienceV1
 from loom.auth import AuthContext, role_scopes
 from loom.db.schema import LoginChallenge, Team, TeamMembership, User, UserSession
 from loom_service.config import LoomServiceSettings
@@ -48,6 +50,25 @@ class CookieOptions(TypedDict):
 def hash_secret(raw: str) -> bytes:
     """Hash raw session, CSRF, and login challenge secrets for storage."""
     return hashlib.sha256(raw.encode()).digest()
+
+
+def hash_browser_secret(
+    raw: str, *, audience: ApplicationSessionAudienceV1 | None,
+    purpose: Literal["session", "login_challenge"],
+) -> bytes:
+    """Bind a proof to protected process identity without a legacy fallback.
+
+    The non-UTF-8 prefix is intentional: a scoped preimage cannot be submitted
+    as a raw string to a legacy endpoint to obtain the same unscoped hash.
+    This changes neither API bearer tokens nor the per-session CSRF proof.
+    """
+    if audience is None:
+        return hash_secret(raw)
+    encoded = json.dumps([
+        audience.schema_version, str(audience.application_id), audience.origin,
+        audience.access_generation, purpose, raw,
+    ], separators=(",", ":")).encode()
+    return hashlib.sha256(b"\xffloom-browser-audience\x00" + encoded).digest()
 
 
 def normalize_email(email: str) -> str:
@@ -118,6 +139,7 @@ async def create_login_challenge(
     *,
     email: str,
     ttl_seconds: int,
+    audience: ApplicationSessionAudienceV1 | None = None,
 ) -> str | None:
     """Create a one-time login challenge for an existing user.
 
@@ -134,7 +156,7 @@ async def create_login_challenge(
     raw = _raw_secret("loom_login")
     now = datetime.now(UTC)
     await session.execute(insert(LoginChallenge).values(
-        challenge_hash=hash_secret(raw),
+        challenge_hash=hash_browser_secret(raw, audience=audience, purpose="login_challenge"),
         user_id=user.id,
         issued_at=now,
         expires_at=now + timedelta(seconds=ttl_seconds),
@@ -200,10 +222,13 @@ async def consume_login_challenge(
     *,
     raw_token: str,
     session_ttl_seconds: int,
+    audience: ApplicationSessionAudienceV1 | None = None,
 ) -> CreatedSession:
     challenge = (await session.execute(
         select(LoginChallenge).where(
-            LoginChallenge.challenge_hash == hash_secret(raw_token),
+            LoginChallenge.challenge_hash == hash_browser_secret(
+                raw_token, audience=audience, purpose="login_challenge",
+            ),
             LoginChallenge.consumed_at.is_(None),
         ).with_for_update(),
     )).scalar_one_or_none()
@@ -234,7 +259,7 @@ async def consume_login_challenge(
 
     raw_session = _raw_secret("loom_session")
     raw_csrf = _raw_secret("loom_csrf")
-    session_hash = hash_secret(raw_session)
+    session_hash = hash_browser_secret(raw_session, audience=audience, purpose="session")
     user_session = UserSession(
         session_hash=session_hash,
         user_id=user.id,
@@ -266,6 +291,7 @@ async def create_session_for_user(
     user: User,
     session_ttl_seconds: int,
     current_team_id: UUID | None = None,
+    audience: ApplicationSessionAudienceV1 | None = None,
 ) -> CreatedSession:
     """Create a browser session after a trusted onboarding action.
 
@@ -292,7 +318,7 @@ async def create_session_for_user(
     raw_session = _raw_secret("loom_session")
     raw_csrf = _raw_secret("loom_csrf")
     user_session = UserSession(
-        session_hash=hash_secret(raw_session),
+        session_hash=hash_browser_secret(raw_session, audience=audience, purpose="session"),
         user_id=user.id,
         current_team_id=team_id,
         csrf_hash=hash_secret(raw_csrf),
@@ -345,6 +371,7 @@ async def accessible_teams(
 
 async def verify_session_cookie(
     session: AsyncSession, raw_cookie: str | None,
+    *, audience: ApplicationSessionAudienceV1 | None = None,
 ) -> AuthContext | None:
     # Retired credentials must never gain ordinary-session write authority.
     if not raw_cookie or raw_cookie.startswith("loom_session_staging_admin_"):
@@ -353,7 +380,9 @@ async def verify_session_cookie(
     row = (await session.execute(
         select(UserSession, User)
         .join(User, User.id == UserSession.user_id)
-        .where(UserSession.session_hash == hash_secret(raw_cookie)),
+        .where(UserSession.session_hash == hash_browser_secret(
+            raw_cookie, audience=audience, purpose="session",
+        )),
     )).first()
     if row is None:
         return None
@@ -415,6 +444,7 @@ async def refresh_session(
     *,
     ctx: AuthContext,
     session_ttl_seconds: int,
+    audience: ApplicationSessionAudienceV1 | None = None,
 ) -> RefreshedSession:
     if ctx.session_hash is None:
         raise HTTPException(status_code=401, detail="missing browser session")
@@ -425,7 +455,7 @@ async def refresh_session(
         update(UserSession)
         .where(UserSession.session_hash == ctx.session_hash)
         .values(
-            session_hash=hash_secret(raw_session),
+            session_hash=hash_browser_secret(raw_session, audience=audience, purpose="session"),
             csrf_hash=hash_secret(raw_csrf),
             expires_at=now + timedelta(seconds=session_ttl_seconds),
             last_seen_at=now,
