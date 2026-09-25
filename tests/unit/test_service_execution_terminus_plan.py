@@ -56,6 +56,17 @@ def test_terminus_plan_preserves_task_environment_and_has_fresh_private_verifier
     assert plan.agent_image_ref == _CONTROLLER
     assert plan.task_image_ref == task.environment.docker_image
     assert [s.role_name for s in plan.sidecars] == ["task-sandbox", "verifier-sandbox"]
+
+
+def test_shared_terminus_plan_omits_idle_verifier_sidecar():
+    task, trial, profile = _inputs()
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    assert not automatic_service_execution_rejections(task, trial, source_provenance=_provenance())
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
     assert all(s.private_sandbox and s.image_ref == _TASK_IMAGE for s in plan.sidecars)
     assert plan.main.argv[4] == "terminus-2"
     assert plan.verifier.argv[4] == "verify-sandbox"

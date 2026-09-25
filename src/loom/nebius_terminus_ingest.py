@@ -208,7 +208,10 @@ def adapt_bundle_for_nebius_terminus(
 
     verifier_identity_stripped = False
     verifier["name"] = verifier.get("name") or "script"
-    verifier["env_mode"] = "shared"
+    # Preserve an explicit Harbor environment_mode. Omission stays separate,
+    # which is the snapshot verifier. Do not rewrite that to shared.
+    if verifier.get("env_mode") not in {"shared", "separate"}:
+        verifier["env_mode"] = "separate"
     verifier_path_forced = verifier_args.get("script_path") != VERIFIER_SCRIPT_PATH
     verifier_args["script_path"] = VERIFIER_SCRIPT_PATH
     verifier["args"] = verifier_args
