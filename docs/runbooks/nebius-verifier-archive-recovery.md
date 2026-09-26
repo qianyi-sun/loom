@@ -2,7 +2,7 @@
 
 ## Native usage roundoff (#2199)
 
-Deploy the compatible Control Plane with migration `0162` before using
+Deploy the compatible Control Plane with migration `0163` before using
 `--reason usage-roundoff`. This is a storage-only recovery for a current-attempt,
 deleted, finalized Terminus execution whose immutable runtime outcome succeeded
 but whose canonical publication failed with `usage_output_identity_drift`.
@@ -28,7 +28,7 @@ errors are ineligible; a failed recovery retains the original Trial failure.
 
 Download the recovered bundle and check the original runtime result, reward,
 trace, call IDs, token accounting and unchanged attempt number before accepting
-the repair. A queued retry alone is not acceptance. Migration `0162` downgrade
+the repair. A queued retry alone is not acceptance. Migration `0163` downgrade
 removes admission for usage recovery while preserving existing recovery history.
 
 ## Legacy verifier projection

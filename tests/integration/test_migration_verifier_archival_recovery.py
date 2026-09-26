@@ -53,13 +53,13 @@ def test_usage_retry_guard_round_trip(isolated_migration_postgres_url: str) -> N
     engine = create_engine(isolated_migration_postgres_url)
     query = text("SELECT pg_get_functiondef(to_regprocedure('validate_execution_lease_mutation()'))")
     try:
-        command.downgrade(config, "0161")
+        command.downgrade(config, "0162")
         with engine.connect() as connection:
             before = connection.scalar(query)
-        command.upgrade(config, "0162")
+        command.upgrade(config, "0163")
         with engine.connect() as connection:
             assert "usage_output_identity_drift" in connection.scalar(query)
-        command.downgrade(config, "0161")
+        command.downgrade(config, "0162")
         with engine.connect() as connection:
             assert connection.scalar(query) == before
         command.upgrade(config, "head")

@@ -10,7 +10,7 @@ The September 24 private packages need task-owned environment declarations:
 Prepare each new revision from its downloaded immutable source:
 
 ```sh
-uv run python scripts/ops/repair_quality_task_declarations.py \
+uv run --no-sync python scripts/ops/repair_quality_task_declarations.py \
   --source /path/to/original-task --output /path/to/new-task-revision
 ```
 

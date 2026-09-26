@@ -580,7 +580,7 @@ failed recovery, preserves the Trial's original outcome, failure and finish time
 The legacy recovered bundle can be downloadable while the historical Trial still reports
 `output_unavailable`; its archive state separately reports `committed`.
 
-Migration `0162` additionally permits one storage-only retry for successful
+Migration `0163` additionally permits one storage-only retry for successful
 Terminus executions rejected by `usage_output_identity_drift` due to floating-point
 summation. Only cost and duration permit a call-count-bounded ULP difference;
 identities and token counts remain exact. Successful publication repairs the
